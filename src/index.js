@@ -17,6 +17,7 @@ import { loadOrCreateIdentity, acquireIdentityLock } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion } from './relay.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
+import { autoDetectRegion } from './geolocate.js';
 import { readFile } from 'node:fs/promises';
 
 const RELAY_VERSION = JSON.parse(
@@ -34,37 +35,57 @@ const DEFAULT_REGION = { lat: 37.77, lng: -122.42 };  // SF (us-west / uswest)
 
 /**
  * Resolve the desired region from env, precedence:
- *   RELAY_REGION (name like "useast" or code like "0x89")  >
- *   RELAY_LAT / RELAY_LNG  >  default SF.
- * Returns { lat, lng, code, label, source }.
+ *   RELAY_REGION = "auto"          → IP-geo, then timezone, then default
+ *   RELAY_REGION = name | code     → that region (e.g. "useast" / "0x89")
+ *   RELAY_LAT / RELAY_LNG          → by coordinate
+ *   (none)                         → default SF
+ * Returns { lat, lng, code, label, source, fileKey, notes[] }.
  */
-function resolveRegionConfig() {
-  const tok = process.env.RELAY_REGION;
-  if (tok != null && tok.trim() !== '') {
-    const code = resolveRegion(tok.trim());
+async function resolveRegionConfig() {
+  const notes = [];
+  const at = (lat, lng, source, fileKey) => {
+    const code = geoCellId(lat, lng, 8);
+    return { lat, lng, code, label: regionName(code), source, fileKey, notes };
+  };
+  const tok = (process.env.RELAY_REGION ?? '').trim();
+
+  if (tok.toLowerCase() === 'auto') {
+    const got = await autoDetectRegion({ log: (m) => notes.push(m) });
+    if (got) {
+      const r = at(got.lat, got.lng, got.source, 'auto');
+      notes.push(`detected ${r.label} (0x${r.code.toString(16)}) via ${got.source}` +
+        (got.detail ? ` — ${got.detail}` : ''));
+      return r;
+    }
+    notes.push('auto-detect unavailable; using default region');
+    return at(DEFAULT_REGION.lat, DEFAULT_REGION.lng, 'default(auto-failed)', 'auto');
+  }
+  if (tok !== '') {
+    const code = resolveRegion(tok);
     if (code == null) {
       console.error(`axona-relay: unknown RELAY_REGION "${tok}". ` +
-        `Use a region name (e.g. useast) or code (e.g. 0x89).`);
+        `Use "auto", a region name (e.g. useast), or a code (e.g. 0x89).`);
       process.exit(1);
     }
     const c = geoCellCenter(code);
-    return { lat: c.lat, lng: c.lng, code, label: regionName(code), source: 'RELAY_REGION' };
+    return { lat: c.lat, lng: c.lng, code, label: regionName(code), source: 'RELAY_REGION', fileKey: regionName(code), notes };
   }
   if (process.env.RELAY_LAT != null || process.env.RELAY_LNG != null) {
     const lat = Number(process.env.RELAY_LAT ?? DEFAULT_REGION.lat);
     const lng = Number(process.env.RELAY_LNG ?? DEFAULT_REGION.lng);
-    const code = geoCellId(lat, lng, 8);
-    return { lat, lng, code, label: regionName(code), source: 'latlng' };
+    const r = at(lat, lng, 'latlng', null);
+    return { ...r, fileKey: r.label };
   }
-  const code = geoCellId(DEFAULT_REGION.lat, DEFAULT_REGION.lng, 8);
-  return { ...DEFAULT_REGION, code, label: regionName(code), source: 'default' };
+  const r = at(DEFAULT_REGION.lat, DEFAULT_REGION.lng, 'default', null);
+  return { ...r, fileKey: r.label };
 }
 
 async function main() {
-  const cfg = resolveRegionConfig();
+  const cfg = await resolveRegionConfig();
   // Region-keyed default identity file, so two different regions never collide
   // on one file (and the same region intentionally shares — guarded by a lock).
-  const IDENTITY_PATH = process.env.RELAY_IDENTITY_PATH || `./identity.${cfg.label}.json`;
+  // 'auto' uses a fixed key so re-detection variance can't orphan the identity.
+  const IDENTITY_PATH = process.env.RELAY_IDENTITY_PATH || `./identity.${cfg.fileKey}.json`;
 
   // Exclusive lock: refuse to start a second relay on the same identity.
   let releaseLock;
@@ -86,6 +107,7 @@ async function main() {
     bridgeUrl: BRIDGE_URL, nodeId: identity.id, region,
     regionLabel, regionName,
   });
+  for (const n of cfg.notes) present.logLine(`{gray-fg}geo:{/} ${n}`);
   present.logLine(created
     ? `minted a new relay identity in ${regionLabel} (0x${regionCode})`
     : `loaded existing relay identity (${regionLabel} 0x${regionCode})`);

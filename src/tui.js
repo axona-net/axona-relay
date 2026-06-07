@@ -125,7 +125,11 @@ export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region
         `subs=${s.health.subscriptions}` +
         (s.health.meshDegraded ? ' DEGRADED' : ''));
     },
-    logLine(line) { console.log(`[${ts()}] ${line}`); },
+    logLine(line) { console.log(`[${ts()}] ${stripTags(line)}`); },
     destroy() {},
   };
 }
+
+// blessed inline tags ({red-fg}, {bold}, {/}) are dashboard-only; strip them
+// for the plain-log presenter so lines read cleanly in a terminal / journald.
+function stripTags(s) { return String(s).replace(/\{\/?[a-z0-9-]*\}/gi, ''); }

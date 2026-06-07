@@ -56,12 +56,13 @@ Quit the dashboard with **q** or **Ctrl-C**.
 | Var | Default | Meaning |
 |---|---|---|
 | `BRIDGE_URL` | `wss://testnet.axona.net` | Bridge for bootstrap + signaling |
-| `RELAY_REGION` | — | Region by **name** (`useast`) or code (`0x89`) — sets the nodeId's geo prefix |
+| `RELAY_REGION` | — | `auto` (detect), a region **name** (`useast`), or a code (`0x89`) — sets the nodeId's geo prefix |
 | `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`uswest`) |
 | `RELAY_IDENTITY_PATH` | `./identity.<region>.json` | Persisted keypair (stable nodeId). Default name is region-keyed |
 | `RELAY_TUI` | auto (`stdout.isTTY`) | `1` force dashboard, `0` force plain log |
 
 ```bash
+RELAY_REGION=auto   npm start                 # detect location (IP-geo → timezone)
 RELAY_REGION=useast npm start                 # nodeId anchored at us-east (0x89)
 BRIDGE_URL=wss://bridge.axona.net RELAY_LAT=40.71 RELAY_LNG=-74.0 npm start
 ```
@@ -70,6 +71,14 @@ Region precedence: `RELAY_REGION` › `RELAY_LAT`/`RELAY_LNG` › default SF. Th
 region resolves to the cell **center** coordinate, so `RELAY_REGION=useast`
 reliably mints a `0x89`-prefixed id. Region names are the protocol's 192
 canonical names (`regionName`/`resolveRegion`).
+
+**Auto-detection** (`RELAY_REGION=auto`, opt-in) discovers the relay's location:
+first an **IP-geolocation** HTTPS call (city-level — one outbound request to a
+public geo API, which sees your IP), falling back to the **OS timezone**
+(fully local, no network), then the default. It's only as precise as it needs
+to be — the 192 region cells are ~2000 km across. Auto identities persist to a
+fixed `identity.auto.json` (so re-detection variance never orphans the nodeId).
+The default (no `RELAY_REGION`) makes **no** network call.
 
 > The relay sends its **kernel** version (2.x) in the bridge handshake, which
 > clears the kernel-namespace floor (`MIN_KERNEL_VERSION`). It does **not** send
