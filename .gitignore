@@ -1,6 +1,7 @@
 node_modules/
-# the relay's persistent keypair — never commit private keys
-identity.relay.json
+# the relay's persistent keypair(s) — never commit private keys
+identity*.json
 *.identity.json
+*.json.lock
 npm-debug.log*
 .DS_Store

@@ -6,10 +6,47 @@
 // disk; on later runs we reload it. The file holds a private key — it is
 // git-ignored and should be chmod 600 in production.
 
-import { readFile, writeFile, chmod } from 'node:fs/promises';
+import { readFile, writeFile, chmod, open, unlink } from 'node:fs/promises';
 import {
   deriveIdentity, dumpIdentity, loadIdentity,
 } from '../vendor/axona-protocol/src/identity/index.js';
+
+function pidAlive(pid) {
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code === 'EPERM'; }  // exists but not ours
+}
+
+/**
+ * Take an exclusive lock on an identity so two relays can't silently run with
+ * the SAME keypair/nodeId (which collides in the mesh). Writes `<path>.lock`
+ * holding our pid; refuses if a live owner holds it; clears a stale one.
+ * @returns {Promise<() => Promise<void>>} release function
+ */
+export async function acquireIdentityLock(identityPath) {
+  const lockPath = identityPath + '.lock';
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const fh = await open(lockPath, 'wx');           // O_CREAT|O_EXCL
+      await fh.writeFile(String(process.pid));
+      await fh.close();
+      return async () => { try { await unlink(lockPath); } catch { /* */ } };
+    } catch (e) {
+      if (e.code !== 'EEXIST') throw e;
+      let pid = 0;
+      try { pid = parseInt(await readFile(lockPath, 'utf8'), 10) || 0; } catch { /* */ }
+      if (pid && pid !== process.pid && pidAlive(pid)) {
+        const err = new Error(
+          `identity "${identityPath}" is already in use by pid ${pid}. ` +
+          `To run another relay here, give it a different RELAY_REGION ` +
+          `or RELAY_IDENTITY_PATH.`);
+        err.code = 'IDENTITY_LOCKED';
+        throw err;
+      }
+      try { await unlink(lockPath); } catch { /* stale; retry */ }
+    }
+  }
+  throw new Error(`could not acquire identity lock for ${identityPath}`);
+}
 
 /**
  * @param {string} path  identity envelope file

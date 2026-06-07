@@ -56,18 +56,44 @@ Quit the dashboard with **q** or **Ctrl-C**.
 | Var | Default | Meaning |
 |---|---|---|
 | `BRIDGE_URL` | `wss://testnet.axona.net` | Bridge for bootstrap + signaling |
-| `RELAY_IDENTITY_PATH` | `./identity.relay.json` | Persisted keypair (stable nodeId) |
-| `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix for the nodeId (SF) |
+| `RELAY_REGION` | — | Region by **name** (`useast`) or code (`0x89`) — sets the nodeId's geo prefix |
+| `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`uswest`) |
+| `RELAY_IDENTITY_PATH` | `./identity.<region>.json` | Persisted keypair (stable nodeId). Default name is region-keyed |
 | `RELAY_TUI` | auto (`stdout.isTTY`) | `1` force dashboard, `0` force plain log |
 
 ```bash
+RELAY_REGION=useast npm start                 # nodeId anchored at us-east (0x89)
 BRIDGE_URL=wss://bridge.axona.net RELAY_LAT=40.71 RELAY_LNG=-74.0 npm start
 ```
 
+Region precedence: `RELAY_REGION` › `RELAY_LAT`/`RELAY_LNG` › default SF. The
+region resolves to the cell **center** coordinate, so `RELAY_REGION=useast`
+reliably mints a `0x89`-prefixed id. Region names are the protocol's 192
+canonical names (`regionName`/`resolveRegion`).
+
 > The relay sends its **kernel** version (2.x) in the bridge handshake, which
 > clears the kernel-namespace floor (`MIN_KERNEL_VERSION`). It does **not** send
-> a 0.x app version on the wire (that would be classified kernel-namespace and
-> rejected); the `0.1.0` app version is display-only.
+> its 0.x app version on the wire (that would be classified kernel-namespace and
+> rejected); the app version is display-only.
+
+### Running more than one relay
+
+Each relay needs its **own** identity. The default identity filename is
+region-keyed (`identity.uswest.json`, `identity.useast.json`, …), so relays in
+**different** regions just work:
+
+```bash
+RELAY_REGION=useast npm start    # terminal 1 → identity.useast.json
+RELAY_REGION=uknorth npm start   # terminal 2 → identity.uknorth.json   (britain)
+```
+
+Two relays sharing one identity file would collide on the same nodeId, so the
+relay takes an **exclusive lock** (`<identity>.lock`) on startup and refuses to
+start a second instance on the same identity — give it a different
+`RELAY_REGION` or `RELAY_IDENTITY_PATH`. (The region is baked into the persisted
+identity; once the file exists, changing `RELAY_REGION`/`RELAY_LAT` is ignored
+for that file and the relay warns — delete the file or point at a new path to
+re-mint.)
 
 ## Identity
 
