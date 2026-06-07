@@ -13,7 +13,7 @@
 
 import './polyfill.js';                 // MUST be first — installs RTCPeerConnection/WebSocket
 import { cleanupWebRTC } from './polyfill.js';
-import { loadOrCreateIdentity, acquireIdentityLock } from './identity.js';
+import { loadOrCreateIdentity, acquireIdentityLock, createEphemeralIdentity } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion } from './relay.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
@@ -87,16 +87,20 @@ async function main() {
   // 'auto' uses a fixed key so re-detection variance can't orphan the identity.
   const IDENTITY_PATH = process.env.RELAY_IDENTITY_PATH || `./identity.${cfg.fileKey}.json`;
 
-  // Exclusive lock: refuse to start a second relay on the same identity.
-  let releaseLock;
+  // The first instance claims the KNOWN persistent identity (stable nodeId
+  // across restarts). If it's already in use, we don't refuse — we run as an
+  // ADDITIONAL node: a fresh ephemeral identity in the same region (unique
+  // nodeId, not persisted). So `npm start` again just adds a node.
+  let releaseLock, identity, created = false, mode;
   try {
     releaseLock = await acquireIdentityLock(IDENTITY_PATH);
+    ({ identity, created } = await loadOrCreateIdentity(IDENTITY_PATH, { lat: cfg.lat, lng: cfg.lng }));
+    mode = 'primary';
   } catch (e) {
-    if (e.code === 'IDENTITY_LOCKED') { console.error('axona-relay:', e.message); process.exit(1); }
-    throw e;
+    if (e.code !== 'IDENTITY_LOCKED') throw e;
+    identity = await createEphemeralIdentity({ lat: cfg.lat, lng: cfg.lng });
+    mode = 'additional';
   }
-
-  const { identity, created } = await loadOrCreateIdentity(IDENTITY_PATH, { lat: cfg.lat, lng: cfg.lng });
   const region      = identity.region ?? cfg;
   const regionCodeN = geoCellId(region.lat, region.lng, 8);
   const regionCode  = regionCodeN.toString(16).padStart(2, '0');
@@ -105,16 +109,20 @@ async function main() {
   const present = (USE_TUI ? makeDashboard : makePlainLog)({
     version: RELAY_VERSION, kernelVersion: KERNEL_VERSION,
     bridgeUrl: BRIDGE_URL, nodeId: identity.id, region,
-    regionLabel, regionName,
+    regionLabel, regionName, mode,
   });
   for (const n of cfg.notes) present.logLine(`{gray-fg}geo:{/} ${n}`);
-  present.logLine(created
-    ? `minted a new relay identity in ${regionLabel} (0x${regionCode})`
-    : `loaded existing relay identity (${regionLabel} 0x${regionCode})`);
+  present.logLine(
+    mode === 'additional'
+      ? `{cyan-fg}ADDITIONAL node{/} — known identity in use; minted an ephemeral ` +
+        `id in ${regionLabel} (0x${regionCode}), not persisted`
+      : created
+        ? `{green-fg}PRIMARY node{/} — minted a new known identity in ${regionLabel} (0x${regionCode})`
+        : `{green-fg}PRIMARY node{/} — loaded known identity (${regionLabel} 0x${regionCode})`);
 
   // Sticky-region warning: the region is baked into the persisted identity, so
   // an explicit region request is ignored once the file exists.
-  if (!created && cfg.source !== 'default' && regionCodeN !== cfg.code) {
+  if (mode === 'primary' && !created && cfg.source !== 'default' && regionCodeN !== cfg.code) {
     present.logLine(`{yellow-fg}WRN{/} identity file pins region ${regionLabel} (0x${regionCode}); ` +
       `requested ${cfg.label} (0x${cfg.code.toString(16)}) ignored — delete ${IDENTITY_PATH} ` +
       `or set RELAY_IDENTITY_PATH to re-mint`);

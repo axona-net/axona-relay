@@ -21,7 +21,8 @@ const stateColor = (st) =>
   st === 'open' ? '{green-fg}' : st === 'connecting' ? '{yellow-fg}' : '{red-fg}';
 
 // ── Full-screen dashboard ────────────────────────────────────────────
-export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel, regionName }) {
+export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel, regionName, mode }) {
+  const modeBadge = mode === 'additional' ? '{cyan-fg}ADDITIONAL{/}' : '{green-fg}PRIMARY{/}';
   const regionOf = (peerId) => {
     const b = parseInt(String(peerId).slice(0, 2), 16);
     return (Number.isFinite(b) && regionName ? regionName(b) : null) || `0x${String(peerId).slice(0, 2)}`;
@@ -72,7 +73,7 @@ export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, regio
       const t = s.health.transport || {};
       const bs = t.bridgeState || 'down';
       header.setContent(
-        `{bold}{cyan-fg}axona-relay{/} v${version}  ·  kernel v${kernelVersion}  ·  up ${fmtDur(s.uptimeMs)}\n` +
+        `{bold}{cyan-fg}axona-relay{/} v${version}  ·  ${modeBadge}  ·  kernel v${kernelVersion}  ·  up ${fmtDur(s.uptimeMs)}\n` +
         `node  {bold}${short(nodeId, 10, 6)}{/}   region {bold}${regionLabel}{/} ` +
         `${region.lat.toFixed(2)},${region.lng.toFixed(2)} (0x${s.regionCode})\n` +
         `bridge ${bridgeUrl}   state ${stateColor(bs)}${bs}{/}` +
@@ -108,9 +109,9 @@ export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, regio
 }
 
 // ── Plain log presenter (no TTY) ─────────────────────────────────────
-export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel }) {
+export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel, mode }) {
   const ts = () => new Date().toISOString().slice(11, 19);
-  console.log(`[${ts()}] axona-relay v${version} (kernel v${kernelVersion})`);
+  console.log(`[${ts()}] axona-relay v${version} [${(mode || 'primary').toUpperCase()}] (kernel v${kernelVersion})`);
   console.log(`[${ts()}] node ${nodeId}`);
   console.log(`[${ts()}] region ${regionLabel ?? '?'} (${region.lat},${region.lng})  bridge ${bridgeUrl}`);
   return {

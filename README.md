@@ -87,22 +87,29 @@ The default (no `RELAY_REGION`) makes **no** network call.
 
 ### Running more than one relay
 
-Each relay needs its **own** identity. The default identity filename is
-region-keyed (`identity.uswest.json`, `identity.useast.json`, …), so relays in
-**different** regions just work:
+Just run it again — **no extra input needed**:
 
 ```bash
-RELAY_REGION=useast npm start    # terminal 1 → identity.useast.json
-RELAY_REGION=uknorth npm start   # terminal 2 → identity.uknorth.json   (britain)
+npm start    # terminal 1 → PRIMARY: the known, persistent node
+npm start    # terminal 2 → ADDITIONAL: a fresh ephemeral node, same region
+npm start    # terminal 3 → ADDITIONAL: another one …
 ```
 
-Two relays sharing one identity file would collide on the same nodeId, so the
-relay takes an **exclusive lock** (`<identity>.lock`) on startup and refuses to
-start a second instance on the same identity — give it a different
-`RELAY_REGION` or `RELAY_IDENTITY_PATH`. (The region is baked into the persisted
-identity; once the file exists, changing `RELAY_REGION`/`RELAY_LAT` is ignored
-for that file and the relay warns — delete the file or point at a new path to
-re-mint.)
+The **first** instance claims the known persistent identity (stable nodeId
+across restarts; `identity.<region>.json`, guarded by `<identity>.lock`). Any
+**additional** instance sees that identity is in use and, instead of refusing,
+mints a **fresh ephemeral identity** in the same region — a unique nodeId, not
+written to disk. So you always have one well-known node plus as many throwaway
+nodes as you like for testing and extra capacity; the header/log marks each
+**PRIMARY** or **ADDITIONAL**.
+
+You can still pin a *second persistent, known* node by giving it its own region
+or path: `RELAY_REGION=uknorth npm start` (→ `identity.uknorth.json`) or
+`RELAY_IDENTITY_PATH=./identity.b.json npm start`.
+
+(The region is baked into a persisted identity; once its file exists, changing
+`RELAY_REGION`/`RELAY_LAT` for that file is ignored and the relay warns — delete
+the file or use a new path to re-mint.)
 
 ## Identity
 

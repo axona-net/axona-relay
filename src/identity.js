@@ -49,6 +49,18 @@ export async function acquireIdentityLock(identityPath) {
 }
 
 /**
+ * Mint a fresh, in-memory identity in `region` — never written to disk. Used
+ * for "additional" nodes when the persistent (known) identity is already in
+ * use: each gets a unique nodeId sharing the region prefix. Non-extractable
+ * signing key (it's never persisted, so it never needs exporting).
+ * @param {{lat:number, lng:number}} region
+ * @returns {Promise<object>} Identity
+ */
+export async function createEphemeralIdentity(region) {
+  return deriveIdentity({ ...region, extractable: false });
+}
+
+/**
  * @param {string} path  identity envelope file
  * @param {{lat:number, lng:number}} region  geo prefix for the nodeId
  * @returns {Promise<{ identity: object, created: boolean }>}
