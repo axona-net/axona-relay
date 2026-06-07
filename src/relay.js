@@ -13,7 +13,7 @@
 // It does NOT run a public WS server, mint TURN, or gate admission — those
 // are bridge-only roles.
 
-import { AxonaPeer, AxonaDomain, NeuronNode }
+import { AxonaPeer, AxonaDomain, NeuronNode, regionName }
   from '../vendor/axona-protocol/src/index.js';
 import { webTransport }
   from '../vendor/axona-protocol/src/transport/web/index.js';
@@ -21,7 +21,7 @@ import { KERNEL_VERSION }
   from '../vendor/axona-protocol/src/transport/handshake.js';
 import { WebSocketImpl } from './polyfill.js';
 
-export { KERNEL_VERSION };
+export { KERNEL_VERSION, regionName };
 
 /**
  * Build (but do not start) the relay peer.

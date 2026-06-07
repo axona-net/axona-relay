@@ -14,7 +14,7 @@
 import './polyfill.js';                 // MUST be first — installs RTCPeerConnection/WebSocket
 import { cleanupWebRTC } from './polyfill.js';
 import { loadOrCreateIdentity } from './identity.js';
-import { createRelay, startRelay, stopRelay, KERNEL_VERSION } from './relay.js';
+import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName } from './relay.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId } from '../vendor/axona-protocol/src/utils/s2.js';
 import { readFile } from 'node:fs/promises';
@@ -37,12 +37,15 @@ const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|err
 
 async function main() {
   const { identity, created } = await loadOrCreateIdentity(IDENTITY_PATH, REGION);
-  const region     = identity.region ?? REGION;
-  const regionCode = geoCellId(region.lat, region.lng, 8).toString(16).padStart(2, '0');
+  const region      = identity.region ?? REGION;
+  const regionCodeN = geoCellId(region.lat, region.lng, 8);
+  const regionCode  = regionCodeN.toString(16).padStart(2, '0');
+  const regionLabel = regionName(regionCodeN) ?? '?';
 
   const present = (USE_TUI ? makeDashboard : makePlainLog)({
     version: RELAY_VERSION, kernelVersion: KERNEL_VERSION,
     bridgeUrl: BRIDGE_URL, nodeId: identity.id, region,
+    regionLabel, regionName,
   });
   present.logLine(created ? 'minted a new relay identity' : 'loaded existing relay identity');
 

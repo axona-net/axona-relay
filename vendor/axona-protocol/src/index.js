@@ -205,6 +205,18 @@ export {
   S2_RESERVED_FROM,
 } from './utils/s2.js';
 
+// Canonical human-readable names for all 192 regions (the 8-bit S2 cell that
+// occupies the top byte of every id).  regionName(code)/regionCode(name) are a
+// bijection; resolveRegion() accepts a name OR a numeric code so a region name
+// can be used interchangeably with its code as a prefix.
+export {
+  REGION_NAMES,
+  regionName,
+  regionCode,
+  resolveRegion,
+  regionNameForLatLng,
+} from './utils/region-names.js';
+
 // axona/4 authenticated-identity handshake.  Re-exported so consumers
 // that drive their own channel lifecycle (the bridge's embedded peer,
 // the node transport, custom transports) can build/verify authenticated

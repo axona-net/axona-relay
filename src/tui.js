@@ -21,7 +21,11 @@ const stateColor = (st) =>
   st === 'open' ? '{green-fg}' : st === 'connecting' ? '{yellow-fg}' : '{red-fg}';
 
 // ── Full-screen dashboard ────────────────────────────────────────────
-export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, region }) {
+export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel, regionName }) {
+  const regionOf = (peerId) => {
+    const b = parseInt(String(peerId).slice(0, 2), 16);
+    return (Number.isFinite(b) && regionName ? regionName(b) : null) || `0x${String(peerId).slice(0, 2)}`;
+  };
   const screen = blessed.screen({ smartCSR: true, title: 'axona-relay', fullUnicode: true });
 
   const header = blessed.box({
@@ -69,14 +73,15 @@ export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, regio
       const bs = t.bridgeState || 'down';
       header.setContent(
         `{bold}{cyan-fg}axona-relay{/} v${version}  ·  kernel v${kernelVersion}  ·  up ${fmtDur(s.uptimeMs)}\n` +
-        `node  {bold}${short(nodeId, 10, 6)}{/}   region ${region.lat.toFixed(2)},${region.lng.toFixed(2)}  (code 0x${s.regionCode})\n` +
+        `node  {bold}${short(nodeId, 10, 6)}{/}   region {bold}${regionLabel}{/} ` +
+        `${region.lat.toFixed(2)},${region.lng.toFixed(2)} (0x${s.regionCode})\n` +
         `bridge ${bridgeUrl}   state ${stateColor(bs)}${bs}{/}` +
         (s.health.meshDegraded ? '   {red-fg}{bold}MESH DEGRADED{/}' : ''));
 
       const peers = s.health.peers || [];
       peersBox.setLabel(` Mesh peers (${peers.length}) `);
       peersBox.setContent(peers.length
-        ? peers.map((p, i) => `${String(i + 1).padStart(2)}. {green-fg}${short(p, 12, 6)}{/}  0x${String(p).slice(0, 2)}`).join('\n')
+        ? peers.map((p, i) => `${String(i + 1).padStart(2)}. {green-fg}${short(p, 12, 6)}{/}  {cyan-fg}${regionOf(p)}{/}`).join('\n')
         : '{gray-fg}— no mesh peers yet —{/}');
 
       statsBox.setContent(
@@ -103,11 +108,11 @@ export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, regio
 }
 
 // ── Plain log presenter (no TTY) ─────────────────────────────────────
-export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region }) {
+export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel }) {
   const ts = () => new Date().toISOString().slice(11, 19);
   console.log(`[${ts()}] axona-relay v${version} (kernel v${kernelVersion})`);
   console.log(`[${ts()}] node ${nodeId}`);
-  console.log(`[${ts()}] region ${region.lat},${region.lng}  bridge ${bridgeUrl}`);
+  console.log(`[${ts()}] region ${regionLabel ?? '?'} (${region.lat},${region.lng})  bridge ${bridgeUrl}`);
   return {
     update(s) {
       const t = s.health.transport || {};
