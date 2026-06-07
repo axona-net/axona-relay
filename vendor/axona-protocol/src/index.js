@@ -199,6 +199,8 @@ export {
   geoCellCenter,
   geoCellCorners,
   geoCellFace,
+  geoCellSubCenters,
+  geoCellHalf,
   isValidCellId,
   S2_FACES,
   S2_CELL_COUNT,
@@ -211,6 +213,7 @@ export {
 // can be used interchangeably with its code as a prefix.
 export {
   REGION_NAMES,
+  regionNames,
   regionName,
   regionCode,
   resolveRegion,
