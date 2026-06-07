@@ -5,6 +5,9 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
+**v0.6.0** on kernel **v2.31.0** (`axona/5` wire epoch). Defaults to the SF
+testnet ([testnet.axona.net](https://testnet.axona.net)).
+
 It runs the *same* kernel stack a browser peer runs (`webTransport` +
 `NeuronNode` + `AxonaDomain` + `AxonaPeer`) — the only difference is Node has no
 DOM, so we install a spec `RTCPeerConnection` from
