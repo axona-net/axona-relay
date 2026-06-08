@@ -5,7 +5,7 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
-**v0.6.0** on kernel **v2.31.0** (`axona/5` wire epoch). Defaults to the SF
+**v0.7.0** on kernel **v2.31.0** (`axona/5` wire epoch). Defaults to the SF
 testnet ([testnet.axona.net](https://testnet.axona.net)).
 
 It runs the *same* kernel stack a browser peer runs (`webTransport` +
@@ -155,6 +155,38 @@ of this, the CLI **interoperates with the live apps**: publishing to
 A `pub` round-trips through a real testnet root: a separate `sub --since all`
 on the same topic+region replays it back (verified end-to-end).
 
+## Native MCP tool (Claude Code & other agents)
+
+`src/mcp.js` is a [Model Context Protocol](https://modelcontextprotocol.io)
+server (stdio) that exposes the same operations as **first-class agent tools**
+— so Claude Code gets `axona_publish` / `axona_subscribe` / `axona_pull`
+directly, instead of shelling out to the CLI. Each call connects a fresh
+ephemeral peer through the bridge (via `src/ops.js`, the shared core behind both
+the CLI and this server), does one job, tears down, and returns JSON.
+
+| Tool | Args | Returns |
+|---|---|---|
+| `axona_publish` | `topic`, `message`, `region?` | `{ ok, msgId, … }` |
+| `axona_subscribe` | `topic`, `region?`, `seconds?` (1–120), `since?` (`all`\|`new`) | `{ received, messages[] }` |
+| `axona_pull` | `topic`, `region?` | `{ found, message, msgId }` |
+
+Register it as a project-scoped MCP server — a `.mcp.json` at your project root:
+
+```json
+{
+  "mcpServers": {
+    "axona": { "command": "node", "args": ["/abs/path/to/axona-relay/src/mcp.js"] }
+  }
+}
+```
+
+or `claude mcp add axona -- node /abs/path/to/axona-relay/src/mcp.js`. Claude
+Code loads MCP servers at startup and prompts once to approve a new
+project-scoped server, so **restart / reconnect** after adding it; the tools
+then appear as `mcp__axona__axona_publish`, etc. (Also exposed as the
+`axona-mcp` bin.) Topic/region semantics and live-app interop are identical to
+the CLI above.
+
 ## Identity
 
 On first run the relay derives an Ed25519 keypair and writes the envelope to
@@ -211,7 +243,9 @@ src/
   relay.js      assemble + start the AxonaPeer mesh relay
   tui.js        blessed dashboard  +  plain-log presenter
   index.js      entrypoint: env config, wiring, render loop, graceful shutdown
+  ops.js        shared connect + publish/subscribe/pull core (used by cli + mcp)
   cli.js        one-shot headless pub/sub/pull (JSON out) for scripts & agents
+  mcp.js        MCP stdio server — axona_publish/subscribe/pull as native tools
 vendor/axona-protocol/   pinned kernel copy (refresh via npm run sync:protocol)
 scripts/sync-protocol.sh
 ```
