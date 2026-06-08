@@ -114,6 +114,47 @@ or path: `RELAY_REGION=uknorth npm start` (→ `identity.uknorth.json`) or
 `RELAY_REGION`/`RELAY_LAT` for that file is ignored and the relay warns — delete
 the file or use a new path to re-mint.)
 
+## Publish / subscribe from the command line (scripts & agents)
+
+`src/cli.js` is a one-shot, headless pub/sub client built on the same connect
+machinery as the relay. It connects with an **ephemeral** identity (no lock, no
+persisted key — so it never collides with a running relay), does one job, prints
+**JSON to stdout** (logs go to stderr), and exits. That makes it drivable from a
+shell, a script, or an AI agent like Claude Code.
+
+```bash
+# publish (prints {ok, msgId, …})
+node src/cli.js pub  "claude/test" "hello from a script"
+
+# subscribe — stream matching messages as JSON lines for N seconds
+node src/cli.js sub  "claude/test" --for 25 --since all
+
+# fetch just the latest message on a topic
+node src/cli.js pull "claude/test"
+```
+
+Also wired as npm scripts (`npm run pub -- "<topic>" "<msg>"`) and a `bin`
+(`axona-cli` after `npm link`).
+
+**Topic + region.** The topic string is used verbatim and anchored at a
+**synthetic region publisher** (`<s2-prefix>‖0²⁵⁶`), exactly as `axona-peer`
+and the kernel demo do. Both sides must use the same `--region` (default
+`useast` / `0x89`) or they derive different topic IDs and never meet. Because
+of this, the CLI **interoperates with the live apps**: publishing to
+`us-east/hello-world` shows up in the [axona.net](https://axona.net) /
+`demo-testnet.axona.net` feed, and vice-versa.
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--region <name\|code>` | `useast` | synthetic-publisher region (e.g. `uknorth`, `0x44`) |
+| `--for <seconds>` | `25` | `sub`: how long to listen |
+| `--since <all\|new>` | `all` | `sub`: replay backlog, or live-only |
+| `--bridge <wss-url>` | `wss://testnet.axona.net` | bridge to bootstrap through (or `BRIDGE_URL`) |
+| `--ready-timeout <s>` | `30` | max wait for mesh readiness before giving up |
+
+A `pub` round-trips through a real testnet root: a separate `sub --since all`
+on the same topic+region replays it back (verified end-to-end).
+
 ## Identity
 
 On first run the relay derives an Ed25519 keypair and writes the envelope to
@@ -170,6 +211,7 @@ src/
   relay.js      assemble + start the AxonaPeer mesh relay
   tui.js        blessed dashboard  +  plain-log presenter
   index.js      entrypoint: env config, wiring, render loop, graceful shutdown
+  cli.js        one-shot headless pub/sub/pull (JSON out) for scripts & agents
 vendor/axona-protocol/   pinned kernel copy (refresh via npm run sync:protocol)
 scripts/sync-protocol.sh
 ```

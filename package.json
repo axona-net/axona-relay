@@ -4,12 +4,16 @@
   "description": "Headless Axona relay/supernode — a full mesh peer (WebRTC via node-datachannel) with a live console dashboard. A subset of the bridge: it routes, roots pub/sub, and relays signaling, but runs no public server and mints no TURN.",
   "type": "module",
   "bin": {
-    "axona-relay": "src/index.js"
+    "axona-relay": "src/index.js",
+    "axona-cli": "src/cli.js"
   },
   "scripts": {
     "start": "node src/index.js",
     "probe": "RELAY_TUI=0 node src/index.js",
-    "sync:protocol": "bash scripts/sync-protocol.sh"
+    "sync:protocol": "bash scripts/sync-protocol.sh",
+    "pub": "node src/cli.js pub",
+    "sub": "node src/cli.js sub",
+    "pull": "node src/cli.js pull"
   },
   "engines": {
     "node": ">=20"
