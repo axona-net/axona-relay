@@ -3,8 +3,9 @@
 //
 // Speaks MCP over stdio so an AI agent (Claude Code, etc.) gets first-class
 // tools — axona_publish / axona_subscribe / axona_pull — instead of shelling
-// out to the CLI. Each call connects a fresh ephemeral peer through the testnet
-// bridge (see ops.js), does one job, tears down, and returns JSON.
+// out to the CLI. Each call connects a fresh ephemeral peer to the live Axona
+// network (production by default; set RELAY_NETWORK / BRIDGE_URL — see ops.js /
+// network.js), does one job, tears down, and returns JSON.
 //
 // stdout is the JSON-RPC channel; all human logging goes to stderr.
 
@@ -24,7 +25,7 @@ const server = new McpServer({ name: 'axona', version: VERSION });
 
 server.tool(
   'axona_publish',
-  'Publish a message to a topic on the live Axona peer-to-peer network. Connects an ephemeral peer through the testnet bridge, publishes a signed envelope, and returns its msgId. Topics are anchored at a region (default "useast"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo-testnet feed.',
+  'Publish a message to a topic on the live Axona peer-to-peer network (production by default). Connects an ephemeral peer to the network, publishes a signed envelope, and returns its msgId. Topics are anchored at a region (default "useast"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo.axona.net feed.',
   {
     topic:   z.string().describe('Topic name, e.g. "us-east/hello-world" or "claude/test"'),
     message: z.string().describe('Message body to publish'),

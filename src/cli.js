@@ -16,7 +16,8 @@
 //                          with axona.net / the kernel demo)
 //   --for <seconds>        sub: how long to listen          (default 25)
 //   --since <all|new>      sub: replay backlog or live-only  (default all)
-//   --bridge <wss-url>     override BRIDGE_URL (default wss://testnet.axona.net)
+//   --network <prod|testnet>  which network to bootstrap from (default prod)
+//   --bridge <wss-url>     explicit bridge URL (overrides --network / BRIDGE_URL)
 //   --ready-timeout <sec>  max wait for mesh readiness       (default 30)
 //
 // Topic convention: the topic string is used verbatim (the demo uses
@@ -29,12 +30,13 @@ import { cleanupWebRTC } from './polyfill.js';
 import { createEphemeralIdentity } from './identity.js';
 import { createRelay, startRelay, stopRelay } from './relay.js';
 import { regionName, resolveRegion } from './relay.js';
+import { resolveBridgeUrl } from './network.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
 
 // ── arg parsing ──────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const cmd  = argv[0];
-const opts = { region: 'useast', for: 25, since: 'all', bridge: process.env.BRIDGE_URL || 'wss://testnet.axona.net', 'ready-timeout': 30 };
+const opts = { region: 'useast', for: 25, since: 'all', 'ready-timeout': 30 };
 const positional = [];
 for (let i = 1; i < argv.length; i++) {
   const a = argv[i];
@@ -49,9 +51,13 @@ const out  = (obj) => { process.stdout.write(JSON.stringify(obj) + '\n'); };
 const elog = (...a) => process.stderr.write(a.join(' ') + '\n');
 
 if (!['pub', 'sub', 'pull'].includes(cmd) || !topic) {
-  elog('usage: node src/cli.js <pub|sub|pull> <topic> [message] [--region r] [--for s] [--since all|new] [--bridge url]');
+  elog('usage: node src/cli.js <pub|sub|pull> <topic> [message] [--region r] [--for s] [--since all|new] [--network prod|testnet] [--bridge url]');
   process.exit(2);
 }
+
+// ── bridge: --bridge › --network › BRIDGE_URL/RELAY_NETWORK env › prod ──
+try { opts.bridge = resolveBridgeUrl({ override: opts.bridge, network: opts.network }); }
+catch (e) { err({ error: e.message }); process.exit(2); }
 
 // ── region → synthetic publisher (prefix‖0^256), matching axona-peer/demo ──
 const regionCode = resolveRegion(opts.region);

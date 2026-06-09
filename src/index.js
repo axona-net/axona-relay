@@ -4,7 +4,8 @@
 // Boots a headless Axona mesh peer that acts as a relay/supernode and
 // renders its live state to the console. Configuration is via env:
 //
-//   BRIDGE_URL           bridge for bootstrap+signaling (default testnet)
+//   RELAY_NETWORK        prod|testnet                   (default prod)
+//   BRIDGE_URL           explicit bridge URL (overrides RELAY_NETWORK)
 //   RELAY_IDENTITY_PATH  persisted keypair file        (default ./identity.relay.json)
 //   RELAY_LAT/RELAY_LNG  geo prefix for the nodeId      (default SF 37.77,-122.42)
 //   RELAY_TUI            1=force dashboard, 0=plain log (default: auto by isTTY)
@@ -18,12 +19,13 @@ import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolve
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
 import { autoDetectRegion } from './geolocate.js';
+import { resolveBridgeUrl } from './network.js';
 import { readFile } from 'node:fs/promises';
 
 const RELAY_VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-const BRIDGE_URL = process.env.BRIDGE_URL || 'wss://testnet.axona.net';
+const BRIDGE_URL = resolveBridgeUrl();   // BRIDGE_URL env › RELAY_NETWORK env › prod
 const USE_TUI = process.env.RELAY_TUI != null
   ? process.env.RELAY_TUI !== '0'
   : Boolean(process.stdout.isTTY);

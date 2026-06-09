@@ -1,8 +1,9 @@
 // ops.js — reusable connect + pub/sub/pull against a live Axona network.
 //
 // The shared core behind both the CLI (src/cli.js) and the MCP server
-// (src/mcp.js): connect a fresh EPHEMERAL peer through the testnet bridge,
-// wait for mesh readiness, run one operation, tear everything down. Topics are
+// (src/mcp.js): connect a fresh EPHEMERAL peer to the live Axona network
+// (production by default — see network.js), wait for mesh readiness, run one
+// operation, tear everything down. Topics are
 // anchored at a synthetic region publisher (`<s2-prefix>‖0^256`), exactly as
 // axona-peer / the kernel demo do, so these interoperate with the live apps.
 
@@ -11,8 +12,9 @@ import { cleanupWebRTC } from './polyfill.js';
 import { createEphemeralIdentity } from './identity.js';
 import { createRelay, startRelay, stopRelay, resolveRegion } from './relay.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
+import { resolveBridgeUrl } from './network.js';
 
-export const DEFAULT_BRIDGE = process.env.BRIDGE_URL || 'wss://testnet.axona.net';
+export const DEFAULT_BRIDGE = resolveBridgeUrl();   // BRIDGE_URL env › RELAY_NETWORK env › prod
 
 /** region name|code → { code, center:{lat,lng}, prefixHex, publisher (66-hex) }. */
 export function regionToPublisher(region = 'useast') {

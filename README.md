@@ -5,8 +5,9 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
-**v0.7.1** on kernel **v2.32.0** (`axona/5` wire epoch). Defaults to the SF
-testnet ([testnet.axona.net](https://testnet.axona.net)).
+**v0.7.2** on kernel **v2.32.0** (`axona/5` wire epoch). Defaults to the
+**production** network ([bridge.axona.net](https://bridge.axona.net)); set
+`RELAY_NETWORK=testnet` to target the SF staging line instead.
 
 It runs the *same* kernel stack a browser peer runs (`webTransport` +
 `NeuronNode` + `AxonaDomain` + `AxonaPeer`) — the only difference is Node has no
@@ -58,16 +59,21 @@ Quit the dashboard with **q** or **Ctrl-C**.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `BRIDGE_URL` | `wss://testnet.axona.net` | Bridge for bootstrap + signaling |
+| `RELAY_NETWORK` | `prod` | Which network to bootstrap from: `prod` (`bridge.axona.net`) or `testnet` (`testnet.axona.net`) |
+| `BRIDGE_URL` | — | Explicit bridge URL; **overrides** `RELAY_NETWORK` |
 | `RELAY_REGION` | — | `auto` (detect), a region **name** (`useast`), or a code (`0x89`) — sets the nodeId's geo prefix |
 | `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`uswest`) |
 | `RELAY_IDENTITY_PATH` | `./identity.<region>.json` | Persisted keypair (stable nodeId). Default name is region-keyed |
 | `RELAY_TUI` | auto (`stdout.isTTY`) | `1` force dashboard, `0` force plain log |
 
+Bridge selection precedence: `BRIDGE_URL` › `RELAY_NETWORK` › default (`prod`).
+
 ```bash
+npm start                                     # production network (default)
+RELAY_NETWORK=testnet npm start               # the SF staging line
 RELAY_REGION=auto   npm start                 # detect location (IP-geo → timezone)
 RELAY_REGION=useast npm start                 # nodeId anchored at us-east (0x89)
-BRIDGE_URL=wss://bridge.axona.net RELAY_LAT=40.71 RELAY_LNG=-74.0 npm start
+BRIDGE_URL=wss://my-bridge:8080 RELAY_LAT=40.71 RELAY_LNG=-74.0 npm start   # explicit bridge
 ```
 
 Region precedence: `RELAY_REGION` › `RELAY_LAT`/`RELAY_LNG` › default SF. The
@@ -142,18 +148,21 @@ and the kernel demo do. Both sides must use the same `--region` (default
 `useast` / `0x89`) or they derive different topic IDs and never meet. Because
 of this, the CLI **interoperates with the live apps**: publishing to
 `us-east/hello-world` shows up in the [axona.net](https://axona.net) /
-`demo-testnet.axona.net` feed, and vice-versa.
+`demo.axona.net` feed (or `demo-testnet.axona.net` with `--network testnet`),
+and vice-versa.
 
 | Option | Default | Meaning |
 |---|---|---|
 | `--region <name\|code>` | `useast` | synthetic-publisher region (e.g. `uknorth`, `0x44`) |
 | `--for <seconds>` | `25` | `sub`: how long to listen |
 | `--since <all\|new>` | `all` | `sub`: replay backlog, or live-only |
-| `--bridge <wss-url>` | `wss://testnet.axona.net` | bridge to bootstrap through (or `BRIDGE_URL`) |
+| `--network <prod\|testnet>` | `prod` | which network to bootstrap from (or `RELAY_NETWORK`) |
+| `--bridge <wss-url>` | — | explicit bridge URL; overrides `--network` / `BRIDGE_URL` |
 | `--ready-timeout <s>` | `30` | max wait for mesh readiness before giving up |
 
-A `pub` round-trips through a real testnet root: a separate `sub --since all`
-on the same topic+region replays it back (verified end-to-end).
+A `pub` round-trips through a real production root: a separate `sub --since all`
+on the same topic+region replays it back (verified end-to-end). Add
+`--network testnet` to both sides to exercise the staging line instead.
 
 ## Native MCP tool (Claude Code & other agents)
 
@@ -221,7 +230,7 @@ Wants=network-online.target
 [Service]
 ExecStart=/usr/bin/node /opt/axona-relay/src/index.js
 Environment=RELAY_TUI=0
-Environment=BRIDGE_URL=wss://testnet.axona.net
+Environment=RELAY_NETWORK=prod
 Environment=RELAY_IDENTITY_PATH=/var/lib/axona-relay/identity.relay.json
 StateDirectory=axona-relay
 Restart=always
