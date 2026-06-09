@@ -170,8 +170,9 @@ on the same topic+region replays it back (verified end-to-end). Add
 server (stdio) that exposes the same operations as **first-class agent tools**
 — so Claude Code gets `axona_publish` / `axona_subscribe` / `axona_pull`
 directly, instead of shelling out to the CLI. Each call connects a fresh
-ephemeral peer through the bridge (via `src/ops.js`, the shared core behind both
-the CLI and this server), does one job, tears down, and returns JSON.
+ephemeral peer to the network — **production by default** — (via `src/ops.js`,
+the shared core behind both the CLI and this server), does one job, tears down,
+and returns JSON.
 
 | Tool | Args | Returns |
 |---|---|---|
@@ -185,6 +186,22 @@ Register it as a project-scoped MCP server — a `.mcp.json` at your project roo
 {
   "mcpServers": {
     "axona": { "command": "node", "args": ["/abs/path/to/axona-relay/src/mcp.js"] }
+  }
+}
+```
+
+**Targeting a different network.** The tools default to production. To point the
+MCP server at the testnet (or an explicit bridge), add an `env` block — the same
+`RELAY_NETWORK` / `BRIDGE_URL` precedence as the CLI applies:
+
+```json
+{
+  "mcpServers": {
+    "axona": {
+      "command": "node",
+      "args": ["/abs/path/to/axona-relay/src/mcp.js"],
+      "env": { "RELAY_NETWORK": "testnet" }
+    }
   }
 }
 ```
