@@ -39,6 +39,12 @@ if (existsSync(OUT)) {
 const devices = new Map();
 const devKey = (r) => (r.device?.deviceLabel || r.device?.deviceId || r.device?.ua || '?');
 
+// Aggregate per (device, candidate, difficulty) for the comparison report we
+// publish back so each device can see where it stands.
+const LEADERBOARD_TOPIC = 'pow-bench/leaderboard';
+const LEADERBOARD_MS    = 15000;
+const agg = new Map();
+
 console.log(`pow-collector → ${OUT}\n  topic=${TOPIC} region=${REGION} bridge=${bridge}`);
 console.log(`  ${seen.size} result(s) already on file; connecting…`);
 
@@ -55,6 +61,20 @@ await h.peer.sub(TOPIC, (env) => {
   appendFileSync(OUT, JSON.stringify({ recvTs: new Date().toISOString(), msgId, signer: env.signerPubkey ?? null, result: r }) + '\n');
   const dev = devKey(r);
   devices.set(dev, (devices.get(dev) || 0) + 1);
+  // Update the per-(device,candidate,difficulty) aggregate (latest measurement).
+  const did = r.device?.deviceId || ('ua:' + (r.device?.ua || '?'));
+  const aggKey = `${did}|${r.candidate}|${r.difficulty}`;
+  agg.set(aggKey, {
+    id:    did,
+    label: r.device?.deviceLabel || '',
+    ua:    String(r.device?.ua || '').slice(0, 60),
+    c:     r.candidate,
+    d:     r.difficulty,
+    mint:  (r.mint_ms && r.mint_ms.p50 != null) ? Math.round(r.mint_ms.p50) : null,
+    mem:   r.peak_wasm_mem_mb ?? null,
+    oom:   !!r.oom,
+    n:     (agg.get(aggKey)?.n || 0) + 1,
+  });
   const mint = (r.mint_ms && r.mint_ms.p50 != null) ? `${Math.round(r.mint_ms.p50)}ms` : '?';
   console.log(`[${seen.size}] ${String(dev).slice(0, 32)} · ${r.candidate} d=${r.difficulty} mint_p50=${mint} mem=${r.peak_wasm_mem_mb}MB oom=${r.oom}`);
 }, { publisher, since: 'all' });
@@ -67,4 +87,19 @@ function summary() {
 }
 process.on('SIGINT',  async () => { summary(); try { await h.close(); } catch { /* */ } try { cleanupWebRTC(); } catch { /* */ } process.exit(0); });
 process.on('SIGTERM', async () => { summary(); try { await h.close(); } catch { /* */ } try { cleanupWebRTC(); } catch { /* */ } process.exit(0); });
-setInterval(() => {}, 1 << 30);   // keep alive
+
+// Publish the comparison report back to the devices (keeps the process alive).
+setInterval(async () => {
+  if (agg.size === 0) return;
+  const list = [...agg.values()]
+    .filter((e) => e.mint != null)
+    .sort((a, b) => (`${a.c}|${a.d}`).localeCompare(`${b.c}|${b.d}`) || a.mint - b.mint)
+    .slice(0, 150);
+  const report = { ts: new Date().toISOString(), count: list.length, devices: list };
+  try {
+    const msgId = await h.peer.pub(LEADERBOARD_TOPIC, JSON.stringify(report), { publisher });
+    console.log(`  → leaderboard published (${list.length} device-buckets) ${String(msgId).slice(0, 10)}…`);
+  } catch (e) {
+    console.log('  leaderboard publish failed: ' + (e.message || e));
+  }
+}, LEADERBOARD_MS);
