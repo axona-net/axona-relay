@@ -16,6 +16,7 @@ import './polyfill.js';                 // MUST be first — installs RTCPeerCon
 import { cleanupWebRTC } from './polyfill.js';
 import { loadOrCreateIdentity, acquireIdentityLock, createEphemeralIdentity } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion } from './relay.js';
+import { powCalibrate, powDifficulty } from '../vendor/axona-protocol/src/pow/pow.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
 import { autoDetectRegion } from './geolocate.js';
@@ -121,6 +122,15 @@ async function main() {
       : created
         ? `{green-fg}PRIMARY node{/} — minted a new known identity in ${regionLabel} (0x${regionCode})`
         : `{green-fg}PRIMARY node{/} — loaded known identity (${regionLabel} 0x${regionCode})`);
+
+  // Stage 2 (E-1): log this device's PoW solve-rate. Difficulty is 0 (inert), so
+  // this is pure CALIBRATION DATA for choosing a Stage-4 difficulty — `estMintMs`
+  // is the expected one-time mint cost at N bits on THIS host. Runs a ~400ms
+  // benchmark once, off the critical path.
+  powCalibrate().then(c => present.logLine(
+    `{gray-fg}pow-calibrate{/} ${c.hashesPerSec.toLocaleString()} H/s · ` +
+    `mint@16b≈${c.estMintMs[16]}ms 20b≈${c.estMintMs[20]}ms 24b≈${c.estMintMs[24]}ms · ` +
+    `active diff transport=${powDifficulty('transport')} publish=${powDifficulty('publish')}`)).catch(() => {});
 
   // Sticky-region warning: the region is baked into the persisted identity, so
   // an explicit region request is ignored once the file exists.
