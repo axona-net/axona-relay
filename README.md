@@ -5,7 +5,7 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
-**v0.7.2** on kernel **v2.32.0** (`axona/5` wire epoch). Defaults to the
+**v0.8.0** on kernel **v2.33.0** (`axona/5` wire epoch). Defaults to the
 **production** network ([bridge.axona.net](https://bridge.axona.net)); set
 `RELAY_NETWORK=testnet` to target the SF staging line instead.
 
@@ -212,6 +212,35 @@ project-scoped server, so **restart / reconnect** after adding it; the tools
 then appear as `mcp__axona__axona_publish`, etc. (Also exposed as the
 `axona-mcp` bin.) Topic/region semantics and live-app interop are identical to
 the CLI above.
+
+## End-to-end test framework (`e2e/`)
+
+`e2e/run.js` exercises the **deployed kernel on the live mesh** — not just
+in-process. It spins two ephemeral peers through the same connect machinery as
+the CLI/relay (`connectPeer` in `src/ops.js`), against a real bridge, and runs
+pub/sub scenarios over real WebRTC, asserting observable outcomes:
+
+```bash
+npm run e2e                      # production (default)
+node e2e/run.js --network testnet
+BRIDGE_URL=wss://host node e2e/run.js
+```
+
+| Scenario | Checks |
+|---|---|
+| **S1** pub → sub round-trip | a second peer receives a publish |
+| **S2** metrics path | `metrics(topic)` serves the proven caller (the C-3-hardened path still works) |
+| **S3** kill + duplicate copies | a retracted message — including duplicate cached copies (SP-11) — is absent for a fresh subscriber |
+| **S4** per-publisher quota | a single flooding publisher's delivery is bounded |
+
+It prints a `passed / failed` report and exits non-zero on failure (`--keep` to
+override). Adversarial cases that need a **forged wire payload** (C-3's
+attacker-named `requesterId`, an unsigned-publish flood) can't come from the
+public peer API, so they're covered by the kernel unit tests
+(`axona-protocol/test/smoke_pubsub_c3.js`); this harness covers the
+network-observable behaviour. New scenarios slot into `e2e/run.js` as the
+protocol evolves (the natural home for validating each security wave on the
+real network).
 
 ## Identity
 

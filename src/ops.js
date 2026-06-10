@@ -29,25 +29,44 @@ export function regionToPublisher(region = 'useast') {
  * Connect an ephemeral peer, wait until the mesh is usable, run `fn(peer, ctx)`,
  * then always tear down. `ctx = { publisher, prefixHex, center, nodeId }`.
  */
-export async function withConnectedPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError } = {}, fn) {
+/**
+ * Connect an ephemeral peer and wait until the mesh is usable. Returns the LIVE
+ * peer plus `close()` — which stops the relay but does NOT tear down WebRTC,
+ * since `cleanupWebRTC()` is process-global (node-datachannel cleanup destroys
+ * ALL connections). A multi-peer caller must therefore close each peer, then
+ * call `cleanupWebRTC()` exactly once after the last one. `withConnectedPeer`
+ * below is the single-peer convenience wrapper that does both.
+ */
+export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError } = {}) {
   const { center, prefixHex, publisher } = regionToPublisher(region);
   const identity = await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
   const { peer, transport } = createRelay({ bridgeUrl: bridge, identity, region: center, onLog: () => {} });
   if (onError) peer.onError?.((e) => onError(e));
   await startRelay({ peer, transport });
-  try {
-    const readyBy = Date.now() + readyTimeoutSec * 1000;
-    let ready = false;
-    while (Date.now() < readyBy) {
-      let h; try { h = peer.health(); } catch { h = null; }
-      if (h && (h.synaptomeSize >= 1 || (h.peers && h.peers.length >= 1))) { ready = true; break; }
-      await new Promise(r => setTimeout(r, 500));
-    }
-    if (!ready) throw new Error(`timed out waiting for mesh readiness (bridge ${bridge})`);
-    await new Promise(r => setTimeout(r, 1500));        // brief settle so roots are reachable
-    return await fn(peer, { publisher, prefixHex, center, nodeId: identity.id });
-  } finally {
+  const readyBy = Date.now() + readyTimeoutSec * 1000;
+  let ready = false;
+  while (Date.now() < readyBy) {
+    let h; try { h = peer.health(); } catch { h = null; }
+    if (h && (h.synaptomeSize >= 1 || (h.peers && h.peers.length >= 1))) { ready = true; break; }
+    await new Promise(r => setTimeout(r, 500));
+  }
+  if (!ready) {
     try { await stopRelay({ peer, transport }); } catch { /* */ }
+    throw new Error(`timed out waiting for mesh readiness (bridge ${bridge})`);
+  }
+  await new Promise(r => setTimeout(r, 1500));          // brief settle so roots are reachable
+  return {
+    peer, publisher, prefixHex, center, nodeId: identity.id,
+    async close() { try { await stopRelay({ peer, transport }); } catch { /* */ } },
+  };
+}
+
+export async function withConnectedPeer(opts, fn) {
+  const h = await connectPeer(opts);
+  try {
+    return await fn(h.peer, { publisher: h.publisher, prefixHex: h.prefixHex, center: h.center, nodeId: h.nodeId });
+  } finally {
+    await h.close();
     cleanupWebRTC();
   }
 }
