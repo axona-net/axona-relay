@@ -5,7 +5,7 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
-**v0.8.1** on kernel **v2.33.0** (`axona/5` wire epoch). Defaults to the
+**v0.8.2** on kernel **v2.34.0** (`axona/5` wire epoch). Defaults to the
 **production** network ([bridge.axona.net](https://bridge.axona.net)); set
 `RELAY_NETWORK=testnet` to target the SF staging line instead.
 
