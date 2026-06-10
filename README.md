@@ -5,7 +5,7 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
-**v0.8.0** on kernel **v2.33.0** (`axona/5` wire epoch). Defaults to the
+**v0.8.1** on kernel **v2.33.0** (`axona/5` wire epoch). Defaults to the
 **production** network ([bridge.axona.net](https://bridge.axona.net)); set
 `RELAY_NETWORK=testnet` to target the SF staging line instead.
 
@@ -226,6 +226,8 @@ node e2e/run.js --network testnet
 BRIDGE_URL=wss://host node e2e/run.js
 ```
 
+**Honest scenarios** (published API only — same surface as a browser app):
+
 | Scenario | Checks |
 |---|---|
 | **S1** pub → sub round-trip | a second peer receives a publish |
@@ -233,14 +235,28 @@ BRIDGE_URL=wss://host node e2e/run.js
 | **S3** kill + duplicate copies | a retracted message — including duplicate cached copies (SP-11) — is absent for a fresh subscriber |
 | **S4** per-publisher quota | a single flooding publisher's delivery is bounded |
 
+**Adversarial scenarios** (white-box — the harness runs in-process with the
+peer, so it can forge genuine wire frames via `peer.sendDirect` *and* read a
+victim-root's internals to adjudicate). The forged frame travels the real
+authenticated channel, so the victim's handler runs with a transport-**proven**
+`meta.fromId` — the faithful condition a hand-set unit test can't reproduce. The
+honest "control" send doubles as the gate: if it's answered, A→B is a direct
+authenticated link and the adversarial assertion is meaningful; otherwise the
+scenario reports *inconclusive* rather than failing.
+
+| Scenario | Checks |
+|---|---|
+| **A1** C-3 reflection | a forged `requesterId` naming a victim draws **no** reflected `metricsResp` (honest control answered) |
+| **A2** B-1 subscribe spoof | a forged `subscriberId` (victim) is **not** enrolled as a child (honest control was) |
+
 It prints a `passed / failed` report and exits non-zero on failure (`--keep` to
-override). Adversarial cases that need a **forged wire payload** (C-3's
-attacker-named `requesterId`, an unsigned-publish flood) can't come from the
-public peer API, so they're covered by the kernel unit tests
-(`axona-protocol/test/smoke_pubsub_c3.js`); this harness covers the
-network-observable behaviour. New scenarios slot into `e2e/run.js` as the
-protocol evolves (the natural home for validating each security wave on the
-real network).
+override). Note: this white-box reach is a **same-process test affordance, not a
+network side channel** — no remote party (including an attacker) has it; an
+attacker is limited to the wire frames A1/A2 forge. Cases that need a forged
+*unsigned/stale envelope* (SP-10 anon-flood, C-2 replay) stay unit-covered
+(`axona-protocol/test/smoke_pubsub_c3.js`, `smoke_envelope.js`). New scenarios
+slot into `e2e/run.js` as each security wave ships — the natural home for
+validating it on the real network.
 
 ## Identity
 

@@ -22,6 +22,8 @@
 import { connectPeer } from '../src/ops.js';
 import { cleanupWebRTC } from '../src/polyfill.js';
 import { resolveBridgeUrl, resolveNetwork } from '../src/network.js';
+import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
+import { fromHex, toHex } from '../vendor/axona-protocol/src/utils/hexid.js';
 
 const argv = process.argv.slice(2);
 const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? (argv[i + 1] ?? true) : undefined; };
@@ -109,8 +111,79 @@ async function main() {
          `published ${N}, B replayed ${uniq} distinct — ${capped ? 'per-publisher cap observed' : 'no cap observed (quota ≥ N or spread across roots)'}`);
     }
 
-    console.log('\n  · C-3 reflection / fail-closed and SP-10 anon-flood require forged');
-    console.log('    payloads — covered by axona-protocol/test/smoke_pubsub_c3.js (unit).');
+    // ════ White-box adversarial suite ════════════════════════════════
+    // These forge genuine wire frames via peer.sendDirect, so the victim-root's
+    // handler runs with a transport-PROVEN meta.fromId (not a hand-set one — the
+    // difference from the unit tests). The honest "control" send doubles as the
+    // gate: if B answers A, then A→B is a direct authenticated channel and
+    // fromId=A was proven, which is the only condition under which the forged
+    // assertion is meaningful. If the two peers never form a direct link this
+    // run, the scenario reports inconclusive (skipped) rather than failing.
+    console.log('\n── A1: C-3 reflection (forged requesterId, real proven fromId) ──');
+    await sleep(4000);                       // let A↔B form a direct mesh link
+    {
+      const Bmgr = B.peer._axonaManager;
+      const pubBig = fromHex(A.publisher);
+      const Tbig = await deriveTopicIdBig(pubBig, T('adv-metrics'));
+      const Bbig = fromHex(B.nodeId), Abig = fromHex(A.nodeId);
+      if (!Bmgr) ok('A1 metrics reflection', false, 'B manager absent (no pub/sub ran?)');
+      else {
+        // Make B a root for the topic (deterministic; region-keyed ⇒ unowned ⇒
+        // the vouch is the only gate). Then spy B's outbound sends.
+        Bmgr.axonRoles.set(Tbig, { children: new Map(),
+          replayCache: [{ json: '{}', postHash: 'seed', publisher: pubBig, signerPubkey: null, seq: 0, ts: 0, expiresAt: Date.now() + 1e9 }] });
+        const sent = [];
+        const orig = B.peer.sendDirect.bind(B.peer);
+        B.peer.sendDirect = async (to, type, payload) => { sent.push({ to, type }); return orig(to, type, payload); };
+        try {
+          sent.length = 0;                    // control: honest requesterId === sender
+          await A.peer.sendDirect(Bbig, 'pubsub:metricsReq-k', { topicId: toHex(Tbig), requesterId: A.nodeId, requestId: 'ctl-' + RUN, postHashes: null });
+          await sleep(2000);
+          const honest = sent.some(s => s.type === 'pubsub:metricsResp' && s.to === Abig);
+          if (!honest) {
+            ok('A1 inconclusive — no direct A→B channel this run (skipped)', true, 'honest control drew no response');
+          } else {
+            sent.length = 0;                  // attack: forge requesterId = victim ≠ fromId
+            const VICTIM = fromHex('89' + 'a'.repeat(64));
+            await A.peer.sendDirect(Bbig, 'pubsub:metricsReq-k', { topicId: toHex(Tbig), requesterId: toHex(VICTIM), requestId: 'adv-' + RUN, postHashes: null });
+            await sleep(2000);
+            const reflected = sent.filter(s => s.type === 'pubsub:metricsResp').length;
+            ok('C-3: forged requesterId draws NO reflected metricsResp', reflected === 0,
+               `honest control answered · forged emitted ${reflected} metricsResp`);
+          }
+        } finally { B.peer.sendDirect = orig; Bmgr.axonRoles.delete(Tbig); }
+      }
+    }
+
+    console.log('\n── A2: B-1 subscribe-origin spoof (forged subscriberId) ──');
+    {
+      const Bmgr = B.peer._axonaManager;
+      const pubBig = fromHex(A.publisher);
+      const Tbig = await deriveTopicIdBig(pubBig, T('adv-sub'));
+      const Bbig = fromHex(B.nodeId), Abig = fromHex(A.nodeId);
+      if (!Bmgr) ok('A2 subscribe spoof', false, 'B manager absent');
+      else {
+        Bmgr.axonRoles.set(Tbig, { children: new Map(), replayCache: [] });
+        try {
+          await A.peer.sendDirect(Bbig, 'pubsub:subscribe-k', { topicId: toHex(Tbig), subscriberId: A.nodeId, lastSeenTs: 0 });
+          await sleep(1800);
+          const honest = [...(Bmgr.axonRoles.get(Tbig)?.children.keys() || [])].some(k => k === Abig);
+          if (!honest) {
+            ok('A2 inconclusive — honest subscribe-k not enrolled (skipped)', true, 'no direct A→B this run');
+          } else {
+            const VICTIM = fromHex('89' + 'b'.repeat(64));
+            await A.peer.sendDirect(Bbig, 'pubsub:subscribe-k', { topicId: toHex(Tbig), subscriberId: toHex(VICTIM), lastSeenTs: 0 });
+            await sleep(1800);
+            const victimEnrolled = [...(Bmgr.axonRoles.get(Tbig)?.children.keys() || [])].some(k => k === VICTIM);
+            ok('B-1: forged subscriberId (victim) is NOT enrolled as a child', !victimEnrolled,
+               `honest enrolled · victim enrolled=${victimEnrolled}`);
+          }
+        } finally { Bmgr.axonRoles.delete(Tbig); }
+      }
+    }
+
+    console.log('\n  · SP-10 anon-flood and replay/freshness need forged unsigned/stale');
+    console.log('    envelopes — covered by smoke_pubsub_c3.js / smoke_envelope.js (unit).');
   } finally {
     await A.close();
     await B.close();
