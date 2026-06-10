@@ -16,7 +16,8 @@
     "sub": "node src/cli.js sub",
     "pull": "node src/cli.js pull",
     "mcp": "node src/mcp.js",
-    "e2e": "node e2e/run.js"
+    "e2e": "node e2e/run.js",
+    "collect": "node pow-collector.js"
   },
   "engines": {
     "node": ">=20"

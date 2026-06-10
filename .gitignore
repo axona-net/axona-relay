@@ -5,3 +5,4 @@ identity*.json
 *.json.lock
 npm-debug.log*
 .DS_Store
+pow-results*.jsonl
