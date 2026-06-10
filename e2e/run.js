@@ -147,9 +147,14 @@ async function main() {
             const VICTIM = fromHex('89' + 'a'.repeat(64));
             await A.peer.sendDirect(Bbig, 'pubsub:metricsReq-k', { topicId: toHex(Tbig), requesterId: toHex(VICTIM), requestId: 'adv-' + RUN, postHashes: null });
             await sleep(2000);
-            const reflected = sent.filter(s => s.type === 'pubsub:metricsResp').length;
-            ok('C-3: forged requesterId draws NO reflected metricsResp', reflected === 0,
-               `honest control answered · forged emitted ${reflected} metricsResp`);
+            // Count ONLY responses aimed at the victim. B is a live mesh peer and
+            // may legitimately answer OTHER peers' metrics requests in this window,
+            // so a raw metricsResp count would over-flag; the C-3 property is
+            // specifically "no response is routed to the attacker-named victim".
+            const total       = sent.filter(s => s.type === 'pubsub:metricsResp').length;
+            const toVictim    = sent.filter(s => s.type === 'pubsub:metricsResp' && s.to === VICTIM).length;
+            ok('C-3: forged requesterId draws NO metricsResp to the victim', toVictim === 0,
+               `honest control answered · ${toVictim} to victim (of ${total} metricsResp in window)`);
           }
         } finally { B.peer.sendDirect = orig; Bmgr.axonRoles.delete(Tbig); }
       }
