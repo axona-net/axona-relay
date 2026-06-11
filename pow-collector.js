@@ -69,16 +69,21 @@ function onMessage(env) {
   const dev = devKey(r);
   devices.set(dev, (devices.get(dev) || 0) + 1);
   const did = r.device?.deviceId || ('ua:' + (r.device?.ua || '?'));
-  const aggKey = `${did}|${r.candidate}|${r.difficulty}`;
+  const ckey = r.candidateKey || r.candidate;            // STABLE key (failed runs may carry only the short key)
+  const aggKey = `${did}|${ckey}|${r.difficulty}`;
+  const failed = !r.all_verified;                        // didn't cleanly complete (OOM, timeout, error, verify, or over-budget skip)
+  const fail   = r.skipped ? 'over budget' : r.oom ? 'OOM' : r.timedOut ? 'timeout' : r.error ? 'error' : (failed ? 'failed' : '');
   agg.set(aggKey, {
     id:    did,
     label: r.device?.deviceLabel || '',
     ua:    String(r.device?.ua || '').slice(0, 60),
-    c:     r.candidate,
+    c:     ckey,
+    cname: r.candidate,
     d:     r.difficulty,
     mint:  (r.mint_ms && r.mint_ms.p50 != null) ? Math.round(r.mint_ms.p50) : null,
     mem:   r.peak_wasm_mem_mb ?? null,
     oom:   !!r.oom,
+    failed, fail,
     n:     (agg.get(aggKey)?.n || 0) + 1,
   });
   const mint = (r.mint_ms && r.mint_ms.p50 != null) ? `${Math.round(r.mint_ms.p50)}ms` : '?';
@@ -136,8 +141,9 @@ setInterval(() => {
 setInterval(async () => {
   if (reconnecting || !h || agg.size === 0) return;
   const list = [...agg.values()]
-    .filter((e) => e.mint != null)
-    .sort((a, b) => (`${a.c}|${a.d}`).localeCompare(`${b.c}|${b.d}`) || a.mint - b.mint)
+    // keep BOTH completers and failures — a device that can't complete a test is the
+    // sharpest floor signal. (was filtered to mint != null, which hid every failure.)
+    .sort((a, b) => (`${a.c}|${a.d}`).localeCompare(`${b.c}|${b.d}`) || ((a.mint ?? Infinity) - (b.mint ?? Infinity)))
     .slice(0, 600);   // raised from 150: the fleet (18+ devices × ~11 tests) overflowed it, and
                       // the mint-ascending sort truncated the SLOWEST devices first — hiding older
                       // phones. ~600 × ~200B ≈ 120KB, well under the 256KB publish cap.
