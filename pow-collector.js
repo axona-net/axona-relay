@@ -138,7 +138,9 @@ setInterval(async () => {
   const list = [...agg.values()]
     .filter((e) => e.mint != null)
     .sort((a, b) => (`${a.c}|${a.d}`).localeCompare(`${b.c}|${b.d}`) || a.mint - b.mint)
-    .slice(0, 150);
+    .slice(0, 600);   // raised from 150: the fleet (18+ devices × ~11 tests) overflowed it, and
+                      // the mint-ascending sort truncated the SLOWEST devices first — hiding older
+                      // phones. ~600 × ~200B ≈ 120KB, well under the 256KB publish cap.
   const report = { ts: new Date().toISOString(), count: list.length, devices: list };
   try {
     const msgId = await h.peer.pub(LEADERBOARD_TOPIC, JSON.stringify(report), { publisher });
