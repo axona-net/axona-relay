@@ -6,3 +6,4 @@ identity*.json
 npm-debug.log*
 .DS_Store
 pow-results*.jsonl
+backups/

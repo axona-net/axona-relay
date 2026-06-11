@@ -24,6 +24,7 @@ import { connectPeer, regionToPublisher } from './src/ops.js';
 import { cleanupWebRTC } from './src/polyfill.js';
 import { resolveBridgeUrl } from './src/network.js';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
+import { exec } from 'node:child_process';
 
 const argv   = process.argv.slice(2);
 const flag   = (n, d) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : d; };
@@ -147,6 +148,17 @@ setInterval(async () => {
     reconnect('leaderboard publish failed');
   }
 }, LEADERBOARD_MS);
+
+// Off-machine backup: gzip + force-push the cumulative history to GitHub every
+// few hours so a total machine/disk loss can't take the full history with it.
+// Tied to the collector's lifetime (it backs up exactly while it's collecting).
+const BACKUP_MS = 2 * 3600 * 1000;
+const BACKUP_SH = '/Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh';
+setInterval(() => {
+  exec(BACKUP_SH, (err, stdout, stderr) => {
+    console.log(err ? '  backup failed: ' + (stderr || err.message).trim() : '  ' + stdout.trim());
+  });
+}, BACKUP_MS);
 
 function summary() {
   console.log(`\n— ${seen.size} result(s) from ${devices.size} device(s) → ${OUT}`);
