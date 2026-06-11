@@ -35,6 +35,16 @@ const TOPIC   = 'pow-bench/results';
 const bridge  = resolveBridgeUrl({ network: NETWORK });
 const sleep   = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// A malformed inbound message can throw deep in the vendored kernel — e.g. a
+// `subscribe-k` carrying a too-short subscriberId hits fromHex() in _wire and
+// throws an uncaught RangeError, which would kill the whole collector (observed
+// 2026-06-11). Swallow + log so collection stays durable; the health watchdog
+// below still reconnects if the link is genuinely dead. (The kernel-side fix —
+// validate hex ids on the inbound subscribe path — is tracked separately; this
+// is a remote-DoS surface on any root axon.)
+process.on('uncaughtException',  (e) => console.error(`⚠ uncaughtException (continuing): ${e?.stack || e?.message || e}`));
+process.on('unhandledRejection', (e) => console.error(`⚠ unhandledRejection (continuing): ${e?.message || e}`));
+
 // Load already-seen msgIds so restarts/reconnects don't double-log the backlog.
 const seen = new Set();
 if (existsSync(OUT)) {
