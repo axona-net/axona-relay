@@ -10,9 +10,14 @@
 //   node pow-collector.js --network testnet
 //   node pow-collector.js --out /tmp/run1.jsonl --region useast
 //
+// SELF-HEALING: a watchdog checks peer health every 20s and the leaderboard
+// publish doubles as a send-path probe; if the bridge connection drops, the
+// collector tears down and reconnects with backoff, then re-subscribes
+// (since:'all' + the in-memory `seen` set ⇒ it backfills anything missed during
+// the outage and never double-logs). Previously a dropped connection silently
+// stopped collection until a manual restart.
+//
 // Each line: { recvTs, msgId, signer, result:{...the published bench result...} }.
-// The topic is anchored at the us-east synthetic publisher to match the app's
-// reporter, so this receives every tester regardless of their location.
 // =====================================================================
 import './src/polyfill.js';
 import { connectPeer, regionToPublisher } from './src/ops.js';
@@ -27,8 +32,9 @@ const REGION  = flag('--region', 'useast');
 const NETWORK = flag('--network', undefined);
 const TOPIC   = 'pow-bench/results';
 const bridge  = resolveBridgeUrl({ network: NETWORK });
+const sleep   = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Load already-seen msgIds so restarts don't double-log the replayed backlog.
+// Load already-seen msgIds so restarts/reconnects don't double-log the backlog.
 const seen = new Set();
 if (existsSync(OUT)) {
   for (const line of readFileSync(OUT, 'utf8').split('\n')) {
@@ -43,16 +49,16 @@ const devKey = (r) => (r.device?.deviceLabel || r.device?.deviceId || r.device?.
 // publish back so each device can see where it stands.
 const LEADERBOARD_TOPIC = 'pow-bench/leaderboard';
 const LEADERBOARD_MS    = 15000;
+const WATCHDOG_MS       = 20000;
 const agg = new Map();
-
-console.log(`pow-collector → ${OUT}\n  topic=${TOPIC} region=${REGION} bridge=${bridge}`);
-console.log(`  ${seen.size} result(s) already on file; connecting…`);
-
 const { publisher } = regionToPublisher(REGION);
-const h = await connectPeer({ region: REGION, bridge, readyTimeoutSec: 45 });
-console.log(`  connected as ${h.nodeId.slice(0, 10)}… — collecting (Ctrl-C to stop)\n`);
 
-await h.peer.sub(TOPIC, (env) => {
+// ── connection state (rebuilt on reconnect) ─────────────────────────
+let h = null;
+let reconnecting = false;
+let badHealth = 0;
+
+function onMessage(env) {
   if (!env || env.deleted || !env.message) return;
   const msgId = env.msgId;
   if (!msgId || seen.has(msgId)) return;
@@ -61,7 +67,6 @@ await h.peer.sub(TOPIC, (env) => {
   appendFileSync(OUT, JSON.stringify({ recvTs: new Date().toISOString(), msgId, signer: env.signerPubkey ?? null, result: r }) + '\n');
   const dev = devKey(r);
   devices.set(dev, (devices.get(dev) || 0) + 1);
-  // Update the per-(device,candidate,difficulty) aggregate (latest measurement).
   const did = r.device?.deviceId || ('ua:' + (r.device?.ua || '?'));
   const aggKey = `${did}|${r.candidate}|${r.difficulty}`;
   agg.set(aggKey, {
@@ -77,20 +82,58 @@ await h.peer.sub(TOPIC, (env) => {
   });
   const mint = (r.mint_ms && r.mint_ms.p50 != null) ? `${Math.round(r.mint_ms.p50)}ms` : '?';
   console.log(`[${seen.size}] ${String(dev).slice(0, 32)} · ${r.candidate} d=${r.difficulty} mint_p50=${mint} mem=${r.peak_wasm_mem_mb}MB oom=${r.oom}`);
-}, { publisher, since: 'all' });
-
-function summary() {
-  console.log(`\n— ${seen.size} result(s) from ${devices.size} device(s) → ${OUT}`);
-  for (const [d, n] of [...devices.entries()].sort((a, b) => b[1] - a[1])) {
-    console.log(`    ${String(n).padStart(4)}  ${String(d).slice(0, 48)}`);
-  }
 }
-process.on('SIGINT',  async () => { summary(); try { await h.close(); } catch { /* */ } try { cleanupWebRTC(); } catch { /* */ } process.exit(0); });
-process.on('SIGTERM', async () => { summary(); try { await h.close(); } catch { /* */ } try { cleanupWebRTC(); } catch { /* */ } process.exit(0); });
 
-// Publish the comparison report back to the devices (keeps the process alive).
+async function connect() {
+  h = await connectPeer({ region: REGION, bridge, readyTimeoutSec: 45,
+    onError: (e) => console.log('  peer error: ' + (e?.message || e)) });
+  await h.peer.sub(TOPIC, onMessage, { publisher, since: 'all' });
+  console.log(`  connected as ${h.nodeId.slice(0, 10)}… — collecting`);
+}
+
+function isConnected() {
+  try { const hl = h?.peer?.health(); return !!(hl && (hl.synaptomeSize >= 1 || (hl.peers && hl.peers.length >= 1))); }
+  catch { return false; }
+}
+
+async function reconnect(reason) {
+  if (reconnecting) return;
+  reconnecting = true;
+  console.log(`\n‼ connection lost (${reason}) — reconnecting…`);
+  try { await h?.close(); } catch { /* */ }
+  try { cleanupWebRTC(); } catch { /* */ }
+  h = null;
+  for (let attempt = 1; ; attempt++) {
+    try { await connect(); console.log(`  ✓ reconnected on attempt ${attempt}\n`); break; }
+    catch (e) {
+      const wait = Math.min(30000, 2000 * attempt);
+      console.log(`  reconnect attempt ${attempt} failed: ${e.message || e} — retry in ${Math.round(wait / 1000)}s`);
+      await sleep(wait);
+    }
+  }
+  badHealth = 0;
+  reconnecting = false;
+}
+
+// ── boot ────────────────────────────────────────────────────────────
+console.log(`pow-collector → ${OUT}\n  topic=${TOPIC} region=${REGION} bridge=${bridge}`);
+console.log(`  ${seen.size} result(s) already on file; connecting…`);
+await connect();
+console.log(`  collecting (auto-reconnect armed; Ctrl-C to stop)\n`);
+
+// Watchdog: a dropped bridge connection shows up as no mesh connectivity.
+// Require a few consecutive bad checks (~60s) before reconnecting to ride out
+// transient blips.
+setInterval(() => {
+  if (reconnecting) return;
+  if (isConnected()) { badHealth = 0; return; }
+  if (++badHealth >= 3) reconnect('health check: no mesh connectivity');
+}, WATCHDOG_MS);
+
+// Publish the comparison report back to the devices. Doubles as a send-path
+// liveness probe: a publish failure means the connection is dead → reconnect.
 setInterval(async () => {
-  if (agg.size === 0) return;
+  if (reconnecting || !h || agg.size === 0) return;
   const list = [...agg.values()]
     .filter((e) => e.mint != null)
     .sort((a, b) => (`${a.c}|${a.d}`).localeCompare(`${b.c}|${b.d}`) || a.mint - b.mint)
@@ -101,5 +144,15 @@ setInterval(async () => {
     console.log(`  → leaderboard published (${list.length} device-buckets) ${String(msgId).slice(0, 10)}…`);
   } catch (e) {
     console.log('  leaderboard publish failed: ' + (e.message || e));
+    reconnect('leaderboard publish failed');
   }
 }, LEADERBOARD_MS);
+
+function summary() {
+  console.log(`\n— ${seen.size} result(s) from ${devices.size} device(s) → ${OUT}`);
+  for (const [d, n] of [...devices.entries()].sort((a, b) => b[1] - a[1])) {
+    console.log(`    ${String(n).padStart(4)}  ${String(d).slice(0, 48)}`);
+  }
+}
+process.on('SIGINT',  async () => { summary(); try { await h?.close(); } catch { /* */ } try { cleanupWebRTC(); } catch { /* */ } process.exit(0); });
+process.on('SIGTERM', async () => { summary(); try { await h?.close(); } catch { /* */ } try { cleanupWebRTC(); } catch { /* */ } process.exit(0); });
