@@ -9,9 +9,14 @@
 //   RELAY_IDENTITY_PATH  persisted keypair file        (default ./identity.relay.json)
 //   RELAY_LAT/RELAY_LNG  geo prefix for the nodeId      (default SF 37.77,-122.42)
 //   RELAY_TUI            1=force dashboard, 0=plain log (default: auto by isTTY)
-//   RELAY_TOPICS         comma-separated topics to SUBSCRIBE to, so the relay
-//                        actively joins those axons (and, in-region, becomes a
-//                        stable root) instead of idly meshing. e.g.
+//   RELAY_HOST_KEYSPACE  1=host this relay's keyspace neighborhood so it gets
+//                        recruited as a root for whatever topics land near its
+//                        id — "host whatever lands near me" (default 1). This
+//                        is what makes a relay participate with ZERO topic
+//                        config; set 0 to opt out.
+//   RELAY_TOPICS         comma-separated topics to HOST (store + serve for
+//                        others, without consuming them), so the relay joins
+//                        those specific axons. e.g.
 //                        "pow-bench/results,pow-bench/leaderboard"
 //   RELAY_TOPIC_REGION   anchor region for RELAY_TOPICS (default useast — where
 //                        the demo/bench/share apps anchor their topics)
@@ -201,36 +206,48 @@ async function main() {
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  // RELAY_TOPICS: actively SUBSCRIBE so the relay joins those axons (and, when
-  // it's in-region for the anchor, gets promoted to a stable root) instead of
-  // idly meshing and never appearing in any Axon structure. Fire-and-forget so
-  // it never blocks shutdown wiring; waits briefly for the mesh to converge so
-  // the subscribe anchors on the right K-closest set.
+  // HOST mode: a relay's job is to store + serve topics for OTHERS, which is
+  // decoupled from subscribing (consuming). peer.host() volunteers the relay
+  // for its keyspace neighborhood so it's recruited as a root for whatever
+  // lands near its id — participation with zero topic config. RELAY_TOPICS
+  // additionally hosts named topics. Neither registers a consumer. Fire-and-
+  // forget so it never blocks shutdown; waits briefly for the mesh to converge
+  // so the announce anchors on the right K-closest set.
   void (async () => {
+    const hostKeyspace = (process.env.RELAY_HOST_KEYSPACE ?? '1') !== '0';
     const topics = (process.env.RELAY_TOPICS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (!topics.length) return;
-    // Default the topic anchor to the relay's OWN region, so a regional relay
-    // anchors (and roots) in its own keyspace — matching same-region apps —
-    // instead of being pinned to us-east. Override with RELAY_TOPIC_REGION.
+    if (!hostKeyspace && !topics.length) return;
+    // Anchor named topics at the relay's OWN region by default, so a regional
+    // relay hosts in its own keyspace — matching same-region apps — instead of
+    // being pinned to us-east. Override with RELAY_TOPIC_REGION.
     const anchorRegion = (process.env.RELAY_TOPIC_REGION ?? ('0x' + regionCode)).trim();
     const publisher = topicPublisherFor(anchorRegion);
-    if (!publisher) { present.logLine(`{red-fg}ERR{/} RELAY_TOPICS: unknown RELAY_TOPIC_REGION "${anchorRegion}"`); return; }
+    if (topics.length && !publisher) { present.logLine(`{red-fg}ERR{/} RELAY_TOPICS: unknown RELAY_TOPIC_REGION "${anchorRegion}"`); return; }
     const readyBy = Date.now() + 25000;
     while (!shuttingDown && Date.now() < readyBy && (node.synaptome?.size ?? 0) < 3) {
       await new Promise((r) => setTimeout(r, 500));
+    }
+    if (shuttingDown) return;
+    if (hostKeyspace) {
+      try {
+        await peer.host();   // host my keyspace — recruit for nearby topics, no consume
+        present.logLine(`{cyan-fg}hosting{/} keyspace 0x${regionCode} — recruiting as a root for nearby topics`);
+      } catch (e) {
+        present.logLine(`{red-fg}ERR{/} host keyspace: ${e?.message || e}`);
+      }
     }
     let n = 0;
     for (const topic of topics) {
       if (shuttingDown) return;
       try {
-        await peer.sub(topic, () => {}, { publisher, since: 'all' });   // no-op cb: we relay/cache, don't consume
+        await peer.host(topic, { publisher });   // store + serve, don't consume
         n++;
-        present.logLine(`{cyan-fg}subscribed{/} ${topic} @ ${anchorRegion} (0x${publisher.slice(0, 2)}) — joined its axon`);
+        present.logLine(`{cyan-fg}hosting{/} ${topic} @ ${anchorRegion} (0x${publisher.slice(0, 2)}) — serving its axon`);
       } catch (e) {
-        present.logLine(`{red-fg}ERR{/} subscribe ${topic}: ${e?.message || e}`);
+        present.logLine(`{red-fg}ERR{/} host ${topic}: ${e?.message || e}`);
       }
     }
-    present.logLine(`{gray-fg}RELAY_TOPICS: ${n}/${topics.length} active — watch the "root axon" panel for promotion to root{/}`);
+    if (topics.length) present.logLine(`{gray-fg}RELAY_TOPICS: ${n}/${topics.length} hosted — watch the "root axon" panel for promotion to root{/}`);
   })();
 }
 
