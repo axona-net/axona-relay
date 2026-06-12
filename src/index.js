@@ -9,6 +9,12 @@
 //   RELAY_IDENTITY_PATH  persisted keypair file        (default ./identity.relay.json)
 //   RELAY_LAT/RELAY_LNG  geo prefix for the nodeId      (default SF 37.77,-122.42)
 //   RELAY_TUI            1=force dashboard, 0=plain log (default: auto by isTTY)
+//   RELAY_TOPICS         comma-separated topics to SUBSCRIBE to, so the relay
+//                        actively joins those axons (and, in-region, becomes a
+//                        stable root) instead of idly meshing. e.g.
+//                        "pow-bench/results,pow-bench/leaderboard"
+//   RELAY_TOPIC_REGION   anchor region for RELAY_TOPICS (default useast — where
+//                        the demo/bench/share apps anchor their topics)
 //
 // Quit with q or Ctrl-C.
 
@@ -35,6 +41,17 @@ const USE_TUI = process.env.RELAY_TUI != null
 const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|error|signal/i;
 
 const DEFAULT_REGION = { lat: 37.77, lng: -122.42 };  // SF (us-west / uswest)
+
+// Synthetic-publisher anchor for a region token (e.g. "useast" / "0x89"), matching
+// exactly how the apps anchor their topics (geoCellId prefix + 64 zeros). Reuses
+// helpers already imported above; returns null for an unknown region.
+function topicPublisherFor(regionTok) {
+  const code = resolveRegion(regionTok);
+  if (code == null) return null;
+  const c = geoCellCenter(code);
+  const prefix = geoCellId(c.lat, c.lng, 8).toString(16).padStart(2, '0');
+  return prefix + '0'.repeat(64);
+}
 
 /**
  * Resolve the desired region from env, precedence:
@@ -183,6 +200,35 @@ async function main() {
   process.on('relay:quit', () => shutdown('quit'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // RELAY_TOPICS: actively SUBSCRIBE so the relay joins those axons (and, when
+  // it's in-region for the anchor, gets promoted to a stable root) instead of
+  // idly meshing and never appearing in any Axon structure. Fire-and-forget so
+  // it never blocks shutdown wiring; waits briefly for the mesh to converge so
+  // the subscribe anchors on the right K-closest set.
+  void (async () => {
+    const topics = (process.env.RELAY_TOPICS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (!topics.length) return;
+    const anchorRegion = (process.env.RELAY_TOPIC_REGION ?? 'useast').trim();
+    const publisher = topicPublisherFor(anchorRegion);
+    if (!publisher) { present.logLine(`{red-fg}ERR{/} RELAY_TOPICS: unknown RELAY_TOPIC_REGION "${anchorRegion}"`); return; }
+    const readyBy = Date.now() + 25000;
+    while (!shuttingDown && Date.now() < readyBy && (node.synaptome?.size ?? 0) < 3) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
+    let n = 0;
+    for (const topic of topics) {
+      if (shuttingDown) return;
+      try {
+        await peer.sub(topic, () => {}, { publisher, since: 'all' });   // no-op cb: we relay/cache, don't consume
+        n++;
+        present.logLine(`{cyan-fg}subscribed{/} ${topic} @ ${anchorRegion} (0x${publisher.slice(0, 2)}) — joined its axon`);
+      } catch (e) {
+        present.logLine(`{red-fg}ERR{/} subscribe ${topic}: ${e?.message || e}`);
+      }
+    }
+    present.logLine(`{gray-fg}RELAY_TOPICS: ${n}/${topics.length} active — watch the "root axon" panel for promotion to root{/}`);
+  })();
 }
 
 main().catch((err) => {
