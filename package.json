@@ -17,7 +17,8 @@
     "pull": "node src/cli.js pull",
     "mcp": "node src/mcp.js",
     "e2e": "node e2e/run.js",
-    "collect": "node pow-collector.js"
+    "collect": "node pow-collector.js",
+    "pubsub:selftest": "node scripts/pubsub-selftest.mjs"
   },
   "engines": {
     "node": ">=20"
