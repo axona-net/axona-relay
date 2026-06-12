@@ -209,7 +209,10 @@ async function main() {
   void (async () => {
     const topics = (process.env.RELAY_TOPICS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
     if (!topics.length) return;
-    const anchorRegion = (process.env.RELAY_TOPIC_REGION ?? 'useast').trim();
+    // Default the topic anchor to the relay's OWN region, so a regional relay
+    // anchors (and roots) in its own keyspace — matching same-region apps —
+    // instead of being pinned to us-east. Override with RELAY_TOPIC_REGION.
+    const anchorRegion = (process.env.RELAY_TOPIC_REGION ?? ('0x' + regionCode)).trim();
     const publisher = topicPublisherFor(anchorRegion);
     if (!publisher) { present.logLine(`{red-fg}ERR{/} RELAY_TOPICS: unknown RELAY_TOPIC_REGION "${anchorRegion}"`); return; }
     const readyBy = Date.now() + 25000;
