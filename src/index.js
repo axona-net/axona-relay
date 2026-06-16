@@ -25,7 +25,7 @@
 
 import './polyfill.js';                 // MUST be first — installs RTCPeerConnection/WebSocket
 import { cleanupWebRTC } from './polyfill.js';
-import { loadOrCreateIdentity, acquireIdentityLock, createEphemeralIdentity } from './identity.js';
+import { createEphemeralIdentity } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion } from './relay.js';
 import { powCalibrate, powDifficulty } from '../vendor/axona-protocol/src/pow/pow.js';
 import { makeDashboard, makePlainLog } from './tui.js';
@@ -45,8 +45,18 @@ const RELAY_VERSION = JSON.parse(
 // dispatch-boundary guard already drops malformed frames. Without these handlers
 // such errors reach Node's top level and exit the process (the recurring relay
 // crashes). Same posture as pow-collector.js.
-process.on('uncaughtException',  (e) => console.error(`⚠ uncaughtException (continuing): ${e?.stack || e?.message || e}`));
-process.on('unhandledRejection', (e) => console.error(`⚠ unhandledRejection (continuing): ${e?.message || e}`));
+//
+// Route through the active TUI's log panel when one exists — a raw console.error
+// writes over the blessed/dashboard frame and shreds the display (looks like a
+// crash). `activePresent` is set once main() builds the presenter; before that
+// (early boot) we fall back to console so nothing is swallowed.
+let activePresent = null;
+const reportCaught = (msg) => {
+  if (activePresent) { try { activePresent.logLine(`{red-fg}⚠{/} ${msg}`); return; } catch { /* fall through */ } }
+  console.error(`⚠ ${msg}`);
+};
+process.on('uncaughtException',  (e) => reportCaught(`uncaughtException (continuing): ${e?.stack || e?.message || e}`));
+process.on('unhandledRejection', (e) => reportCaught(`unhandledRejection (continuing): ${e?.message || e}`));
 
 const BRIDGE_URL = resolveBridgeUrl();   // BRIDGE_URL env › RELAY_NETWORK env › prod
 const USE_TUI = process.env.RELAY_TUI != null
@@ -118,25 +128,14 @@ async function resolveRegionConfig() {
 
 async function main() {
   const cfg = await resolveRegionConfig();
-  // Region-keyed default identity file, so two different regions never collide
-  // on one file (and the same region intentionally shares — guarded by a lock).
-  // 'auto' uses a fixed key so re-detection variance can't orphan the identity.
-  const IDENTITY_PATH = process.env.RELAY_IDENTITY_PATH || `./identity.${cfg.fileKey}.json`;
-
-  // The first instance claims the KNOWN persistent identity (stable nodeId
-  // across restarts). If it's already in use, we don't refuse — we run as an
-  // ADDITIONAL node: a fresh ephemeral identity in the same region (unique
-  // nodeId, not persisted). So `npm start` again just adds a node.
-  let releaseLock, identity, created = false, mode;
-  try {
-    releaseLock = await acquireIdentityLock(IDENTITY_PATH);
-    ({ identity, created } = await loadOrCreateIdentity(IDENTITY_PATH, { lat: cfg.lat, lng: cfg.lng }));
-    mode = 'primary';
-  } catch (e) {
-    if (e.code !== 'IDENTITY_LOCKED') throw e;
-    identity = await createEphemeralIdentity({ lat: cfg.lat, lng: cfg.lng });
-    mode = 'additional';
-  }
+  // Phase 2: the transport id is EPHEMERAL — never persisted. Every relay mints
+  // a fresh in-memory identity on each start (no cross-restart linkage; a
+  // restarted relay re-joins as a new node and the cold-start anti-entropy drain
+  // re-warms its keyspace). Multiple relays in one region just get distinct
+  // random ids — no shared file, no lock.
+  const releaseLock = null;
+  const identity = await createEphemeralIdentity({ lat: cfg.lat, lng: cfg.lng });
+  const mode = 'ephemeral';
   const region      = identity.region ?? cfg;
   const regionCodeN = geoCellId(region.lat, region.lng, 8);
   const regionCode  = regionCodeN.toString(16).padStart(2, '0');
@@ -147,14 +146,10 @@ async function main() {
     bridgeUrl: BRIDGE_URL, nodeId: identity.id, region,
     regionLabel, regionName, mode,
   });
+  activePresent = present;   // process-level error handlers now log to the panel, not over the frame
   for (const n of cfg.notes) present.logLine(`{gray-fg}geo:{/} ${n}`);
-  present.logLine(
-    mode === 'additional'
-      ? `{cyan-fg}ADDITIONAL node{/} — known identity in use; minted an ephemeral ` +
-        `id in ${regionLabel} (0x${regionCode}), not persisted`
-      : created
-        ? `{green-fg}PRIMARY node{/} — minted a new known identity in ${regionLabel} (0x${regionCode})`
-        : `{green-fg}PRIMARY node{/} — loaded known identity (${regionLabel} 0x${regionCode})`);
+  present.logLine(`{cyan-fg}ephemeral node{/} — fresh id in ${regionLabel} (0x${regionCode}); ` +
+    `transport ids are never persisted (re-minted every start)`);
 
   // Stage 2 (E-1): log this device's PoW solve-rate. Difficulty is 0 (inert), so
   // this is pure CALIBRATION DATA for choosing a Stage-4 difficulty — `estMintMs`
@@ -192,6 +187,7 @@ async function main() {
   const shutdown = async (why) => {
     if (shuttingDown) return; shuttingDown = true;
     if (tick) clearInterval(tick);
+    activePresent = null;        // stop routing late errors into a torn-down panel
     present.destroy();
     console.log(`\naxona-relay shutting down (${why})…`);
     try { await stopRelay({ peer, transport }); } catch { /* */ }
