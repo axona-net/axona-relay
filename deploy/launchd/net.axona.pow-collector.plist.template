@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Supervised PoW-bench results collector (LaunchAgent). Rendered by
+     deploy/launchd/install.sh. KeepAlive=true → auto-restart on exit; the
+     collector already self-heals connection drops and backfills via
+     since:'all' on (re)connect, so a restart never double-logs (dedup by
+     msgId in pow-results.jsonl). Logs → ~/Library/Logs/axona-relay/pow-collector.log. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.axona.pow-collector</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@NODE@</string>
+    <string>pow-collector.js</string>
+  </array>
+  <key>WorkingDirectory</key><string>@WORKDIR@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/axona-relay/pow-collector.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/axona-relay/pow-collector.log</string>
+</dict>
+</plist>

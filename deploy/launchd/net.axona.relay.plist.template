@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Supervised axona-relay (LaunchAgent). Rendered from this template by
+     deploy/launchd/install.sh (@NODE@ / @WORKDIR@ / @HOME@ are filled in).
+     KeepAlive=true → launchd restarts it whenever it exits, on top of the
+     relay's own in-process resilience (uncaughtException guard + connect
+     retry). ThrottleInterval caps the restart rate. RELAY_TUI=0 → plain log
+     to ~/Library/Logs/axona-relay/relay.log. -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>net.axona.relay</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@NODE@</string>
+    <string>src/index.js</string>
+  </array>
+  <key>WorkingDirectory</key><string>@WORKDIR@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>RELAY_REGION</key><string>auto</string>
+    <key>RELAY_TUI</key><string>0</string>
+    <key>PATH</key><string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>@HOME@/Library/Logs/axona-relay/relay.log</string>
+  <key>StandardErrorPath</key><string>@HOME@/Library/Logs/axona-relay/relay.log</string>
+</dict>
+</plist>
