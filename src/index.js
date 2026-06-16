@@ -37,6 +37,17 @@ import { readFile } from 'node:fs/promises';
 const RELAY_VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 
+// Resilience: a relay is long-lived infrastructure. A stray async error must NOT
+// take the process down — most commonly a WebSocket `error` event on a bridge
+// blip (502 while the bridge restarts, ECONNREFUSED when it's briefly down) or a
+// malformed inbound frame. Log loudly and keep running; the transport's
+// reconnect:true re-establishes the bridge link, and the kernel's
+// dispatch-boundary guard already drops malformed frames. Without these handlers
+// such errors reach Node's top level and exit the process (the recurring relay
+// crashes). Same posture as pow-collector.js.
+process.on('uncaughtException',  (e) => console.error(`⚠ uncaughtException (continuing): ${e?.stack || e?.message || e}`));
+process.on('unhandledRejection', (e) => console.error(`⚠ unhandledRejection (continuing): ${e?.message || e}`));
+
 const BRIDGE_URL = resolveBridgeUrl();   // BRIDGE_URL env › RELAY_NETWORK env › prod
 const USE_TUI = process.env.RELAY_TUI != null
   ? process.env.RELAY_TUI !== '0'
@@ -170,34 +181,20 @@ async function main() {
     present.logLine(`${tag ? tag + ' ' : ''}${event}${detail}`);
   };
 
-  const { peer, transport, node, domain } = createRelay({
-    bridgeUrl: BRIDGE_URL, identity, region, onLog,
-  });
+  // Stack is (re)built per connect attempt below, so these are mutable and the
+  // shutdown closure always sees the live instances.
+  let peer, transport, node, domain;
 
-  peer.onPeerJoin?.((id) => present.logLine(`{green-fg}+ peer{/} ${id.slice(0, 12)}…`));
-  peer.onPeerLeave?.((id) => present.logLine(`{gray-fg}- peer{/} ${id.slice(0, 12)}…`));
-  ['info', 'warn', 'error'].forEach(lvl =>
-    peer.onLog?.(lvl, (msg, ctx) => onLog(lvl, msg, ctx)));
-  peer.onError?.((err) => onLog('error', err?.code || 'error', { message: err?.message }));
-
-  await startRelay({ peer, transport });
-  present.logLine('started — meshing…');
-
-  const startedAt = Date.now();
-  const tick = setInterval(() => {
-    let health;
-    try { health = peer.health(); }
-    catch (e) { present.logLine(`{red-fg}health() threw{/} ${e.message}`); return; }
-    present.update({ health, uptimeMs: Date.now() - startedAt, regionCode });
-  }, 1000);
-
+  // Shutdown wiring goes up BEFORE the connect so Ctrl-C / q work even while
+  // we're still retrying an unreachable bridge.
   let shuttingDown = false;
+  let tick = null;
   const shutdown = async (why) => {
     if (shuttingDown) return; shuttingDown = true;
-    clearInterval(tick);
+    if (tick) clearInterval(tick);
     present.destroy();
     console.log(`\naxona-relay shutting down (${why})…`);
-    await stopRelay({ peer, transport });
+    try { await stopRelay({ peer, transport }); } catch { /* */ }
     cleanupWebRTC();
     try { await releaseLock?.(); } catch { /* */ }
     process.exit(0);
@@ -205,6 +202,51 @@ async function main() {
   process.on('relay:quit', () => shutdown('quit'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Resilient startup: a bridge that's down or restarting (ECONNREFUSED / 502 /
+  // handshake timeout) must not kill the relay. webTransport's reconnect:true
+  // only self-heals AFTER a first successful bind — a failed FIRST connect does
+  // NOT auto-retry — so we drive the retry here, rebuilding the stack each
+  // attempt (re-calling start() on a half-dead transport is unsafe) and bounding
+  // each attempt with a timeout so a hung connect can't stall us. The timeout
+  // timer also keeps the event loop alive so the process can't silently drain
+  // out while the bridge is unreachable. Once connected, reconnect:true takes
+  // over for later drops.
+  const CONNECT_TIMEOUT_MS = 20000;
+  for (let attempt = 1; !shuttingDown; attempt++) {
+    if (transport) {                       // tear down the prior failed attempt
+      try { await stopRelay({ peer, transport }); } catch { /* */ }
+      try { cleanupWebRTC(); } catch { /* */ }
+    }
+    ({ peer, transport, node, domain } = createRelay({ bridgeUrl: BRIDGE_URL, identity, region, onLog }));
+    peer.onPeerJoin?.((id)  => present.logLine(`{green-fg}+ peer{/} ${id.slice(0, 12)}…`));
+    peer.onPeerLeave?.((id) => present.logLine(`{gray-fg}- peer{/} ${id.slice(0, 12)}…`));
+    ['info', 'warn', 'error'].forEach((lvl) => peer.onLog?.(lvl, (msg, ctx) => onLog(lvl, msg, ctx)));
+    peer.onError?.((err) => onLog('error', err?.code || 'error', { message: err?.message }));
+    try {
+      await Promise.race([
+        startRelay({ peer, transport }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('connect/handshake timeout')), CONNECT_TIMEOUT_MS)),
+      ]);
+      break;
+    } catch (e) {
+      if (shuttingDown) return;
+      const wait = Math.min(30000, 2000 * attempt);
+      present.logLine(`{yellow-fg}WRN{/} bridge connect failed (attempt ${attempt}): ` +
+        `${e?.message || e} — retry in ${Math.round(wait / 1000)}s`);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+  if (shuttingDown) return;
+  present.logLine('started — meshing…');
+
+  const startedAt = Date.now();
+  tick = setInterval(() => {
+    let health;
+    try { health = peer.health(); }
+    catch (e) { present.logLine(`{red-fg}health() threw{/} ${e.message}`); return; }
+    present.update({ health, uptimeMs: Date.now() - startedAt, regionCode });
+  }, 1000);
 
   // HOST mode: a relay's job is to store + serve topics for OTHERS, which is
   // decoupled from subscribing (consuming). peer.host() volunteers the relay
