@@ -14,7 +14,7 @@
 // are bridge-only roles.
 
 import { AxonaPeer, AxonaDomain, NeuronNode,
-         regionName, resolveRegion, regionCenter, keyDerivedRegion, POPULATED_REGIONS }
+         regionName, resolveRegion, regionCenter, POPULATED_REGIONS }
   from '../vendor/axona-protocol/src/index.js';
 import { webTransport }
   from '../vendor/axona-protocol/src/transport/web/index.js';
@@ -22,7 +22,7 @@ import { KERNEL_VERSION }
   from '../vendor/axona-protocol/src/transport/handshake.js';
 import { WebSocketImpl } from './polyfill.js';
 
-export { KERNEL_VERSION, regionName, resolveRegion, regionCenter, keyDerivedRegion, POPULATED_REGIONS };
+export { KERNEL_VERSION, regionName, resolveRegion, regionCenter, POPULATED_REGIONS };
 
 /**
  * Resolve a region token (name like "useast" or code like "0x89") to the
