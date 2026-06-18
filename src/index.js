@@ -18,15 +18,17 @@
 //                        others, without consuming them), so the relay joins
 //                        those specific axons. e.g.
 //                        "pow-bench/results,pow-bench/leaderboard"
-//   RELAY_TOPIC_REGION   anchor region for RELAY_TOPICS (default useast — where
-//                        the demo/bench/share apps anchor their topics)
+//                        v0.3: each is hosted as { region, name } where region
+//                        is RELAY_TOPIC_REGION (the structured-topic anchor).
+//   RELAY_TOPIC_REGION   region for RELAY_TOPICS (default = the relay's own
+//                        region — where the demo/bench/share apps anchor)
 //
 // Quit with q or Ctrl-C.
 
 import './polyfill.js';                 // MUST be first — installs RTCPeerConnection/WebSocket
 import { cleanupWebRTC } from './polyfill.js';
 import { createEphemeralIdentity } from './identity.js';
-import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion } from './relay.js';
+import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion, regionDescriptor } from './relay.js';
 import { powCalibrate, powDifficulty } from '../vendor/axona-protocol/src/pow/pow.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
@@ -68,15 +70,11 @@ const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|err
 
 const DEFAULT_REGION = { lat: 37.77, lng: -122.42 };  // SF (us-west / uswest)
 
-// Synthetic-publisher anchor for a region token (e.g. "useast" / "0x89"), matching
-// exactly how the apps anchor their topics (geoCellId prefix + 64 zeros). Reuses
-// helpers already imported above; returns null for an unknown region.
-function topicPublisherFor(regionTok) {
-  const code = resolveRegion(regionTok);
-  if (code == null) return null;
-  const c = geoCellCenter(code);
-  const prefix = geoCellId(c.lat, c.lng, 8).toString(16).padStart(2, '0');
-  return prefix + '0'.repeat(64);
+// v0.3: a region token (e.g. "useast" / "0x89") → the structured-topic region
+// NAME used in { region, name } descriptors. Replaces the old synthetic-
+// publisher anchor; the region→keyspace mapping is unchanged. null if unknown.
+function topicRegionFor(regionTok) {
+  return regionDescriptor(regionTok)?.name ?? null;
 }
 
 /**
@@ -259,8 +257,8 @@ async function main() {
     // relay hosts in its own keyspace — matching same-region apps — instead of
     // being pinned to us-east. Override with RELAY_TOPIC_REGION.
     const anchorRegion = (process.env.RELAY_TOPIC_REGION ?? ('0x' + regionCode)).trim();
-    const publisher = topicPublisherFor(anchorRegion);
-    if (topics.length && !publisher) { present.logLine(`{red-fg}ERR{/} RELAY_TOPICS: unknown RELAY_TOPIC_REGION "${anchorRegion}"`); return; }
+    const topicRegion = topicRegionFor(anchorRegion);
+    if (topics.length && !topicRegion) { present.logLine(`{red-fg}ERR{/} RELAY_TOPICS: unknown RELAY_TOPIC_REGION "${anchorRegion}"`); return; }
     const readyBy = Date.now() + 25000;
     while (!shuttingDown && Date.now() < readyBy && (node.synaptome?.size ?? 0) < 3) {
       await new Promise((r) => setTimeout(r, 500));
@@ -278,9 +276,9 @@ async function main() {
     for (const topic of topics) {
       if (shuttingDown) return;
       try {
-        await peer.host(topic, { publisher });   // store + serve, don't consume
+        await peer.host({ region: topicRegion, name: topic });   // store + serve, don't consume
         n++;
-        present.logLine(`{cyan-fg}hosting{/} ${topic} @ ${anchorRegion} (0x${publisher.slice(0, 2)}) — serving its axon`);
+        present.logLine(`{cyan-fg}hosting{/} ${topic} @ ${topicRegion} — serving its axon`);
       } catch (e) {
         present.logLine(`{red-fg}ERR{/} host ${topic}: ${e?.message || e}`);
       }

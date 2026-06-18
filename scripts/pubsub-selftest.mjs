@@ -20,7 +20,7 @@
 // =====================================================================
 import '../src/polyfill.js';
 import { readFileSync } from 'node:fs';
-import { connectPeer, regionToPublisher } from '../src/ops.js';
+import { connectPeer, regionToDescriptor } from '../src/ops.js';
 import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
 import { resolveRegion, regionName } from '../vendor/axona-protocol/src/utils/region-names.js';
 
@@ -46,9 +46,9 @@ async function main() {
   const bridge  = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
   if (!topics.length) { console.error('Set RELAY_TOPICS=topic1,topic2 (the topics your relay should serve).'); process.exit(2); }
   const relayId = relayNodeId(region);
-  const { publisher } = regionToPublisher(anchor);
+  const { name: anchorRegion } = regionToDescriptor(anchor);   // structured-topic region name
 
-  log(`Probe: region ${region} · anchor ${anchor} (0x${publisher.slice(0,2)}) · bridge ${bridge}`);
+  log(`Probe: region ${region} · anchor ${anchorRegion} · bridge ${bridge}`);
   log(relayId ? `Testing your relay: ${relayId.slice(0,16)}… (prefix 0x${relayId.slice(0,2)})`
               : `(no RELAY_NODEID / identity file found — will only show the K-closest set, not a YES/NO)`);
 
@@ -65,7 +65,7 @@ async function main() {
   if (relayId) pool.add(relayId);
 
   for (const topic of topics) {
-    const tid = await deriveTopicIdBig(BigInt('0x' + publisher), topic);
+    const tid = await deriveTopicIdBig({ region: anchorRegion, name: topic });
     const ranked = [...pool].map((h) => ({ h, d: BigInt('0x' + h) ^ tid }))
       .sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
     const roots = ranked.slice(0, ROOT_SET);
@@ -90,9 +90,9 @@ async function main() {
     let got = false, servedBy = null;
     const sub = await connectPeer({ region, bridge, readyTimeoutSec: 45 });
     sub.peer.onLog?.('debug', (m, ctx) => { if (String(m) === 'replay-serve' && ctx?.from) servedBy = ctx.from; });
-    await sub.peer.sub(topic, (env) => { if (env && !env.deleted && String(env.message).includes(beacon)) got = true; }, { publisher, since: 'all' });
+    await sub.peer.sub({ region: anchorRegion, name: topic }, (env) => { if (env && !env.deleted && String(env.message).includes(beacon)) got = true; }, { since: 'all' });
     await sleep(2000);
-    await probe.peer.pub(topic, JSON.stringify({ beacon }), { publisher });
+    await probe.peer.pub({ region: anchorRegion, name: topic }, JSON.stringify({ beacon }), { signWith: probe.author });
     await sleep(8000);
     log(`  live round-trip: ${got ? 'OK ✓ (a subscriber received the publish)' : 'FAILED ✗ (publish not delivered)'}` +
         (servedBy ? ` · replay served by 0x${String(servedBy).slice(0,2)}:${String(servedBy).slice(2,8)}` +

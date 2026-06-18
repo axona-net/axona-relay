@@ -11,27 +11,27 @@
 //   node src/cli.js pull <topic>                # fetch the latest message
 //
 // Options:
-//   --region <name|code>   synthetic-publisher region (default useast / 0x89,
-//                          matching the demo's us-east topics so this interops
-//                          with axona.net / the kernel demo)
+//   --region <name|code>   topic region (default useast / 0x89, matching the
+//                          demo's us-east topics so this interops with
+//                          axona.net / the kernel demo)
 //   --for <seconds>        sub: how long to listen          (default 25)
 //   --since <all|new>      sub: replay backlog or live-only  (default all)
 //   --network <prod|testnet>  which network to bootstrap from (default prod)
 //   --bridge <wss-url>     explicit bridge URL (overrides --network / BRIDGE_URL)
 //   --ready-timeout <sec>  max wait for mesh readiness       (default 30)
 //
-// Topic convention: the topic string is used verbatim (the demo uses
-// `us-east/hello-world`). The synthetic region publisher anchors it so
-// K-closest routing lands on that region's roots — both pub and sub MUST use
-// the same region, or they derive different topic IDs and never meet.
+// Topic convention (v0.3): the topic is a STRUCTURED descriptor
+// { region, name }. The topic STRING is the `name`; --region names the region
+// (e.g. "useast"), which anchors the topic id's keyspace — both pub and sub
+// MUST use the same region or they derive different topic IDs and never meet.
+// (Replaces the old synthetic-publisher anchor; the region→keyspace mapping is
+// unchanged.) Publishes are signed by a fresh ephemeral AUTHOR identity.
 
 import './polyfill.js';                     // MUST be first — RTCPeerConnection/WebSocket globals
 import { cleanupWebRTC } from './polyfill.js';
-import { createEphemeralIdentity } from './identity.js';
-import { createRelay, startRelay, stopRelay } from './relay.js';
-import { regionName, resolveRegion } from './relay.js';
+import { createEphemeralIdentity, createEphemeralAuthor } from './identity.js';
+import { createRelay, startRelay, stopRelay, regionDescriptor } from './relay.js';
 import { resolveBridgeUrl } from './network.js';
-import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
 
 // ── arg parsing ──────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -59,15 +59,15 @@ if (!['pub', 'sub', 'pull'].includes(cmd) || !topic) {
 try { opts.bridge = resolveBridgeUrl({ override: opts.bridge, network: opts.network }); }
 catch (e) { err({ error: e.message }); process.exit(2); }
 
-// ── region → synthetic publisher (prefix‖0^256), matching axona-peer/demo ──
-const regionCode = resolveRegion(opts.region);
-if (regionCode == null) { err({ error: `unknown region "${opts.region}"` }); process.exit(1); }
-const center      = geoCellCenter(regionCode);
-const prefixHex   = geoCellId(center.lat, center.lng, 8).toString(16).padStart(2, '0');
-const publisher   = prefixHex + '0'.repeat(64);   // 66-char synthetic nodeId, top byte = region
+// ── region → structured-topic region name, matching axona-peer/demo ──
+const rd = regionDescriptor(opts.region);
+if (!rd) { err({ error: `unknown region "${opts.region}"` }); process.exit(1); }
+const { name: regionName, center } = rd;
+const topicDesc = { region: regionName, name: topic };
 
 async function main() {
   const identity = await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
+  const author   = await createEphemeralAuthor();   // ephemeral signer for `pub`
   const onLog = (level, event, ctx) => {
     if (level === 'error') elog('ERR', event, ctx ? JSON.stringify(ctx).slice(0, 160) : '');
   };
@@ -87,24 +87,24 @@ async function main() {
   await new Promise(r => setTimeout(r, 1500));   // brief settle so roots are reachable
 
   if (cmd === 'pub') {
-    const msgId = await peer.pub(topic, message, { publisher });
-    out({ ok: true, action: 'pub', topic, region: opts.region, prefix: '0x' + prefixHex, msgId, nodeId: identity.id });
+    const msgId = await peer.pub(topicDesc, message, { signWith: author });
+    out({ ok: true, action: 'pub', topic, region: regionName, signer: author.authorId, msgId, nodeId: identity.id });
     await new Promise(r => setTimeout(r, 1500));  // let it propagate to roots
     await done(peer, transport); process.exit(0);
   }
 
   if (cmd === 'pull') {
-    const env = await peer.pull(null, { topic, publisher });   // null msgId → latest
-    out({ ok: true, action: 'pull', topic, region: opts.region, message: env ? env.message : null, found: !!env, msgId: env?.msgId ?? null });
+    const env = await peer.pull(null, { topic: topicDesc });   // null msgId → latest
+    out({ ok: true, action: 'pull', topic, region: regionName, message: env ? env.message : null, found: !!env, msgId: env?.msgId ?? null });
     await done(peer, transport); process.exit(0);
   }
 
   // cmd === 'sub'
   let n = 0;
-  await peer.sub(topic, (env) => {
+  await peer.sub(topicDesc, (env) => {
     n++;
     out({ ok: true, action: 'msg', topic, message: env.message, signer: env.signerPubkey ?? null, seq: env.seq ?? null, ts: env.ts ?? null, msgId: env.msgId ?? null });
-  }, { publisher, since: opts.since });
+  }, { since: opts.since });
   elog(`subscribed to "${topic}" (region ${opts.region}); listening ${opts.for}s, since=${opts.since}…`);
   await new Promise(r => setTimeout(r, Number(opts.for) * 1000));
   out({ ok: true, action: 'sub-done', topic, received: n });

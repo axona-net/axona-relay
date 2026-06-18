@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Hardened-runtime entitlements for the notarized build.
+     allow-jit / allow-unsigned-executable-memory : required by Electron's V8.
+     disable-library-validation : load-bearing — lets the hardened runtime load
+        the prebuilt node-datachannel .node addon (not same-Team-signed).
+     network.client / network.server : the relay dials the bridge AND forms
+        inbound WebRTC. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key><true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+  <key>com.apple.security.cs.disable-library-validation</key><true/>
+  <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+  <key>com.apple.security.network.client</key><true/>
+  <key>com.apple.security.network.server</key><true/>
+</dict>
+</plist>

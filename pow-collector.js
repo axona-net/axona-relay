@@ -20,7 +20,8 @@
 // Each line: { recvTs, msgId, signer, result:{...the published bench result...} }.
 // =====================================================================
 import './src/polyfill.js';
-import { connectPeer, regionToPublisher } from './src/ops.js';
+import { connectPeer, regionToDescriptor } from './src/ops.js';
+import { createEphemeralAuthor } from './src/identity.js';
 import { cleanupWebRTC } from './src/polyfill.js';
 import { resolveBridgeUrl } from './src/network.js';
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
@@ -62,7 +63,12 @@ const LEADERBOARD_TOPIC = 'pow-bench/leaderboard';
 const LEADERBOARD_MS    = 15000;
 const WATCHDOG_MS       = 20000;
 const agg = new Map();
-const { publisher } = regionToPublisher(REGION);
+// v0.3: the topic region is a NAME (was a synthetic publisher). Subscribers and
+// publishers meet on { region, name }. Resolve REGION → canonical region name.
+const { name: TOPIC_REGION } = regionToDescriptor(REGION);
+// Ephemeral author to sign the leaderboard publishes (key separation: the node
+// key never signs). A throwaway persona — the collector needs no stable author.
+const author = await createEphemeralAuthor();
 
 // ── connection state (rebuilt on reconnect) ─────────────────────────
 let h = null;
@@ -103,7 +109,7 @@ function onMessage(env) {
 async function connect() {
   h = await connectPeer({ region: REGION, bridge, readyTimeoutSec: 45,
     onError: (e) => console.log('  peer error: ' + (e?.message || e)) });
-  await h.peer.sub(TOPIC, onMessage, { publisher, since: 'all' });
+  await h.peer.sub({ region: TOPIC_REGION, name: TOPIC }, onMessage, { since: 'all' });
   console.log(`  connected as ${h.nodeId.slice(0, 10)}… — collecting`);
 }
 
@@ -132,7 +138,7 @@ async function reconnect(reason) {
 }
 
 // ── boot ────────────────────────────────────────────────────────────
-console.log(`pow-collector → ${OUT}\n  topic=${TOPIC} region=${REGION} bridge=${bridge}`);
+console.log(`pow-collector → ${OUT}\n  topic=${TOPIC} region=${TOPIC_REGION} bridge=${bridge}`);
 console.log(`  ${seen.size} result(s) already on file; connecting…`);
 await connect();
 console.log(`  collecting (auto-reconnect armed; Ctrl-C to stop)\n`);
@@ -159,7 +165,7 @@ setInterval(async () => {
                       // phones. ~600 × ~200B ≈ 120KB, well under the 256KB publish cap.
   const report = { ts: new Date().toISOString(), count: list.length, devices: list };
   try {
-    const msgId = await h.peer.pub(LEADERBOARD_TOPIC, JSON.stringify(report), { publisher });
+    const msgId = await h.peer.pub({ region: TOPIC_REGION, name: LEADERBOARD_TOPIC }, JSON.stringify(report), { signWith: author });
     console.log(`  → leaderboard published (${list.length} device-buckets) ${String(msgId).slice(0, 10)}…`);
   } catch (e) {
     console.log('  leaderboard publish failed: ' + (e.message || e));

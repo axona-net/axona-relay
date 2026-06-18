@@ -3,32 +3,34 @@
 // The shared core behind both the CLI (src/cli.js) and the MCP server
 // (src/mcp.js): connect a fresh EPHEMERAL peer to the live Axona network
 // (production by default — see network.js), wait for mesh readiness, run one
-// operation, tear everything down. Topics are
-// anchored at a synthetic region publisher (`<s2-prefix>‖0^256`), exactly as
-// axona-peer / the kernel demo do, so these interoperate with the live apps.
+// operation, tear everything down.
+//
+// v0.3 topic addressing: topics are STRUCTURED descriptors { region, name }.
+// The region NAME (e.g. "useast") anchors the topic in a keyspace — replacing
+// the old "synthetic publisher = <s2-prefix>‖0^256" anchor. An app and this
+// relay both open { region: 'useast', name: 'foo' } and meet on the same
+// topic id, so these still interoperate with the live apps. Publishes are
+// signed by an ephemeral AUTHOR identity (key separation: the node key never
+// signs); pass { signWith } on each pub.
 
 import './polyfill.js';                     // MUST be first — RTCPeerConnection/WebSocket globals
 import { cleanupWebRTC } from './polyfill.js';
-import { createEphemeralIdentity } from './identity.js';
-import { createRelay, startRelay, stopRelay, resolveRegion } from './relay.js';
-import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
+import { createEphemeralIdentity, createEphemeralAuthor } from './identity.js';
+import { createRelay, startRelay, stopRelay, regionDescriptor } from './relay.js';
 import { resolveBridgeUrl } from './network.js';
 
 export const DEFAULT_BRIDGE = resolveBridgeUrl();   // BRIDGE_URL env › RELAY_NETWORK env › prod
 
-/** region name|code → { code, center:{lat,lng}, prefixHex, publisher (66-hex) }. */
-export function regionToPublisher(region = 'useast') {
-  const code = resolveRegion(region);
-  if (code == null) throw new Error(`unknown region "${region}" (use a name like "useast" or a code like "0x89")`);
-  const center    = geoCellCenter(code);
-  const prefixHex = geoCellId(center.lat, center.lng, 8).toString(16).padStart(2, '0');
-  return { code, center, prefixHex, publisher: prefixHex + '0'.repeat(64) };
+/**
+ * region name|code → { code, name, center:{lat,lng} }.
+ * `name` is the structured-topic region (use it as `{ region: name, name: topic }`).
+ */
+export function regionToDescriptor(region = 'useast') {
+  const d = regionDescriptor(region);
+  if (!d) throw new Error(`unknown region "${region}" (use a name like "useast" or a code like "0x89")`);
+  return d;
 }
 
-/**
- * Connect an ephemeral peer, wait until the mesh is usable, run `fn(peer, ctx)`,
- * then always tear down. `ctx = { publisher, prefixHex, center, nodeId }`.
- */
 /**
  * Connect an ephemeral peer and wait until the mesh is usable. Returns the LIVE
  * peer plus `close()` — which stops the relay but does NOT tear down WebRTC,
@@ -36,10 +38,14 @@ export function regionToPublisher(region = 'useast') {
  * ALL connections). A multi-peer caller must therefore close each peer, then
  * call `cleanupWebRTC()` exactly once after the last one. `withConnectedPeer`
  * below is the single-peer convenience wrapper that does both.
+ *
+ * The returned `ctx` carries `regionName` (the structured-topic region) and a
+ * fresh ephemeral `author` to sign publishes with.
  */
 export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError } = {}) {
-  const { center, prefixHex, publisher } = regionToPublisher(region);
+  const { name: regionName, center } = regionToDescriptor(region);
   const identity = await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
+  const author   = await createEphemeralAuthor();
   const { peer, transport } = createRelay({ bridgeUrl: bridge, identity, region: center, onLog: () => {} });
   if (onError) peer.onError?.((e) => onError(e));
   await startRelay({ peer, transport });
@@ -56,7 +62,7 @@ export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, 
   }
   await new Promise(r => setTimeout(r, 1500));          // brief settle so roots are reachable
   return {
-    peer, publisher, prefixHex, center, nodeId: identity.id,
+    peer, regionName, center, author, nodeId: identity.id,
     async close() { try { await stopRelay({ peer, transport }); } catch { /* */ } },
   };
 }
@@ -64,7 +70,7 @@ export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, 
 export async function withConnectedPeer(opts, fn) {
   const h = await connectPeer(opts);
   try {
-    return await fn(h.peer, { publisher: h.publisher, prefixHex: h.prefixHex, center: h.center, nodeId: h.nodeId });
+    return await fn(h.peer, { regionName: h.regionName, center: h.center, author: h.author, nodeId: h.nodeId });
   } finally {
     await h.close();
     cleanupWebRTC();
@@ -73,15 +79,15 @@ export async function withConnectedPeer(opts, fn) {
 
 export async function publish({ topic, message, region = 'useast', bridge = DEFAULT_BRIDGE } = {}) {
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
-    const msgId = await peer.pub(topic, message, { publisher: ctx.publisher });
+    const msgId = await peer.pub({ region: ctx.regionName, name: topic }, message, { signWith: ctx.author });
     await new Promise(r => setTimeout(r, 1500));        // let it propagate to roots
-    return { ok: true, topic, region, prefix: '0x' + ctx.prefixHex, msgId, nodeId: ctx.nodeId };
+    return { ok: true, topic, region, msgId, signer: ctx.author.authorId, nodeId: ctx.nodeId };
   });
 }
 
 export async function pull({ topic, region = 'useast', bridge = DEFAULT_BRIDGE } = {}) {
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
-    const env = await peer.pull(null, { topic, publisher: ctx.publisher });   // null msgId → latest
+    const env = await peer.pull(null, { topic: { region: ctx.regionName, name: topic } });   // null msgId → latest
     return { ok: true, topic, region, found: !!env, message: env ? env.message : null, msgId: env?.msgId ?? null };
   });
 }
@@ -90,9 +96,9 @@ export async function subscribe({ topic, region = 'useast', bridge = DEFAULT_BRI
   const secs = Math.max(1, Math.min(120, Number(seconds) || 20));
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
     const messages = [];
-    await peer.sub(topic, (env) => {
+    await peer.sub({ region: ctx.regionName, name: topic }, (env) => {
       messages.push({ message: env.message, signer: env.signerPubkey ?? null, seq: env.seq ?? null, ts: env.ts ?? null, msgId: env.msgId ?? null });
-    }, { publisher: ctx.publisher, since });
+    }, { since });
     await new Promise(r => setTimeout(r, secs * 1000));
     return { ok: true, topic, region, listenedSec: secs, since, received: messages.length, messages };
   });

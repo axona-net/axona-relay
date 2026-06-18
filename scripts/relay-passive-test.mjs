@@ -4,14 +4,14 @@
 // and compares it to a relay that subscribes to one topic.
 import '../src/polyfill.js';
 import { cleanupWebRTC } from '../src/polyfill.js';
-import { connectPeer, regionToPublisher } from '../src/ops.js';
+import { connectPeer, regionToDescriptor } from '../src/ops.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 const REGION = (process.env.REGION || 'useast').trim();
 const BRIDGE = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
 const SETTLE = Number(process.env.SETTLE_MS || 40000);
-const { publisher } = regionToPublisher(REGION);
+const { name: TOPIC_REGION } = regionToDescriptor(REGION);   // structured-topic region name
 
 async function main() {
   log(`Passive-vs-subscribed relay test · region ${REGION} · bridge ${BRIDGE}`);
@@ -25,7 +25,7 @@ async function main() {
     // SUBSCRIBED: mesh + subscribe to one live app topic (== RELAY_TOPICS set)
     const active = await connectPeer({ region: REGION, bridge: BRIDGE, readyTimeoutSec: 45 });
     opened.push(active);
-    await active.peer.sub('pow-bench/results', () => {}, { publisher, since: 'all' });
+    await active.peer.sub({ region: TOPIC_REGION, name: 'pow-bench/results' }, () => {}, { since: 'all' });
     log(`active   relay up: ${String(active.nodeId).slice(0,12)}… (subscribed pow-bench/results)`);
 
     log(`settling ${SETTLE/1000}s (refresh ticks + recruitment)…`);

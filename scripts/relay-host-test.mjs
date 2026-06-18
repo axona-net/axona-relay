@@ -11,14 +11,14 @@
 // =====================================================================
 import '../src/polyfill.js';
 import { cleanupWebRTC } from '../src/polyfill.js';
-import { connectPeer, regionToPublisher } from '../src/ops.js';
+import { connectPeer, regionToDescriptor } from '../src/ops.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 const REGION = (process.env.REGION || 'useast').trim();
 const BRIDGE = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
 const SETTLE = Number(process.env.SETTLE_MS || 45000);
-const { publisher } = regionToPublisher(REGION);
+const { name: TOPIC_REGION } = regionToDescriptor(REGION);   // structured-topic region name
 const rolesOf = (p) => { try { return p.peer.health().axonRoles?.length ?? -1; } catch { return -1; } };
 const hostingOf = (p) => { try { const h = p.peer.health().hosting; return h ? `keyspace=${h.keyspace} topics=${h.topics.length}` : 'n/a'; } catch { return '?'; } };
 
@@ -37,7 +37,7 @@ async function main() {
 
     const topic = await connectPeer({ region: REGION, bridge: BRIDGE, readyTimeoutSec: 45 });
     opened.push(topic);
-    const hr = await topic.peer.host('pow-bench/results', { publisher });
+    const hr = await topic.peer.host({ region: TOPIC_REGION, name: 'pow-bench/results' });
     log(`topic    up: ${String(topic.nodeId).slice(0,12)}…  peer.host('pow-bench/results') → ${JSON.stringify(hr)}`);
 
     log(`\nsettling ${SETTLE/1000}s (refresh ticks + recruitment)…`);

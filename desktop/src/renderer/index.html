@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>Axona Relay</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main>
+    <header class="topbar">
+      <div class="brand">
+        <div id="light" class="indicator indicator-red"></div>
+        <div class="brand-text">
+          <div class="title">Axona Relay</div>
+          <div id="statusText" class="status">starting…</div>
+        </div>
+      </div>
+      <div class="netToggle" role="group" aria-label="Network">
+        <button id="netProd" class="seg" data-net="prod">Main</button>
+        <button id="netTestnet" class="seg" data-net="testnet">Testnet</button>
+      </div>
+    </header>
+
+    <section class="panel">
+      <div class="panel-head">
+        <span>Mesh connections</span>
+        <span id="loadNow" class="muted">—</span>
+      </div>
+      <canvas id="load" class="load"></canvas>
+    </section>
+
+    <section class="grid">
+      <div class="cell"><div class="k">bridge</div><div id="hBridge" class="v">—</div></div>
+      <div class="cell"><div class="k">mesh open / bound</div><div id="hMesh" class="v">—</div></div>
+      <div class="cell"><div class="k">peers (synaptome)</div><div id="hSyn" class="v">—</div></div>
+      <div class="cell"><div class="k">hosted roles</div><div id="hRoles" class="v">—</div></div>
+      <div class="cell"><div class="k">subscriptions</div><div id="hSubs" class="v">—</div></div>
+      <div class="cell"><div class="k">node id</div><div id="hNode" class="v mono">—</div></div>
+    </section>
+
+    <section class="row">
+      <label class="check">
+        <input type="checkbox" id="openAtLogin" />
+        <span>Start automatically at login</span>
+      </label>
+    </section>
+
+    <section class="panel logPanel">
+      <div class="panel-head"><span>Activity</span></div>
+      <div id="log" class="log"></div>
+    </section>
+
+    <footer class="verrow">
+      <span id="verRegion" class="muted">region —</span>
+      <span id="verText" class="muted">app — · relay — · kernel —</span>
+    </footer>
+  </main>
+
+  <script src="sparkline.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

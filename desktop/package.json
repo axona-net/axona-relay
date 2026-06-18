@@ -1,0 +1,60 @@
+{
+  "name": "axona-relay-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Axona Relay — macOS menu-bar app wrapping the Node relay core.",
+  "main": "src/main/main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "CSC_IDENTITY_AUTO_DISCOVERY=false electron-builder --dir",
+    "dist": "electron-builder --mac",
+    "smoke": "electron --no-sandbox -e \"try { require('node-datachannel'); console.log('node-datachannel OK', process.versions.napi); } catch (e) { console.error('node-datachannel FAILED', e); process.exit(1); }\""
+  },
+  "dependencies": {
+    "node-datachannel": "^0.32.3",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "electron": "^30",
+    "electron-builder": "^25"
+  },
+  "build": {
+    "appId": "net.axona.relay.desktop",
+    "productName": "Axona Relay",
+    "copyright": "© 2026 Axona",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      { "from": "../src", "to": "app-src/src" },
+      { "from": "../vendor", "to": "app-src/vendor" },
+      { "from": "../package.json", "to": "app-src/package.json" }
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "**/node_modules/node-datachannel/**"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] },
+        { "target": "zip", "arch": ["arm64"] }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "notarize": true
+    },
+    "dmg": {
+      "sign": false
+    }
+  }
+}

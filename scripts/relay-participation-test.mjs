@@ -19,7 +19,7 @@
 // =====================================================================
 import '../src/polyfill.js';
 import { cleanupWebRTC } from '../src/polyfill.js';
-import { connectPeer, regionToPublisher } from '../src/ops.js';
+import { connectPeer, regionToDescriptor } from '../src/ops.js';
 import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -32,7 +32,7 @@ const BRIDGE        = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
 const TOPIC         = `relaytest/${TOPIC_REGION}-${N}`;
 const CONVERGE_MS   = Number(process.env.CONVERGE_MS || 35000);
 
-const { publisher } = regionToPublisher(TOPIC_REGION);          // topic anchor
+const { name: ANCHOR_REGION } = regionToDescriptor(TOPIC_REGION);   // structured-topic region (topic anchor)
 
 // normalize a topic-id to a bare lowercase hex string for loose matching
 const hexOf = (v) => String(v == null ? '' : v).toLowerCase().replace(/^0x/, '');
@@ -47,9 +47,9 @@ async function rolesFor(peerObj, topicIdHex) {
 
 async function runCohort(label, region) {
   log(`\n=========================  COHORT: ${label}  (relays in ${region})  =========================`);
-  const tidBig = await deriveTopicIdBig(BigInt('0x' + publisher), TOPIC);
+  const tidBig = await deriveTopicIdBig({ region: ANCHOR_REGION, name: TOPIC });
   const tidHex = tidBig.toString(16).padStart(66, '0');
-  log(`topic "${TOPIC}"  anchor 0x${publisher.slice(0,2)} (${TOPIC_REGION})  topic-id 0x${tidHex.slice(0,12)}…`);
+  log(`topic "${TOPIC}"  anchor ${ANCHOR_REGION} (${TOPIC_REGION})  topic-id 0x${tidHex.slice(0,12)}…`);
 
   const relays = [];
   const opened = [];
@@ -58,7 +58,7 @@ async function runCohort(label, region) {
     for (let i = 0; i < N; i++) {
       const r = await connectPeer({ region, bridge: BRIDGE, readyTimeoutSec: 45 });
       opened.push(r);
-      await r.peer.sub(TOPIC, () => {}, { publisher, since: 'all' });   // RELAY_TOPICS-style active sub
+      await r.peer.sub({ region: ANCHOR_REGION, name: TOPIC }, () => {}, { since: 'all' });   // RELAY_TOPICS-style active sub
       relays.push(r);
       log(`  relay#${i + 1} up: ${String(r.nodeId).slice(0,12)}… (0x${String(r.nodeId).slice(0,2)}) subscribed`);
     }
@@ -67,7 +67,7 @@ async function runCohort(label, region) {
     const pub = await connectPeer({ region: TOPIC_REGION, bridge: BRIDGE, readyTimeoutSec: 45 });
     opened.push(pub);
     for (let i = 0; i < 3; i++) {
-      await pub.peer.pub(TOPIC, JSON.stringify({ n: i, label }), { publisher });
+      await pub.peer.pub({ region: ANCHOR_REGION, name: TOPIC }, JSON.stringify({ n: i, label }), { signWith: pub.author });
       await sleep(400);
     }
     log(`  published 3 messages from ${String(pub.nodeId).slice(0,12)}… (0x${String(pub.nodeId).slice(0,2)})`);
@@ -94,7 +94,7 @@ async function runCohort(label, region) {
     opened.push(sub);
     let got = 0, servedBy = null;
     sub.peer.onLog?.('debug', (m, ctx) => { if (String(m) === 'replay-serve' && ctx?.from) servedBy = ctx.from; });
-    await sub.peer.sub(TOPIC, (env) => { if (env && !env.deleted) got++; }, { publisher, since: 'all' });
+    await sub.peer.sub({ region: ANCHOR_REGION, name: TOPIC }, (env) => { if (env && !env.deleted) got++; }, { since: 'all' });
     await sleep(8000);
     log(`\n  fresh subscriber received ${got}/3 messages` +
         (servedBy ? ` · served by 0x${String(servedBy).slice(0,2)}:${String(servedBy).slice(2,8)}` : ''));

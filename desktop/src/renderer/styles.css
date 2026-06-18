@@ -1,0 +1,136 @@
+/* styles.css — dark theme + green/orange/red indicator, ported from
+   axona-peer/src/styles.css so the desktop app matches the web peer. */
+
+:root {
+  --bg:       #0f1419;
+  --panel:    #1a2028;
+  --panel-2:  #232b35;
+  --border:   #2c3540;
+  --text:     #d7dde5;
+  --muted:    #7a8593;
+  --muted-2:  #5a6370;
+  --accent:   #5fbfd0;
+  --red:      #d05050;
+  --orange:   #e88c20;
+  --green:    #50c060;
+  --shadow-red:    rgba(208, 80, 80, 0.55);
+  --shadow-orange: rgba(232, 140, 32, 0.65);
+  --shadow-green:  rgba(80, 192, 96, 0.65);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 13px;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 0 18px 14px;
+  height: 100%;
+}
+
+/* ── top bar ──
+   The whole strip is a drag region so the frameless (hiddenInset) window can be
+   moved by grabbing it; it bleeds to the window edges and reserves top space for
+   the traffic-light buttons. Interactive controls inside opt out with no-drag. */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  -webkit-app-region: drag;
+  margin: 0 -18px;
+  padding: 30px 18px 4px;
+}
+.netToggle { -webkit-app-region: no-drag; }
+.brand { display: flex; align-items: center; gap: 12px; }
+.brand-text .title { font-size: 15px; font-weight: 600; }
+.status { color: var(--muted); font-size: 12px; text-transform: capitalize; }
+
+/* ── indicator dot (from axona-peer) ── */
+.indicator {
+  width: 18px; height: 18px;
+  border-radius: 50%;
+  opacity: 0.32;
+  transition: background-color 0.15s ease, opacity 320ms ease-out, box-shadow 0.15s ease;
+  flex: 0 0 auto;
+}
+.indicator-red    { background: var(--red);    box-shadow: 0 0 12px var(--shadow-red);    opacity: 1; }
+.indicator-orange { background: var(--orange); box-shadow: 0 0 12px var(--shadow-orange); opacity: 1; }
+.indicator-green  { background: var(--green);  box-shadow: 0 0 12px var(--shadow-green);  opacity: 1; }
+
+/* ── network toggle ── */
+.netToggle { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg {
+  appearance: none;
+  background: var(--panel);
+  color: var(--muted);
+  border: 0;
+  padding: 6px 14px;
+  font: inherit;
+  cursor: pointer;
+}
+.seg + .seg { border-left: 1px solid var(--border); }
+.seg:hover { color: var(--text); }
+.seg.active { background: var(--accent); color: #06222a; font-weight: 600; }
+
+/* ── panels ── */
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.panel-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+.load { width: 100%; height: 84px; display: block; }
+
+/* ── health grid ── */
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.cell {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.cell .k { color: var(--muted); font-size: 11px; }
+.cell .v { font-size: 16px; font-weight: 600; margin-top: 2px; }
+.cell .v.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 13px; font-weight: 500; }
+.v.degraded { color: var(--orange); }
+
+/* ── login row ── */
+.row { padding: 0 2px; }
+.check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; color: var(--text); }
+.check input { accent-color: var(--accent); width: 15px; height: 15px; }
+
+/* ── log ── */
+.logPanel { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 96px; }
+.log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+}
+.log .line { white-space: pre-wrap; word-break: break-word; }
+.log .warn  { color: var(--orange); }
+.log .error { color: var(--red); }
+
+/* ── footer ── */
+.verrow { display: flex; justify-content: space-between; font-size: 11px; }
+.muted { color: var(--muted-2); }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }

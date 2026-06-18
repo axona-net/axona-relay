@@ -30,7 +30,9 @@ const flag = (name) => { const i = argv.indexOf(name); return i >= 0 ? (argv[i +
 const network = flag('--network');
 const bridge  = resolveBridgeUrl({ network });
 const RUN     = Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36);
-const T       = (name) => `e2e/${name}-${RUN}`;
+const REGION  = 'useast';                                   // peers connect in useast
+const T       = (name) => `e2e/${name}-${RUN}`;             // topic NAME
+const TD      = (name) => ({ region: REGION, name: T(name) });  // v0.3 structured descriptor
 const sleep   = (ms) => new Promise(r => setTimeout(r, ms));
 
 const results = [];
@@ -39,14 +41,15 @@ function ok(label, cond, detail = '') {
   console.log(`  ${cond ? '✓' : '✗'} ${label}${detail ? `  — ${detail}` : ''}`);
 }
 
-// Subscribe and collect everything seen on `topic` for `ms`, then resolve.
-async function collect(peer, topic, publisher, ms, since = 'all') {
+// Subscribe and collect everything seen on `topic` (a { region, name }
+// descriptor) for `ms`, then resolve.
+async function collect(peer, topic, ms, since = 'all') {
   const msgs = [];
   await peer.sub(topic, (env) => {
     if (!env) return;
     if (env.deleted) msgs.push({ deleted: true, msgId: env.msgId });
     else             msgs.push({ message: env.message });
-  }, { publisher, since });
+  }, { since });
   await sleep(ms);
   return msgs;
 }
@@ -54,18 +57,18 @@ async function collect(peer, topic, publisher, ms, since = 'all') {
 async function main() {
   console.log(`Axona pub/sub e2e — network=${resolveNetwork(network) ?? (process.env.RELAY_NETWORK ? resolveNetwork(process.env.RELAY_NETWORK) : 'prod')} bridge=${bridge}  run=${RUN}\n`);
   console.log('Connecting two ephemeral peers (real WebRTC)…');
-  const A = await connectPeer({ region: 'useast', bridge, readyTimeoutSec: 45 });
-  const B = await connectPeer({ region: 'useast', bridge, readyTimeoutSec: 45 });
-  console.log(`  A ${A.nodeId.slice(0, 10)}…  B ${B.nodeId.slice(0, 10)}…  (publisher prefix 0x${A.prefixHex})\n`);
+  const A = await connectPeer({ region: REGION, bridge, readyTimeoutSec: 45 });
+  const B = await connectPeer({ region: REGION, bridge, readyTimeoutSec: 45 });
+  console.log(`  A ${A.nodeId.slice(0, 10)}…  B ${B.nodeId.slice(0, 10)}…  (region ${A.regionName})\n`);
 
   try {
     // ── S1: pub → sub round-trip across two peers ──────────────────────
     console.log('── S1: pub → sub round-trip ──');
     {
-      const topic = T('roundtrip'), want = `hello-${RUN}`;
-      const subP = collect(B.peer, topic, B.publisher, 9000, 'all');
+      const topic = TD('roundtrip'), want = `hello-${RUN}`;
+      const subP = collect(B.peer, topic, 9000, 'all');
       await sleep(1500);
-      const id = await A.peer.pub(topic, want, { publisher: A.publisher });
+      const id = await A.peer.pub(topic, want, { signWith: A.author });
       const got = await subP;
       ok('A publishes, B receives it', got.some(m => m.message === want),
          `msgId ${String(id).slice(0, 12)}… · B saw ${got.length} msg`);
@@ -74,11 +77,11 @@ async function main() {
     // ── S2: metrics legit path (C-3-modified path still serves a real caller) ──
     console.log('\n── S2: metrics path (legit caller) ──');
     {
-      const topic = T('metrics');
-      await A.peer.pub(topic, `m-${RUN}`, { publisher: A.publisher });
+      const topic = TD('metrics');
+      await A.peer.pub(topic, `m-${RUN}`, { signWith: A.author });
       await sleep(2500);
       let m = null, err = null;
-      try { m = await A.peer.metrics(topic, { publisher: A.publisher }); } catch (e) { err = e; }
+      try { m = await A.peer.metrics(topic); } catch (e) { err = e; }
       ok('metrics(topic) returns a result for the proven caller', !err && m && typeof m === 'object',
          err ? `threw ${err.message}` : `current_count=${m?.current_count} subscribers=${m?.subscribers}`);
     }
@@ -86,13 +89,13 @@ async function main() {
     // ── S3: kill retracts everywhere, incl. duplicate copies (SP-11) ───
     console.log('\n── S3: kill (retraction + duplicate copies, SP-11) ──');
     {
-      const topic = T('kill'), msg = `killme-${RUN}`;
-      const id = await A.peer.pub(topic, msg, { publisher: A.publisher });  // copy 1
-      await A.peer.pub(topic, msg, { publisher: A.publisher });             // copy 2 — identical content ⇒ same msgId
+      const topic = TD('kill'), msg = `killme-${RUN}`;
+      const id = await A.peer.pub(topic, msg, { signWith: A.author });  // copy 1
+      await A.peer.pub(topic, msg, { signWith: A.author });             // copy 2 — identical content ⇒ same msgId
       await sleep(2000);
-      const k = await A.peer.kill(topic, id, { publisher: A.publisher });
+      const k = await A.peer.kill(topic, id, { signWith: A.author });
       await sleep(2500);
-      const got = await collect(B.peer, topic, B.publisher, 9000, 'all');
+      const got = await collect(B.peer, topic, 9000, 'all');
       const present = got.some(m => m.message === msg);
       ok('killed content is absent for a fresh subscriber', !present,
          `kill ok=${k?.ok} · B replayed ${got.filter(m => m.message).length} msg · killed-present=${present}`);
@@ -101,10 +104,10 @@ async function main() {
     // ── S4: per-publisher quota self-limits a single flooding publisher ─
     console.log('\n── S4: per-publisher quota (self-limit under flood) ──');
     {
-      const topic = T('quota'), N = 25;
-      for (let i = 0; i < N; i++) await A.peer.pub(topic, `q-${i}-${RUN}`, { publisher: A.publisher });
+      const topic = TD('quota'), N = 25;
+      for (let i = 0; i < N; i++) await A.peer.pub(topic, `q-${i}-${RUN}`, { signWith: A.author });
       await sleep(3000);
-      const got  = await collect(B.peer, topic, B.publisher, 11000, 'all');
+      const got  = await collect(B.peer, topic, 11000, 'all');
       const uniq = new Set(got.filter(m => m.message).map(m => m.message)).size;
       const capped = uniq < N;
       ok('delivery works and is bounded (≤ published)', uniq >= 1 && uniq <= N,
@@ -123,8 +126,8 @@ async function main() {
     await sleep(4000);                       // let A↔B form a direct mesh link
     {
       const Bmgr = B.peer._axonaManager;
-      const pubBig = fromHex(A.publisher);
-      const Tbig = await deriveTopicIdBig(pubBig, T('adv-metrics'));
+      const Tbig = await deriveTopicIdBig({ region: REGION, name: T('adv-metrics') });
+      const pubBig = Tbig;   // seed publisher field of the replay-cache entry with the topic id (region-keyed, no publisher anchor in v0.3)
       const Bbig = fromHex(B.nodeId), Abig = fromHex(A.nodeId);
       if (!Bmgr) ok('A1 metrics reflection', false, 'B manager absent (no pub/sub ran?)');
       else {
@@ -163,8 +166,7 @@ async function main() {
     console.log('\n── A2: B-1 subscribe-origin spoof (forged subscriberId) ──');
     {
       const Bmgr = B.peer._axonaManager;
-      const pubBig = fromHex(A.publisher);
-      const Tbig = await deriveTopicIdBig(pubBig, T('adv-sub'));
+      const Tbig = await deriveTopicIdBig({ region: REGION, name: T('adv-sub') });
       const Bbig = fromHex(B.nodeId), Abig = fromHex(A.nodeId);
       if (!Bmgr) ok('A2 subscribe spoof', false, 'B manager absent');
       else {
