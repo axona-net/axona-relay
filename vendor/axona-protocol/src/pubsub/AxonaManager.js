@@ -2745,28 +2745,30 @@ export class AxonaManager {
     // also drops a relayed `metricsBroadcast` (it arrives from a root, so
     // fromId ≠ requesterId).
     if (fromId !== null && requesterBig !== fromId) return null;
-    // Ownership gate. A topic is "owned" only when it is anchored at a real
-    // identity — a publisher nodeId whose low 256 bits are the SHA-256 of a
-    // pubkey. Two anchor shapes are therefore UNOWNED, and their metrics are
-    // readable by anyone:
-    //   · public topics      — null publisher (top byte 0x00, no anchor);
-    //   · synthetic regional  — `prefix || 0^256` (e.g. region-keyed topics).
-    //     No key can hash to all-zero, so no node can ever own or unpub them.
-    // Owned topics stay owner-only (self-authenticating: only the node whose
-    // id IS the publisher anchor may read their metrics).
+    // Ownership gate — metrics() is now an OWNER-ONLY reader (kernel v3.5.0).
+    // A topic is "owned" only when it is anchored at a real identity: a
+    // publisher nodeId whose low 256 bits are the SHA-256 of a pubkey. Two
+    // anchor shapes are UNOWNED — public topics (null publisher) and synthetic
+    // regional topics (`prefix || 0^256`); no key hashes to all-zero, so no
+    // node can own them.
+    //
+    // Open/public/regional topics now expose their live state through the
+    // PUBLISHED metric topic (metricTopic(T) — a relay republishes signed
+    // snapshots there on a cadence), so the scatter-gather REFUSES them
+    // outright. The effect is that a non-owner can no longer trigger a fan-out
+    // metrics read of ANY topic: open topics are served by subscription, and
+    // owned topics answer only their owner (the anchor must equal the proven
+    // requester). An empty cache means the owner is indeterminate (no cached
+    // post to establish the anchor) — fail closed, refuse.
     const samplePost = role.replayCache?.[0];
     const anchor = samplePost?.publisher ?? null;          // BigInt | null
     const owned  = anchor !== null && (anchor & ((1n << 256n) - 1n)) !== 0n;
-    if (owned && anchor !== requesterBig) {
+    if (!owned || anchor !== requesterBig) {
       return null;
     }
-    // C-3 (fail-CLOSED): the subscriber count is the owner-sensitive field. With
-    // an empty replay cache the owner is INDETERMINATE (no cached post to
-    // establish the anchor), so the topic could be owned — withhold the count
-    // (`null`) rather than leak it. Non-sensitive counts are still returned, and
-    // sibling roots that hold the queue answer the real subscriber count via the
-    // metricsReq-k aggregation.
-    const ownershipKnown = (role.replayCache?.length ?? 0) > 0;
+    // Past the gate the topic is owned AND the requester is its owner, so the
+    // replay cache is non-empty and the subscriber count is safe to return to
+    // its owner.
     const byTopic = this._counters.get(topicIdBig) || new Map();
     const wantedHashes = (postHashes && postHashes.length > 0)
       ? postHashes
@@ -2781,7 +2783,7 @@ export class AxonaManager {
       responderId:   toHex(this.nodeId),
       entries,
       current_count: this._liveCacheCount(role),
-      subscribers:   ownershipKnown ? (role.children?.size ?? 0) : null,
+      subscribers:   role.children?.size ?? 0,
       timestamp:     this._now(),
     };
   }
