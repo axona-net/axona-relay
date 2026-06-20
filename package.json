@@ -1,6 +1,6 @@
 {
   "name": "axona-relay",
-  "version": "0.15.3",
+  "version": "0.16.0",
   "description": "Headless Axona relay/supernode — a full mesh peer (WebRTC via node-datachannel) with a live console dashboard. A subset of the bridge: it routes, roots pub/sub, and relays signaling, but runs no public server and mints no TURN.",
   "type": "module",
   "bin": {
@@ -18,7 +18,8 @@
     "mcp": "node src/mcp.js",
     "e2e": "node e2e/run.js",
     "collect": "node pow-collector.js",
-    "pubsub:selftest": "node scripts/pubsub-selftest.mjs"
+    "pubsub:selftest": "node scripts/pubsub-selftest.mjs",
+    "test": "node test/metrics-loop.test.mjs"
   },
   "engines": {
     "node": ">=20"

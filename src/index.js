@@ -22,13 +22,20 @@
 //                        is RELAY_TOPIC_REGION (the structured-topic anchor).
 //   RELAY_TOPIC_REGION   region for RELAY_TOPICS (default = the relay's own
 //                        region — where the demo/bench/share apps anchor)
+//   RELAY_METRICS        1=publish rooted-topic metrics to their derived metric
+//                        topics on a timer (the publish side of the
+//                        derived-metric-topic convention), 0=off. Default 1.
+//                        Only OPEN topics are published; metric topics (recursion
+//                        guard) and owned topics (owner-only privacy) are skipped.
+//   RELAY_METRICS_INTERVAL_MS  cadence for the above (default ~5 min).
 //
 // Quit with q or Ctrl-C.
 
 import './polyfill.js';                 // MUST be first — installs RTCPeerConnection/WebSocket
 import { cleanupWebRTC } from './polyfill.js';
-import { createEphemeralIdentity } from './identity.js';
+import { createEphemeralIdentity, createEphemeralAuthor } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion, regionDescriptor } from './relay.js';
+import { startMetricsLoop, DEFAULT_METRICS_INTERVAL_MS } from './metrics-loop.js';
 import { powCalibrate, powDifficulty } from '../vendor/axona-protocol/src/pow/pow.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
@@ -182,9 +189,11 @@ async function main() {
   // we're still retrying an unreachable bridge.
   let shuttingDown = false;
   let tick = null;
+  let stopMetrics = null;
   const shutdown = async (why) => {
     if (shuttingDown) return; shuttingDown = true;
     if (tick) clearInterval(tick);
+    if (stopMetrics) { try { stopMetrics(); } catch { /* */ } }
     activePresent = null;        // stop routing late errors into a torn-down panel
     present.destroy();
     console.log(`\naxona-relay shutting down (${why})…`);
@@ -285,6 +294,26 @@ async function main() {
     }
     if (topics.length) present.logLine(`{gray-fg}RELAY_TOPICS: ${n}/${topics.length} hosted — watch the "root axon" panel for promotion to root{/}`);
   })();
+
+  // METRICS PUBLISH loop (the publish side of the derived-metric-topic
+  // convention). For each OPEN topic this relay roots, recompute its local
+  // metrics every ~5 min and publish a signed snapshot to metricTopic(T), so
+  // clients sub() that instead of scatter-gathering. Metric topics (recursion
+  // guard) and owned topics (owner-only privacy) are skipped by the loop. An
+  // ephemeral author signs the snapshots — advisory provenance, not authority.
+  if ((process.env.RELAY_METRICS ?? '1') !== '0') {
+    try {
+      const metricsAuthor = await createEphemeralAuthor();
+      const intervalMs = Number(process.env.RELAY_METRICS_INTERVAL_MS) || DEFAULT_METRICS_INTERVAL_MS;
+      stopMetrics = startMetricsLoop({
+        peer, author: metricsAuthor, nodeId: identity.id, intervalMs, log: onLog,
+      });
+      present.logLine(`{cyan-fg}metrics{/} republishing rooted open-topic snapshots every ` +
+        `${Math.round(intervalMs / 1000)}s (signer ${metricsAuthor.authorId.slice(0, 12)}…) — RELAY_METRICS=0 to disable`);
+    } catch (e) {
+      present.logLine(`{red-fg}ERR{/} metrics loop: ${e?.message || e}`);
+    }
+  }
 }
 
 main().catch((err) => {

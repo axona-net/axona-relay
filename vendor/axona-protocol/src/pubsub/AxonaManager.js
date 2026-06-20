@@ -2786,6 +2786,54 @@ export class AxonaManager {
     };
   }
 
+  /**
+   * Enumerate the topics this node currently ROOTS (its axon roles), each with
+   * its signed topic descriptor (recovered from a cached envelope) and a
+   * locally-computed metric snapshot. Pure + synchronous — no network, no
+   * scatter-gather; it only reads local replay-cache state.
+   *
+   * This is the read side of the derived-metric-topic convention
+   * (src/pubsub/metrics.js): an infrastructure root walks this list on a timer,
+   * skips metric topics (recursion guard) and non-open topics (privacy — owned
+   * subscriber counts stay owner-only, matching the _buildMetricsResp gate), and
+   * republishes each open topic's snapshot to metricTopic(topicId). The kernel
+   * supplies the MECHANISM (what do I root, what are the counts); the caller
+   * supplies the POLICY (cadence, which topics, the signing author).
+   *
+   * `descriptor` is null when no live envelope is cached (an empty role, or a
+   * non-envelope payload) — a caller cannot apply the name-based recursion guard
+   * to such a role and should skip it (it has nothing to report anyway).
+   *
+   * @returns {Array<{ topicId:string, descriptor:object|null,
+   *                    current_count:number, subscribers:number, bytes:number }>}
+   */
+  rootedTopics(now = this._now()) {
+    const out = [];
+    for (const [topicId, role] of this.axonRoles) {
+      const cache = role?.replayCache || [];
+      let descriptor = null, live = 0, bytes = 0;
+      for (const e of cache) {
+        if (this._isExpired(e, now)) continue;
+        live++;
+        bytes += (typeof e.json === 'string' ? e.json.length : 0);
+        if (descriptor === null && typeof e.json === 'string') {
+          try {
+            const env = JSON.parse(e.json);
+            if (env && typeof env.topic === 'object' && env.topic) descriptor = env.topic;
+          } catch { /* non-envelope cache entry */ }
+        }
+      }
+      out.push({
+        topicId:       typeof topicId === 'bigint' ? toHex(topicId) : String(topicId),
+        descriptor,
+        current_count: live,
+        subscribers:   role?.children?.size ?? 0,
+        bytes,
+      });
+    }
+    return out;
+  }
+
   _maybeRespondMetrics(payload, role, topicIdBig, meta) {
     const fromId = meta?.fromId == null ? null : _wire(meta.fromId);
     const resp = this._buildMetricsResp(payload, role, topicIdBig, fromId);
