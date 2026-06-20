@@ -194,6 +194,17 @@ function _wireSafe(hex) {
   try { return _wire(hex); } catch { return null; }
 }
 
+/**
+ * Is `json` a kill/delete marker (`{ deleted: true, msgId, topic }`) rather than
+ * a signed message envelope? Cheap substring pre-check before the parse; a real
+ * envelope never carries a top-level `deleted` field, so even a message whose
+ * payload contains the word "deleted" classifies correctly as not-a-delete.
+ */
+function _isDeleteFrame(json) {
+  if (typeof json !== 'string' || !json.includes('"deleted"')) return false;
+  try { return JSON.parse(json)?.deleted === true; } catch { return false; }
+}
+
 // ── AxonaManager ────────────────────────────────────────────────────────────
 
 export class AxonaManager {
@@ -2046,6 +2057,39 @@ export class AxonaManager {
     if (this._alreadySeenPublish(publishId)) return;
 
     this._recordReceived(topicId, publishId, publishTs);
+
+    // Delete/tombstone marker — a root's kill, fanned down to subscribers via
+    // pubsub:deliver. It is NOT a message: caching the {deleted:true} blob would
+    // pollute the replay queue (and, via the postHash upsert, masquerade as the
+    // content). Purge the killed content from our own cache + tombstone it, re-fan
+    // the marker to our children, then deliver it to the app keyed on the kill
+    // DELIVERY id (publishId = "kill:<msgId>") — NOT on postHash, which equals the
+    // original msgId and would be deduped against the message's own delivery,
+    // silently dropping the tombstone (the "kill removes the message but never
+    // calls the handler with deleted:true" bug). Do NOT _recordHave(postHash): the
+    // msgId is now tombstoned, not held.
+    if (_isDeleteFrame(json)) {
+      const role = this.axonRoles.get(topicId);
+      if (role) {
+        if (postHash) {
+          role.replayCache = (role.replayCache || []).filter(e => e.postHash !== postHash);
+          this._addTombstone(postHash);
+        }
+        if (!role.isRoot) {                       // sub-axon: propagate the delete downstream
+          const topicIdHex = toHex(topicId);
+          const fromId = _wire(meta.fromId);
+          for (const [childId] of role.children) {
+            if (childId === fromId || childId === this.nodeId) continue;
+            await this.dht.sendDirect(childId, 'pubsub:deliver', {
+              topicId: topicIdHex, json, publishId, publishTs, postHash,
+            });
+          }
+        }
+      }
+      this._deliverToApp(topicId, json, publishId, publishTs, null);
+      return;
+    }
+
     this._recordHave(topicId, postHash);
 
     const role = this.axonRoles.get(topicId);
