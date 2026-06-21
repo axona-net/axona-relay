@@ -2,68 +2,86 @@
 // mcp.js — Model Context Protocol server exposing Axona pub/sub as native tools.
 //
 // Speaks MCP over stdio so an AI agent (Claude Code, etc.) gets first-class
-// tools — axona_publish / axona_subscribe / axona_pull — instead of shelling
-// out to the CLI. Each call connects a fresh ephemeral peer to the live Axona
-// network (production by default; set RELAY_NETWORK / BRIDGE_URL — see ops.js /
-// network.js), does one job, tears down, and returns JSON.
+// tools instead of shelling out to the CLI. stdout is the JSON-RPC channel; all
+// human logging goes to stderr.
 //
-// stdout is the JSON-RPC channel; all human logging goes to stderr.
+// PERSISTENT PEER (v0.17): the server now holds ONE long-lived Axona peer (see
+// mcp-session.js) instead of connecting a throwaway peer per call. So the agent
+// can be a real, standing participant:
+//   • axona_publish / axona_pull   — point ops over the live peer (stable Author ID)
+//   • axona_watch                  — open a STANDING subscription (arrivals buffer)
+//   • axona_poll                   — drain the buffer (how the agent "reads" the feed)
+//   • axona_unwatch / axona_status — manage + introspect
+//   • axona_subscribe              — back-compat one-shot listen window
+// The peer signs with a durable author persisted at ~/.axona/claude-mcp-author.json,
+// so Claude keeps the same on-network identity across restarts.
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
-import { publish, subscribe, pull, DEFAULT_BRIDGE } from './ops.js';
+import { DEFAULT_BRIDGE } from './ops.js';
+import { publish, pull, watch, poll, unwatch, status, subscribeWindow } from './mcp-session.js';
 
 const VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 
 const J = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
 const E = (msg) => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ ok: false, error: msg }) }] });
+const run = (fn) => async (args) => { try { return J(await fn(args)); } catch (e) { return E(e?.message || String(e)); } };
 
 const server = new McpServer({ name: 'axona', version: VERSION });
 
+const REGION = { region: z.string().optional().describe('Region name or code for the topic anchor (default "useast" / 0x89)') };
+
 server.tool(
   'axona_publish',
-  'Publish a message to a topic on the live Axona peer-to-peer network (production by default). Connects an ephemeral peer to the network, publishes a signed envelope, and returns its msgId. Topics are anchored at a region (default "useast"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo.axona.net feed.',
-  {
-    topic:   z.string().describe('Topic name, e.g. "us-east/hello-world" or "claude/test"'),
-    message: z.string().describe('Message body to publish'),
-    region:  z.string().optional().describe('Region name or code for the topic anchor (default "useast" / 0x89)'),
-  },
-  async ({ topic, message, region }) => {
-    try { return J(await publish({ topic, message, region })); }
-    catch (e) { return E(e?.message || String(e)); }
-  }
+  'Publish a message to a topic on the live Axona peer-to-peer network (production by default). Uses the server\'s persistent peer and its STABLE author identity, so every publish comes from the same Author ID. Returns the msgId + signer. Topics are anchored at a region (default "useast"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo.axona.net feed.',
+  { topic: z.string().describe('Topic name, e.g. "us-east/hello-world" or "claude/test"'), message: z.string().describe('Message body to publish'), ...REGION },
+  run(publish),
 );
 
 server.tool(
-  'axona_subscribe',
-  'Subscribe to an Axona topic, collect messages for a fixed window, then return them. Connects an ephemeral peer, subscribes, listens for `seconds` (default 20, max 120), and returns every message received. since:"all" (default) replays the cached backlog so you see recent history; "new" is live-only. Must use the same region as the publisher.',
-  {
-    topic:   z.string().describe('Topic name to subscribe to'),
-    region:  z.string().optional().describe('Region name or code (default "useast")'),
-    seconds: z.number().optional().describe('How long to listen, 1–120 (default 20)'),
-    since:   z.enum(['all', 'new']).optional().describe('"all" replays backlog (default); "new" is live-only'),
-  },
-  async ({ topic, region, seconds, since }) => {
-    try { return J(await subscribe({ topic, region, seconds, since })); }
-    catch (e) { return E(e?.message || String(e)); }
-  }
+  'axona_watch',
+  'Open a STANDING subscription to an Axona topic on the server\'s persistent peer. Messages that arrive are BUFFERED on the server; call axona_poll to read them. Unlike axona_subscribe (which blocks for a fixed window), this returns immediately and keeps listening across later tool calls — this is how the agent participates as a continuous subscriber. Idempotent: watching an already-watched topic is a no-op. since:"all" (default) replays the cached backlog into the buffer; "new" buffers only future messages.',
+  { topic: z.string().describe('Topic name to watch'), ...REGION, since: z.enum(['all', 'new']).optional().describe('"all" replays backlog into the buffer (default); "new" is live-only') },
+  run(watch),
+);
+
+server.tool(
+  'axona_poll',
+  'Drain buffered messages collected by axona_watch. With `topic`, drains that one watch; without it, drains every active watch. Returns the messages and clears them from the buffer (set peek:true to read without clearing). `max` caps how many are returned. This is the agent\'s "inbox": call it to see what has arrived on watched topics since the last poll.',
+  { topic: z.string().optional().describe('Topic to drain (omit to drain ALL active watches)'), ...REGION, peek: z.boolean().optional().describe('true = read without clearing the buffer'), max: z.number().optional().describe('Cap the number of messages returned') },
+  run(poll),
+);
+
+server.tool(
+  'axona_unwatch',
+  'Stop a standing subscription started by axona_watch and discard its buffer. Returns how many messages were still buffered.',
+  { topic: z.string().describe('Topic to stop watching'), ...REGION },
+  run(unwatch),
+);
+
+server.tool(
+  'axona_status',
+  'Report the persistent peer\'s state: whether it is connected, its nodeId + stable Author ID, mesh health (synaptome/peers), and every active watch with its buffered/total/dropped counts. Takes no arguments.',
+  {},
+  run(status),
 );
 
 server.tool(
   'axona_pull',
-  'Fetch only the single most recent message on an Axona topic (no listening window). Faster than subscribe when you just want the latest value. Returns { found, message, msgId }.',
-  {
-    topic:  z.string().describe('Topic name'),
-    region: z.string().optional().describe('Region name or code (default "useast")'),
-  },
-  async ({ topic, region }) => {
-    try { return J(await pull({ topic, region })); }
-    catch (e) { return E(e?.message || String(e)); }
-  }
+  'Fetch only the single most recent message on an Axona topic (no listening window). Faster than watch/poll when you just want the latest value. Returns { found, message, msgId }.',
+  { topic: z.string().describe('Topic name'), ...REGION },
+  run(pull),
+);
+
+server.tool(
+  'axona_subscribe',
+  'Subscribe to an Axona topic, collect messages for a fixed window, then return them. Blocks for `seconds` (default 20, max 120). Convenience for a one-shot listen; for ongoing participation prefer axona_watch + axona_poll (no blocking, survives across calls). since:"all" (default) replays the cached backlog; "new" is live-only. Must use the same region as the publisher.',
+  { topic: z.string().describe('Topic name to subscribe to'), ...REGION, seconds: z.number().optional().describe('How long to listen, 1–120 (default 20)'), since: z.enum(['all', 'new']).optional().describe('"all" replays backlog (default); "new" is live-only') },
+  run(subscribeWindow),
 );
 
 await server.connect(new StdioServerTransport());
-process.stderr.write(`axona MCP server v${VERSION} ready (bridge ${DEFAULT_BRIDGE})\n`);
+process.stderr.write(`axona MCP server v${VERSION} ready — persistent peer, bridge ${DEFAULT_BRIDGE}\n`);
