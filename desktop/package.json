@@ -1,6 +1,6 @@
 {
   "name": "axona-relay-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "Axona Relay — macOS menu-bar app wrapping the Node relay core.",
@@ -33,9 +33,18 @@
       "!**/*.map"
     ],
     "extraResources": [
-      { "from": "../src", "to": "app-src/src" },
-      { "from": "../vendor", "to": "app-src/vendor" },
-      { "from": "../package.json", "to": "app-src/package.json" }
+      {
+        "from": "../src",
+        "to": "app-src/src"
+      },
+      {
+        "from": "../vendor",
+        "to": "app-src/vendor"
+      },
+      {
+        "from": "../package.json",
+        "to": "app-src/package.json"
+      }
     ],
     "asar": true,
     "asarUnpack": [
@@ -44,8 +53,18 @@
     "mac": {
       "category": "public.app-category.utilities",
       "target": [
-        { "target": "dmg", "arch": ["arm64"] },
-        { "target": "zip", "arch": ["arm64"] }
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
