@@ -42,12 +42,13 @@ export function regionToDescriptor(region = 'useast') {
  * The returned `ctx` carries `regionName` (the structured-topic region) and a
  * fresh ephemeral `author` to sign publishes with.
  */
-export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor } = {}) {
+export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor, identity: providedIdentity } = {}) {
   const { name: regionName, center } = regionToDescriptor(region);
-  const identity = await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
-  // A caller (e.g. the persistent MCP session) may supply a DURABLE author so its
-  // Author ID is stable across reconnects; default stays a throwaway per call.
-  const author   = providedAuthor || await createEphemeralAuthor();
+  // A caller (e.g. the persistent MCP session) may supply a DURABLE node identity
+  // (stable nodeId across restarts) and/or a DURABLE author (stable Author ID);
+  // both default to throwaway per call.
+  const identity = providedIdentity || await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
+  const author   = providedAuthor   || await createEphemeralAuthor();
   const { peer, transport } = createRelay({ bridgeUrl: bridge, identity, region: center, onLog: () => {} });
   if (onError) peer.onError?.((e) => onError(e));
   await startRelay({ peer, transport });

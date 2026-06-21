@@ -21,7 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, subscribeWindow } from './mcp-session.js';
+import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival } from './mcp-session.js';
 
 const VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -50,9 +50,23 @@ server.tool(
 
 server.tool(
   'axona_poll',
-  'Drain buffered messages collected by axona_watch. With `topic`, drains that one watch; without it, drains every active watch. Returns the messages and clears them from the buffer (set peek:true to read without clearing). `max` caps how many are returned. This is the agent\'s "inbox": call it to see what has arrived on watched topics since the last poll.',
-  { topic: z.string().optional().describe('Topic to drain (omit to drain ALL active watches)'), ...REGION, peek: z.boolean().optional().describe('true = read without clearing the buffer'), max: z.number().optional().describe('Cap the number of messages returned') },
+  'Drain buffered messages collected by axona_watch. With `topic`, drains that one watch; without it, drains every active watch. Returns the messages and clears them from the buffer (peek:true reads without clearing). `max` caps how many are returned. This is the agent\'s "inbox". Set wait:true to LONG-POLL — if nothing is buffered, the call blocks server-side until a message arrives or `timeoutSec` (default 25, max 60) elapses, so you get near-zero-latency delivery instead of fixed-interval polling.',
+  { topic: z.string().optional().describe('Topic to drain (omit to drain ALL active watches)'), ...REGION, peek: z.boolean().optional().describe('true = read without clearing the buffer'), max: z.number().optional().describe('Cap the number of messages returned'), wait: z.boolean().optional().describe('Long-poll: block until an arrival (or timeout) if the buffer is empty'), timeoutSec: z.number().optional().describe('Long-poll timeout, 1–60 (default 25)') },
   run(poll),
+);
+
+server.tool(
+  'axona_host',
+  'Host (root) a topic on Claude\'s persistent peer: the peer stores and serves the topic\'s messages for the network WITHOUT subscribing — Claude becomes durable infrastructure for that topic, so its backlog stays answerable even when no other node holds it. Idempotent.',
+  { topic: z.string().describe('Topic name to host/root'), ...REGION },
+  run(host),
+);
+
+server.tool(
+  'axona_unhost',
+  'Stop hosting a topic previously rooted with axona_host.',
+  { topic: z.string().describe('Topic name to stop hosting'), ...REGION },
+  run(unhost),
 );
 
 server.tool(
@@ -84,4 +98,16 @@ server.tool(
 );
 
 await server.connect(new StdioServerTransport());
+
+// PUSH: every arrival on a watched topic is emitted as an MCP logging
+// notification to the client (best-effort — needs a client that consumes
+// logging; never throws into the peer's delivery path). This is the true
+// server→client push; axona_poll(wait:true) is the matching pull side.
+onArrival((evt) => {
+  server.sendLoggingMessage({
+    level: 'info', logger: 'axona',
+    data: { event: 'axona_message', topic: evt.topic, region: evt.region, msgId: evt.msgId, message: evt.message, signer: evt.signer },
+  }).catch(() => { /* client may not subscribe to logging — ignore */ });
+});
+
 process.stderr.write(`axona MCP server v${VERSION} ready — persistent peer, bridge ${DEFAULT_BRIDGE}\n`);
