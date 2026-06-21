@@ -62,6 +62,10 @@ try {
   const st1 = await S.status();
   check('status lists hosted topic', st1.hosted.some((x) => x.topic === HOSTT), `hosted=${st1.hosted.length}`);
 
+  // regression: since:'live' must be accepted (was 'new' → kernel rejected → phantom watch)
+  const lw = await S.watch({ topic: `claude/live-smoke/${RUN}`, since: 'live' });
+  check('watch since:live accepted (no phantom)', lw.ok && lw.watching && lw.alreadyWatching === false);
+
   // session publishes under the stable author
   const pub = await S.publish({ topic: `${TOPIC}/reply`, message: 'ack' });
   check('session.publish signed by stable author', pub.ok && pub.signer === st0.authorId);

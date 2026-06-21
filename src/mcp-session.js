@@ -107,7 +107,11 @@ export async function watch({ topic, region, since = 'all' }) {
   if (WATCHES.has(key)) { const w = WATCHES.get(key); return { ok: true, watching: true, alreadyWatching: true, topic, region: r, buffered: w.buffer.length, total: w.total }; }
   const descriptor = descriptorFor(topic, region);
   const w = { topic, region: r, descriptor, buffer: [], total: 0, dropped: 0, since, startedAt: now(), waiters: [] };
-  WATCHES.set(key, w);
+  // kernel `since`: 'all' (replay backlog) | 'latest' (most recent only) | a
+  // timestamp | undefined (live tail). Expose 'live' as the friendly name for
+  // undefined. Subscribe FIRST; only register the watch if sub() succeeds, so a
+  // rejected sub can't leave a phantom watch that a retry then no-ops over.
+  const sinceArg = (since === 'live' || since == null) ? undefined : since;
   await s.peer.sub(descriptor, (env) => {
     if (!env || env.deleted) return;
     w.total += 1;
@@ -116,7 +120,8 @@ export async function watch({ topic, region, since = 'all' }) {
     if (w.buffer.length > BUFFER_CAP) { w.buffer.shift(); w.dropped += 1; }
     const waiters = w.waiters.splice(0); for (const res of waiters) res();   // wake long-pollers
     emitArrival({ topic: w.topic, region: w.region, ...m });                 // push sink (notifications)
-  }, { since });
+  }, { since: sinceArg });
+  WATCHES.set(key, w);                                                       // only after sub() resolves
   return { ok: true, watching: true, alreadyWatching: false, topic, region: r, since };
 }
 

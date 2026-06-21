@@ -44,7 +44,7 @@ server.tool(
 server.tool(
   'axona_watch',
   'Open a STANDING subscription to an Axona topic on the server\'s persistent peer. Messages that arrive are BUFFERED on the server; call axona_poll to read them. Unlike axona_subscribe (which blocks for a fixed window), this returns immediately and keeps listening across later tool calls — this is how the agent participates as a continuous subscriber. Idempotent: watching an already-watched topic is a no-op. since:"all" (default) replays the cached backlog into the buffer; "new" buffers only future messages.',
-  { topic: z.string().describe('Topic name to watch'), ...REGION, since: z.enum(['all', 'new']).optional().describe('"all" replays backlog into the buffer (default); "new" is live-only') },
+  { topic: z.string().describe('Topic name to watch'), ...REGION, since: z.enum(['all', 'latest', 'live']).optional().describe('"all" replays the cached backlog into the buffer (default); "latest" only the most recent; "live" only future messages') },
   run(watch),
 );
 
@@ -93,7 +93,7 @@ server.tool(
 server.tool(
   'axona_subscribe',
   'Subscribe to an Axona topic, collect messages for a fixed window, then return them. Blocks for `seconds` (default 20, max 120). Convenience for a one-shot listen; for ongoing participation prefer axona_watch + axona_poll (no blocking, survives across calls). since:"all" (default) replays the cached backlog; "new" is live-only. Must use the same region as the publisher.',
-  { topic: z.string().describe('Topic name to subscribe to'), ...REGION, seconds: z.number().optional().describe('How long to listen, 1–120 (default 20)'), since: z.enum(['all', 'new']).optional().describe('"all" replays backlog (default); "new" is live-only') },
+  { topic: z.string().describe('Topic name to subscribe to'), ...REGION, seconds: z.number().optional().describe('How long to listen, 1–120 (default 20)'), since: z.enum(['all', 'latest', 'live']).optional().describe('"all" replays backlog (default); "latest" most recent only; "live" only future') },
   run(subscribeWindow),
 );
 
