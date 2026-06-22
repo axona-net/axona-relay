@@ -26,6 +26,7 @@ import { sign, verify, importPublicKey }   from './ed25519.js';
 export const AUTHOR_CLASS_KIND   = 'axona:author-class:v1';   // domain tag (signed)
 export const AUTHOR_CLASS_NAME   = 'axona:author-class';      // profile-topic name
 export const AUTHOR_CLASS_REGION = 'useast';                  // pinned, well-known region
+export const AUTHOR_CLASS_OPERATOR_DOMAIN = 'axona:author-class-operator:v1';   // operator countersignature domain
 
 const _enc = new TextEncoder();
 const CLASSES = new Set(['agent', 'human']);
@@ -52,12 +53,17 @@ export function authorClassTopic(authorId) {
   return { region: AUTHOR_CLASS_REGION, owner: authorId.toLowerCase(), name: AUTHOR_CLASS_NAME };
 }
 
-/** Bytes the signature covers: the attestation core (no `signature`), domain-tagged via `kind`. */
+/** Bytes the author's signature covers: the attestation core (no `signature`/`operatorProof`), domain-tagged via `kind`. */
 function signedBytes(obj) {
   const core = { kind: AUTHOR_CLASS_KIND, class: obj.class, ts: obj.ts, author: obj.author };
   if (obj.operator != null) core.operator = obj.operator;
   if (obj.label != null)    core.label    = obj.label;
   return _enc.encode(canonical(core));   // canonical() is a total key order, so insertion order is irrelevant
+}
+
+/** Bytes the OPERATOR's countersignature covers — binds the operator key to THIS author (own domain tag). */
+function operatorSignedBytes(author, operator) {
+  return _enc.encode(canonical({ d: AUTHOR_CLASS_OPERATOR_DOMAIN, author, operator }));
 }
 
 /**
@@ -68,18 +74,31 @@ function signedBytes(obj) {
  * @param {string}  [o.label]     short opaque human-readable label
  * @param {number}  [o.ts]        ms timestamp (defaults to now); latest-valid wins
  * @param {object}  o.signWith    an author identity ({ pubkeyHex, privateKey })
+ * @param {object}  [o.operatorSignWith]  an operator identity ({ pubkeyHex, privateKey }); if given,
+ *                  `operator` is set to its pubkey and a countersignature (v1.1) is attached so the
+ *                  operator vouches BACK for the author — verifyAuthorClass reports operatorVerified:true.
  * @returns {Promise<object>} the signed attestation object
  */
-export async function buildAuthorClass({ class: cls, operator = null, label = null, ts = Date.now(), signWith } = {}) {
+export async function buildAuthorClass({ class: cls, operator = null, label = null, ts = Date.now(), signWith, operatorSignWith = null } = {}) {
   if (!CLASSES.has(cls)) throw new RangeError(`buildAuthorClass: class must be "agent" or "human", got "${cls}"`);
   if (!signWith || typeof signWith.pubkeyHex !== 'string' || !signWith.privateKey) {
     throw new TypeError('buildAuthorClass: signWith must be an author identity ({ pubkeyHex, privateKey })');
   }
-  const obj = { kind: AUTHOR_CLASS_KIND, class: cls, ts, author: signWith.pubkeyHex.toLowerCase() };
+  // A countersigning operator's pubkey IS the operator field (the proof binds to it).
+  if (operatorSignWith) {
+    if (typeof operatorSignWith.pubkeyHex !== 'string' || !operatorSignWith.privateKey) {
+      throw new TypeError('buildAuthorClass: operatorSignWith must be an operator identity ({ pubkeyHex, privateKey })');
+    }
+    operator = operatorSignWith.pubkeyHex.toLowerCase();
+  }
+  const author = signWith.pubkeyHex.toLowerCase();
+  const obj = { kind: AUTHOR_CLASS_KIND, class: cls, ts, author };
   if (operator != null) obj.operator = operator;
   if (label != null)    obj.label    = label;
-  const sigBytes = await sign(signWith.privateKey, signedBytes(obj));
-  obj.signature = 'ed25519:' + bytesToHex(sigBytes);
+  obj.signature = 'ed25519:' + bytesToHex(await sign(signWith.privateKey, signedBytes(obj)));
+  if (operatorSignWith) {
+    obj.operatorProof = 'ed25519:' + bytesToHex(await sign(operatorSignWith.privateKey, operatorSignedBytes(author, operator)));
+  }
   return obj;
 }
 
@@ -90,7 +109,9 @@ export async function buildAuthorClass({ class: cls, operator = null, label = nu
  * @param {object} obj
  * @param {object} [opts]
  * @param {string} [opts.expectedAuthor] require obj.author to equal this (e.g. an inline echo's enclosing signerPubkey)
- * @returns {Promise<{ok:true,class,operator,label,ts,author}|{ok:false,reason:string}>}
+ * `operatorVerified` is true only when a valid operator countersignature (v1.1) is present; a
+ * self-asserted `operator` string (no proof) returns the operator but operatorVerified:false.
+ * @returns {Promise<{ok:true,class,operator,operatorVerified,label,ts,author}|{ok:false,reason:string}>}
  */
 export async function verifyAuthorClass(obj, { expectedAuthor = null } = {}) {
   if (!obj || typeof obj !== 'object')                      return { ok: false, reason: 'not_object' };
@@ -107,5 +128,22 @@ export async function verifyAuthorClass(obj, { expectedAuthor = null } = {}) {
   try { sigOk = await verify(await importPublicKey(pkBytes), signedBytes(obj), sigBytes); }
   catch { return { ok: false, reason: 'verify_error' }; }
   if (!sigOk)                                               return { ok: false, reason: 'bad_signature' };
-  return { ok: true, class: obj.class, operator: obj.operator ?? null, label: obj.label ?? null, ts: obj.ts ?? null, author: obj.author.toLowerCase() };
+
+  // Optional operator countersignature (v1.1): a present proof MUST verify, or the whole
+  // attestation is rejected (a claimed countersignature that doesn't check is a forgery).
+  let operatorVerified = false;
+  if (obj.operatorProof != null) {
+    if (typeof obj.operatorProof !== 'string' || !obj.operatorProof.startsWith('ed25519:')) return { ok: false, reason: 'bad_operator_proof' };
+    if (typeof obj.operator !== 'string' || obj.operator.length !== 64) return { ok: false, reason: 'operator_not_pubkey' };
+    let opSig, opPk;
+    try { opSig = hexToBytes(obj.operatorProof.slice('ed25519:'.length)); opPk = hexToBytes(obj.operator); }
+    catch { return { ok: false, reason: 'bad_operator_hex' }; }
+    if (opSig.length !== 64 || opPk.length !== 32) return { ok: false, reason: 'bad_operator_proof' };
+    let opOk;
+    try { opOk = await verify(await importPublicKey(opPk), operatorSignedBytes(obj.author.toLowerCase(), obj.operator.toLowerCase()), opSig); }
+    catch { return { ok: false, reason: 'operator_verify_error' }; }
+    if (!opOk) return { ok: false, reason: 'bad_operator_proof' };
+    operatorVerified = true;
+  }
+  return { ok: true, class: obj.class, operator: obj.operator ?? null, operatorVerified, label: obj.label ?? null, ts: obj.ts ?? null, author: obj.author.toLowerCase() };
 }

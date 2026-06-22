@@ -22,9 +22,8 @@ import { cleanupWebRTC } from './polyfill.js';
 import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
 import { createNodeIdentity, createAuthorIdentity, dumpIdentity, loadIdentity }
   from '../vendor/axona-protocol/src/identity/index.js';
-import { authorClassTopic, buildAuthorClass, verifyAuthorClass }
-  from '../vendor/axona-protocol/src/index.js';   // author-class helpers now live in the kernel
-export { authorClassTopic };                       // re-export for callers/smoke
+import { authorClassTopic } from '../vendor/axona-protocol/src/index.js';   // kernel author-class helper
+export { authorClassTopic };                                               // re-export for callers/smoke
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -105,24 +104,17 @@ export async function ensureSession() {
 /** Publish this author's class attestation to its owner-only profile topic. */
 export async function setAuthorClass({ cls = AUTHOR_CLASS, operator = OPERATOR, label = null } = {}) {
   const s = await ensureSession();
-  const att = await buildAuthorClass({ class: cls, operator, label, signWith: s.author });   // kernel builds + signs
-  const msgId = await s.peer.pub(authorClassTopic(s.author.authorId), JSON.stringify(att), { signWith: s.author });
-  _session.declaredClass = att;
-  return { ok: true, declared: { class: att.class, operator: att.operator ?? null, label: att.label ?? null }, msgId };
+  const { attestation } = await s.peer.setAuthorClass(cls, { signWith: s.author, operator, label });   // kernel peer method
+  _session.declaredClass = attestation;
+  return { ok: true, declared: { class: attestation.class, operator: attestation.operator ?? null, label: attestation.label ?? null }, msgId: undefined };
 }
 
-/** Resolve any author's class from its Author ID alone (pinned region + owner-only topic). */
+/** Resolve any author's class from its Author ID alone (kernel peer method). */
 export async function getAuthorClass({ authorId } = {}) {
   if (!authorId || authorId.length !== 64) return { ok: false, error: 'authorId (64-hex Author ID) required' };
   const s = await ensureSession();
-  const env = await s.peer.pull(null, { topic: authorClassTopic(authorId) });
-  if (!env || !env.message) return { ok: true, authorId, class: 'unstated' };
-  // Owner-only write already guarantees env.signerPubkey === authorId; verifyAuthorClass
-  // re-checks the inner signature + binds author === authorId (defence in depth).
-  let att; try { att = typeof env.message === 'string' ? JSON.parse(env.message) : env.message; } catch { return { ok: true, authorId, class: 'unstated', note: 'unparseable' }; }
-  const v = await verifyAuthorClass(att, { expectedAuthor: authorId });
-  if (!v.ok) return { ok: true, authorId, class: 'unstated', note: v.reason };
-  return { ok: true, authorId, class: v.class, operator: v.operator, label: v.label, ts: v.ts, signer: env.signerPubkey };
+  const r = await s.peer.getAuthorClass(authorId);
+  return { ok: true, authorId, class: r.class, operator: r.operator ?? null, operatorVerified: r.operatorVerified ?? false, label: r.label ?? null, ts: r.ts ?? null };
 }
 
 // ── point operations over the live peer ─────────────────────────────────
