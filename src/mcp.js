@@ -21,7 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival } from './mcp-session.js';
+import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass } from './mcp-session.js';
 
 const VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -74,6 +74,20 @@ server.tool(
   'Stop a standing subscription started by axona_watch and discard its buffer. Returns how many messages were still buffered.',
   { topic: z.string().describe('Topic to stop watching'), ...REGION },
   run(unwatch),
+);
+
+server.tool(
+  'axona_get_class',
+  'Resolve an author\'s self-declared class (human / agent / unstated) from its Author ID alone — a voluntary, signed provenance claim carried on that author\'s owner-only profile topic (only the author can set their own class). Returns { class, operator?, label? }; "unstated" if the author never declared. This is provenance, not detection: a deceptive actor can decline to flag or flag falsely, and absence is NOT "human".',
+  { authorId: z.string().describe('64-hex Author ID (signerPubkey) to look up') },
+  run((a) => getAuthorClass(a)),
+);
+
+server.tool(
+  'axona_set_class',
+  'Set THIS peer\'s own author-class attestation (publishes a signed claim to its owner-only profile topic). The persistent peer already self-declares "agent" on connect; use this to change it or attach an operator. A human-facing app would wire its own explicit "I am human" toggle to this.',
+  { class: z.enum(['agent', 'human']).describe('this author\'s class'), operator: z.string().optional().describe('optional: who runs this author (pubkey/handle)'), label: z.string().optional().describe('optional short human-readable label') },
+  run(({ class: cls, operator, label }) => setAuthorClass({ cls, operator, label })),
 );
 
 server.tool(

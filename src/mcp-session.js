@@ -32,6 +32,26 @@ const BUFFER_CAP   = Number(process.env.MCP_BUFFER_CAP) || 1000;
 const AUTHOR_KEY   = 'claude';     // author keypair key in the store
 const NODE_KEY     = 'node';       // node-identity envelope key in the store
 
+// ── author-class attestation (human/agent provenance) ───────────────────
+// A voluntary, signed claim that THIS author is an agent, carried on the
+// author's own owner-only profile topic so only the author can set their own
+// class and any reader can resolve it from the Author ID. See
+// axona-docs/implementation/Author-Class-Attestation-v0.1.md. NOTE: the shipped
+// kernel does NOT derive a topic's region from the author key (it would hotspot),
+// so we PIN the profile topic to a fixed region — the bridge-directory pattern —
+// which is what makes it discoverable from the Author ID alone.
+const CLASS_KIND   = 'axona:author-class:v1';
+const CLASS_NAME   = 'axona:author-class';
+const CLASS_REGION = process.env.MCP_CLASS_REGION || 'useast';   // pinned, well-known
+const AUTHOR_CLASS = process.env.MCP_AUTHOR_CLASS || 'agent';     // this peer IS an agent
+const OPERATOR     = process.env.MCP_OPERATOR || null;           // optional: who runs it
+const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';      // auto-declare on connect
+
+/** The author's owner-only, fixed-region class profile topic — derivable from the Author ID alone. */
+export function authorClassTopic(authorId) {
+  return { region: CLASS_REGION, owner: authorId, name: CLASS_NAME };
+}
+
 // ── durable store (Node file-backed { get, set }) ───────────────────────
 function fileStore(path) {
   const read = () => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
@@ -81,9 +101,39 @@ export async function ensureSession() {
     const h = await connectPeer({ region: REGION, identity, author });
     _session = h;
     _connecting = null;
+    // Voluntary, signed self-declaration: this peer is an AI agent. Best-effort —
+    // a failed declare must never fail the connection.
+    if (DECLARE_CLASS) { try { await setAuthorClass({ cls: AUTHOR_CLASS, operator: OPERATOR, label: 'axona-relay MCP peer' }); } catch { /* */ } }
     return h;
   })();
   try { return await _connecting; } catch (e) { _connecting = null; throw e; }
+}
+
+// ── author-class: declare (owner-only) + resolve (from the Author ID alone) ──
+/** Publish this author's class attestation to its owner-only profile topic. */
+export async function setAuthorClass({ cls = AUTHOR_CLASS, operator = OPERATOR, label = null } = {}) {
+  const s = await ensureSession();
+  if (cls !== 'agent' && cls !== 'human') throw new Error(`author class must be "agent" or "human", got "${cls}"`);
+  const att = { kind: CLASS_KIND, class: cls, ts: now(), author: s.author.authorId };
+  if (operator) att.operator = operator;
+  if (label)    att.label = label;
+  const msgId = await s.peer.pub(authorClassTopic(s.author.authorId), JSON.stringify(att), { signWith: s.author });
+  _session.declaredClass = att;
+  return { ok: true, declared: att, msgId, topicRegion: CLASS_REGION };
+}
+
+/** Resolve any author's class from its Author ID alone (pinned region + owner-only topic). */
+export async function getAuthorClass({ authorId } = {}) {
+  if (!authorId || authorId.length !== 64) return { ok: false, error: 'authorId (64-hex Author ID) required' };
+  const s = await ensureSession();
+  const env = await s.peer.pull(null, { topic: authorClassTopic(authorId) });
+  if (!env || !env.message) return { ok: true, authorId, class: 'unstated' };
+  // Owner-only write means the kernel already guaranteed env.signerPubkey === authorId,
+  // but verify it ourselves so the binding is explicit and not assumed.
+  if ((env.signerPubkey || '').toLowerCase() !== authorId.toLowerCase()) return { ok: true, authorId, class: 'unstated', note: 'signer≠owner — ignored' };
+  let att; try { att = typeof env.message === 'string' ? JSON.parse(env.message) : env.message; } catch { return { ok: true, authorId, class: 'unstated', note: 'unparseable' }; }
+  if (att?.kind !== CLASS_KIND || (att.class !== 'agent' && att.class !== 'human')) return { ok: true, authorId, class: 'unstated', note: 'no valid attestation' };
+  return { ok: true, authorId, class: att.class, operator: att.operator ?? null, label: att.label ?? null, ts: att.ts ?? null, signer: env.signerPubkey };
 }
 
 // ── point operations over the live peer ─────────────────────────────────
@@ -190,6 +240,7 @@ export async function status() {
   return {
     ok: true, connected: true, persistent: true, region: REGION, bridge: DEFAULT_BRIDGE,
     nodeId: _session.nodeId, authorId: _session.author.authorId, identityPath: STORE_PATH,
+    declaredClass: _session.declaredClass?.class ?? 'unstated', operator: _session.declaredClass?.operator ?? null,
     mesh: health ? { synaptomeSize: health.synaptomeSize ?? null, peers: health.peers?.length ?? null, state: health.state ?? null } : null,
     watches: [...WATCHES.values()].map((w) => ({ topic: w.topic, region: w.region, buffered: w.buffer.length, total: w.total, dropped: w.dropped, since: w.since, ageSec: Math.round((now() - w.startedAt) / 1000) })),
     hosted: [...HOSTED.values()].map((h) => ({ topic: h.topic, region: h.region, ageSec: Math.round((now() - h.since) / 1000) })),
