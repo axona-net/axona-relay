@@ -22,6 +22,9 @@ import { cleanupWebRTC } from './polyfill.js';
 import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
 import { createNodeIdentity, createAuthorIdentity, dumpIdentity, loadIdentity }
   from '../vendor/axona-protocol/src/identity/index.js';
+import { authorClassTopic, buildAuthorClass, verifyAuthorClass }
+  from '../vendor/axona-protocol/src/index.js';   // author-class helpers now live in the kernel
+export { authorClassTopic };                       // re-export for callers/smoke
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -33,24 +36,13 @@ const AUTHOR_KEY   = 'claude';     // author keypair key in the store
 const NODE_KEY     = 'node';       // node-identity envelope key in the store
 
 // ── author-class attestation (human/agent provenance) ───────────────────
-// A voluntary, signed claim that THIS author is an agent, carried on the
-// author's own owner-only profile topic so only the author can set their own
-// class and any reader can resolve it from the Author ID. See
-// axona-docs/implementation/Author-Class-Attestation-v0.1.md. NOTE: the shipped
-// kernel does NOT derive a topic's region from the author key (it would hotspot),
-// so we PIN the profile topic to a fixed region — the bridge-directory pattern —
-// which is what makes it discoverable from the Author ID alone.
-const CLASS_KIND   = 'axona:author-class:v1';
-const CLASS_NAME   = 'axona:author-class';
-const CLASS_REGION = process.env.MCP_CLASS_REGION || 'useast';   // pinned, well-known
-const AUTHOR_CLASS = process.env.MCP_AUTHOR_CLASS || 'agent';     // this peer IS an agent
-const OPERATOR     = process.env.MCP_OPERATOR || null;           // optional: who runs it
-const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';      // auto-declare on connect
-
-/** The author's owner-only, fixed-region class profile topic — derivable from the Author ID alone. */
-export function authorClassTopic(authorId) {
-  return { region: CLASS_REGION, owner: authorId, name: CLASS_NAME };
-}
+// Voluntary, signed "this author is an agent" claim. The object, the owner-only
+// pinned-region profile topic (authorClassTopic), and verification now live in
+// the KERNEL (src/pubsub/authorClass.js) so every consumer derives + verifies
+// identically; these env knobs only drive THIS peer's behaviour.
+const AUTHOR_CLASS  = process.env.MCP_AUTHOR_CLASS || 'agent';    // this peer IS an agent
+const OPERATOR      = process.env.MCP_OPERATOR || null;          // optional: who runs it
+const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';     // auto-declare on connect
 
 // ── durable store (Node file-backed { get, set }) ───────────────────────
 function fileStore(path) {
@@ -113,13 +105,10 @@ export async function ensureSession() {
 /** Publish this author's class attestation to its owner-only profile topic. */
 export async function setAuthorClass({ cls = AUTHOR_CLASS, operator = OPERATOR, label = null } = {}) {
   const s = await ensureSession();
-  if (cls !== 'agent' && cls !== 'human') throw new Error(`author class must be "agent" or "human", got "${cls}"`);
-  const att = { kind: CLASS_KIND, class: cls, ts: now(), author: s.author.authorId };
-  if (operator) att.operator = operator;
-  if (label)    att.label = label;
+  const att = await buildAuthorClass({ class: cls, operator, label, signWith: s.author });   // kernel builds + signs
   const msgId = await s.peer.pub(authorClassTopic(s.author.authorId), JSON.stringify(att), { signWith: s.author });
   _session.declaredClass = att;
-  return { ok: true, declared: att, msgId, topicRegion: CLASS_REGION };
+  return { ok: true, declared: { class: att.class, operator: att.operator ?? null, label: att.label ?? null }, msgId };
 }
 
 /** Resolve any author's class from its Author ID alone (pinned region + owner-only topic). */
@@ -128,12 +117,12 @@ export async function getAuthorClass({ authorId } = {}) {
   const s = await ensureSession();
   const env = await s.peer.pull(null, { topic: authorClassTopic(authorId) });
   if (!env || !env.message) return { ok: true, authorId, class: 'unstated' };
-  // Owner-only write means the kernel already guaranteed env.signerPubkey === authorId,
-  // but verify it ourselves so the binding is explicit and not assumed.
-  if ((env.signerPubkey || '').toLowerCase() !== authorId.toLowerCase()) return { ok: true, authorId, class: 'unstated', note: 'signer≠owner — ignored' };
+  // Owner-only write already guarantees env.signerPubkey === authorId; verifyAuthorClass
+  // re-checks the inner signature + binds author === authorId (defence in depth).
   let att; try { att = typeof env.message === 'string' ? JSON.parse(env.message) : env.message; } catch { return { ok: true, authorId, class: 'unstated', note: 'unparseable' }; }
-  if (att?.kind !== CLASS_KIND || (att.class !== 'agent' && att.class !== 'human')) return { ok: true, authorId, class: 'unstated', note: 'no valid attestation' };
-  return { ok: true, authorId, class: att.class, operator: att.operator ?? null, label: att.label ?? null, ts: att.ts ?? null, signer: env.signerPubkey };
+  const v = await verifyAuthorClass(att, { expectedAuthor: authorId });
+  if (!v.ok) return { ok: true, authorId, class: 'unstated', note: v.reason };
+  return { ok: true, authorId, class: v.class, operator: v.operator, label: v.label, ts: v.ts, signer: env.signerPubkey };
 }
 
 // ── point operations over the live peer ─────────────────────────────────
