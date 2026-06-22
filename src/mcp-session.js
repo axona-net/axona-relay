@@ -106,6 +106,16 @@ export async function setAuthorClass({ cls = AUTHOR_CLASS, operator = OPERATOR, 
   const s = await ensureSession();
   const { attestation } = await s.peer.setAuthorClass(cls, { signWith: s.author, operator, label });   // kernel peer method
   _session.declaredClass = attestation;
+  // Durability: HOST our own owner-only profile topic so the attestation is served
+  // from our persistent peer even after the K-closest roots evict it from their
+  // bounded queues. A declare-once-on-connect peer otherwise becomes unresolvable
+  // after a few hours (observed: a 12h-old prod attestation was gone from roots).
+  // Mirrors the bridge-directory "host so the launch publish survives" pattern.
+  try {
+    const descriptor = authorClassTopic(s.author.pubkeyHex);
+    const key = `${descriptor.region}|class:${s.author.pubkeyHex}`;
+    if (!HOSTED.has(key)) { await s.peer.host(descriptor); HOSTED.set(key, { topic: 'axona:author-class', region: descriptor.region, descriptor, since: now() }); }
+  } catch { /* hosting is best-effort; the declare already published */ }
   return { ok: true, declared: { class: attestation.class, operator: attestation.operator ?? null, label: attestation.label ?? null }, msgId: undefined };
 }
 
