@@ -26,6 +26,14 @@ import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unh
 const VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
 
+// Survive transient peer/transport failures. A bridge outage surfaces as an
+// uncaught `ws` error (e.g. "Unexpected server response: 502" when the bridge
+// OOM-restarts behind its proxy) or an unhandled rejection on a connect/reconnect
+// promise. Those must NOT kill the persistent MCP server — the long-lived session
+// reconnects on its own. Log to STDERR (stdout is the JSON-RPC channel) and continue.
+process.on('uncaughtException',  (e) => process.stderr.write(`⚠ uncaughtException (continuing): ${e?.stack || e?.message || e}\n`));
+process.on('unhandledRejection', (e) => process.stderr.write(`⚠ unhandledRejection (continuing): ${e?.message || e}\n`));
+
 const J = (obj) => ({ content: [{ type: 'text', text: JSON.stringify(obj, null, 2) }] });
 const E = (msg) => ({ isError: true, content: [{ type: 'text', text: JSON.stringify({ ok: false, error: msg }) }] });
 const run = (fn) => async (args) => { try { return J(await fn(args)); } catch (e) { return E(e?.message || String(e)); } };
