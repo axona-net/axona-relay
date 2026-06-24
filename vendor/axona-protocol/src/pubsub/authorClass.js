@@ -29,7 +29,15 @@ export const AUTHOR_CLASS_REGION = 'useast';                  // pinned, well-kn
 export const AUTHOR_CLASS_OPERATOR_DOMAIN = 'axona:author-class-operator:v1';   // operator countersignature domain
 
 const _enc = new TextEncoder();
-const CLASSES = new Set(['agent', 'human']);
+// Self-asserted publisher kind. Two conceptual axes share one flat set:
+//   principal — who/what is behind the message:  'human' | 'agent' | 'service'
+//               ('service' = an automated app/feed, not an AI agent or a person)
+//   infra     — a node self-identifying its role: 'bridge' | 'relay'
+// Finer detail (app name, sensor id) goes in the free-text `label`, NOT here —
+// the set stays coarse and stable. Adding a value is backward-TOLERANT: an older
+// verifier that doesn't know it returns bad_class → the caller treats it as
+// UNSTATED (never a wrong default), so no flag day. Absence is always UNSTATED.
+const CLASSES = new Set(['agent', 'human', 'service', 'bridge', 'relay']);
 
 function bytesToHex(bytes) {
   let s = ''; for (const b of bytes) s += b.toString(16).padStart(2, '0'); return s;
@@ -69,7 +77,7 @@ function operatorSignedBytes(author, operator) {
 /**
  * Build + sign an author-class attestation.
  * @param {object} o
- * @param {'agent'|'human'} o.class
+ * @param {'agent'|'human'|'service'|'bridge'|'relay'} o.class
  * @param {string}  [o.operator]  who runs this author (pubkey/handle); self-asserted in v1
  * @param {string}  [o.label]     short opaque human-readable label
  * @param {number}  [o.ts]        ms timestamp (defaults to now); latest-valid wins
@@ -80,7 +88,7 @@ function operatorSignedBytes(author, operator) {
  * @returns {Promise<object>} the signed attestation object
  */
 export async function buildAuthorClass({ class: cls, operator = null, label = null, ts = Date.now(), signWith, operatorSignWith = null } = {}) {
-  if (!CLASSES.has(cls)) throw new RangeError(`buildAuthorClass: class must be "agent" or "human", got "${cls}"`);
+  if (!CLASSES.has(cls)) throw new RangeError(`buildAuthorClass: class must be one of ${[...CLASSES].map(c => `"${c}"`).join(', ')}, got "${cls}"`);
   if (!signWith || typeof signWith.pubkeyHex !== 'string' || !signWith.privateKey) {
     throw new TypeError('buildAuthorClass: signWith must be an author identity ({ pubkeyHex, privateKey })');
   }

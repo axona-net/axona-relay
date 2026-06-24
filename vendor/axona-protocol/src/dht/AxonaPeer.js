@@ -1859,12 +1859,14 @@ export class AxonaPeer extends DHT {
   }
 
   /**
-   * Declare THIS author's class (voluntary human/agent provenance). Publishes a
+   * Declare THIS author's class (voluntary self-asserted provenance). Publishes a
    * signed `axona:author-class:v1` attestation to the author's own owner-only
    * profile topic — so only that author can set its own class, and any reader can
    * resolve it from the Author ID alone. NOT a gate: nothing reads it before
-   * routing. A human-facing app wires its "I am human" toggle to this.
-   * @param {'agent'|'human'} cls
+   * routing. A human-facing app wires its "I am human" toggle to this; infra nodes
+   * self-identify (a bridge declares 'bridge', a relay 'relay'); an automated
+   * app/feed declares 'service'.
+   * @param {'agent'|'human'|'service'|'bridge'|'relay'} cls
    * @param {object} o
    * @param {object} o.signWith            the author identity to declare for + sign with
    * @param {string} [o.operator]          self-asserted operator (pubkey/handle); unverified
@@ -1885,7 +1887,7 @@ export class AxonaPeer extends DHT {
   /**
    * Resolve an author's self-declared class from its Author ID alone. Pulls the
    * author's owner-only profile topic and verifies the attestation. Returns
-   * `{ class:'agent'|'human'|'unstated', operator, operatorVerified, label, ts }`;
+   * `{ class:'agent'|'human'|'service'|'bridge'|'relay'|'unstated', operator, operatorVerified, label, ts }`;
    * any missing/invalid/unparseable attestation resolves to `'unstated'` (never a
    * default class). `operatorVerified` is true only for a valid v1.1 countersignature.
    * @param {string} authorId 64-hex Author ID
@@ -2509,7 +2511,20 @@ export class AxonaPeer extends DHT {
     // call peer.sub after the mesh has stabilised, so the
     // initial K-closest is already wide and refresh isn't needed
     // to recover from a stale boot-time target set.
-    return new AxonaManager({ dht });
+    //
+    // Wire `pickRelayPeer` so sub-axon recruitment uses BATCH ADOPTION
+    // (pick a relay XOR-closest to the new subscriber from the whole
+    // synaptome, hand off a batch) instead of the fallback that promotes
+    // an existing child one subscriber at a time.  Without it the axon
+    // tree degenerates into a deep near-linear chain as a topic grows
+    // (measured in dht-sim: depth ~21 at 600 subscribers vs ~4 with batch
+    // adoption) — a latency/fragility scaling problem.  `shouldRecruitSubAxon`
+    // keeps its default (recruit past `maxDirectSubs`).
+    return new AxonaManager({
+      dht,
+      pickRelayPeer: (role, subscriberId, forwarderId) =>
+        this._pickRelayPeer(role, subscriberId, forwarderId),
+    });
   }
 
   _installDeliveryHook(am) {
