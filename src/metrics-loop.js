@@ -11,14 +11,14 @@
 // (peer.rootedTopics() + the metricTopic()/isMetricTopic() helpers, all in core
 // — no std dependency); this loop supplies the POLICY:
 //
-//   • cadence       — recompute + republish every ~5 min;
-//   • which topics  — only OPEN topics this relay roots. Skipped:
+//   • cadence       — recompute + republish every ~20 s (a regular publish event,
+//                     same as any other topic — clients sub() it like normal);
+//   • which topics  — EVERY topic this relay roots, OWNED and OPEN alike
+//                     (v4.3.0 decision 2026-06-25: an owned topic's activity
+//                     metrics are public too, so anyone can subscribe to an owned
+//                     topicID's metrics without owning it). Skipped only:
 //       – metric topics            (isMetricTopic → recursion guard: metrics-of-
 //                                    metrics never terminates);
-//       – owned topics (write:'owner')  (privacy: their subscriber count is
-//                                    owner-only by design — see _buildMetricsResp
-//                                    — so we must not republish it to an OPEN
-//                                    metric topic);
 //       – roles with no recoverable descriptor (empty/cold — nothing to report);
 //   • signer        — an (ephemeral) author; snapshots are signed so a subscriber
 //                     can pin trust to a known relay key. Advisory, not
@@ -31,13 +31,11 @@
 import { metricTopic, isMetricTopic }
   from '../vendor/axona-protocol/src/index.js';
 
-export const DEFAULT_METRICS_INTERVAL_MS = 5 * 60 * 1000;   // ~5 min cadence
+export const DEFAULT_METRICS_INTERVAL_MS = 20 * 1000;       // ~20 s cadence (regular publish event)
 const FIRST_RUN_DELAY_MS = 8000;                            // let caches warm post-mesh
 
-const isOpenTopic = (d) => !!d && (d.write === 'open' || !d.owner);
-
 /**
- * Build the signed snapshot payload for one rooted open topic.
+ * Build the signed snapshot payload for one rooted topic (owned or open).
  * Shape mirrors a metricsReq reply plus provenance (ts + computing node).
  */
 function snapshotFor(r, nodeId, now) {
@@ -46,6 +44,7 @@ function snapshotFor(r, nodeId, now) {
     topic:         r.topicId,         // the DATA topic this snapshot describes
     ts:            now,
     by:            nodeId,            // computing relay's node id (provenance)
+    signer:        nodeId,            // self-asserted provenance; peer.metrics() prefers the envelope's signerPubkey
     current_count: r.current_count,   // live (non-expired) cached posts
     subscribers:   r.subscribers,     // children in this relay's root set
     bytes:         r.bytes,           // live cached envelope bytes
@@ -88,9 +87,9 @@ export function startMetricsLoop({
       for (const r of rooted) {
         if (stopped) break;
         const d = r.descriptor;
-        // Skip: no descriptor (can't guard/derive), metric topics (recursion
-        // guard), and non-open topics (owned metrics stay owner-only).
-        if (!d || isMetricTopic(d) || !isOpenTopic(d)) { skipped++; continue; }
+        // Skip: no descriptor (can't guard/derive) and metric topics (recursion
+        // guard). Owned AND open data topics both publish (v4.3.0).
+        if (!d || isMetricTopic(d)) { skipped++; continue; }
         try {
           await peer.pub(metricTopic(r.topicId),
                          JSON.stringify(snapshotFor(r, nodeId, ts)),

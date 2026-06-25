@@ -1,12 +1,13 @@
-// metrics-loop.test.mjs — the relay metric-publish POLICY.
+// metrics-loop.test.mjs — the relay metric-publish POLICY (v4.3.0).
 //
 // Drives startMetricsLoop() against a mock peer whose rootedTopics() returns one
-// of each shape, and asserts the loop publishes ONLY open topics to their
-// metricTopic(), signing with the given author:
+// of each shape, and asserts the loop publishes BOTH open and owned data topics
+// to their metricTopic(), signing with the given author:
 //
 //   • open topic            → published to metricTopic(id), signed
+//   • owned topic           → published too (v4.3.0: owned-topic metrics are
+//                             PUBLIC — anyone can subscribe to an owned topicID)
 //   • metric topic          → SKIPPED (recursion guard)
-//   • owned topic           → SKIPPED (owner-only privacy)
 //   • descriptor: null      → SKIPPED (nothing to report / can't guard)
 //   • snapshot payload carries the counts + provenance
 //   • a failing pub doesn't abort the cycle (other topics still publish)
@@ -57,9 +58,9 @@ async function main() {
   await sleep(30);              // let the first cycle complete
   stop();
 
-  // Exactly one publish — the open topic.
-  check('1. exactly one topic published (only the open one)', pubs.length === 1);
-  const p = pubs[0];
+  // Two publishes — the open topic AND the owned topic (metric + null skipped).
+  check('1. exactly two topics published (open + owned)', pubs.length === 2);
+  const p = pubs.find(x => x.topic.name === metricTopic(openId).name);
   check('2. published to metricTopic(openId)',
     p && p.topic.name === metricTopic(openId).name && isMetricTopicName(p.topic.name));
   check('3. signed with the given author (signWith)', p?.opts?.signWith === author);
@@ -71,12 +72,12 @@ async function main() {
 
   check('5. metric topic was NOT republished (recursion guard)',
     !pubs.some(x => x.topic.name === metricTopic(metricId).name));
-  check('6. owned topic was NOT published (privacy)',
-    !pubs.some(x => x.topic.name === metricTopic(ownedId).name));
+  check('6. owned topic WAS published (v4.3.0: owned metrics are public)',
+    pubs.some(x => x.topic.name === metricTopic(ownedId).name));
 
-  // A failing pub must not abort the cycle: fail the FIRST pub, the open topic
-  // is the only publishable one, so a second cycle with failNext set should
-  // publish nothing yet not throw.
+  // A failing pub must not abort the cycle: fail the FIRST pub (open topic);
+  // the owned topic still publishes, so exactly one publish survives and the
+  // cycle does not throw.
   failNext = true;
   pubs.length = 0;
   const stop2 = startMetricsLoop({
@@ -85,7 +86,7 @@ async function main() {
   });
   await sleep(30);
   stop2();
-  check('7. a failing pub is swallowed (cycle did not throw, 0 published)', pubs.length === 0);
+  check('7. a failing pub is swallowed (cycle did not throw, other topic still published)', pubs.length === 1);
 
   console.log(`\nResult: ${passed} passed, ${failed} failed`);
   process.exit(failed === 0 ? 0 : 1);
