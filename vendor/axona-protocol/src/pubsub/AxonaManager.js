@@ -928,7 +928,18 @@ export class AxonaManager {
       // non-root child relay with no subscribers carries only redundant cache (the
       // root has it) so it may tear down immediately.
       const holdsHistory = role.isRoot && role.cache.length > 0;
-      if (role.subscribers.size === 0 && !holdsHistory && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
+      // KEYSPACE HOSTING ("host whatever lands near me"): a node with keyspace
+      // hosting on retains any topic it has become ROOT for — even with zero
+      // current subscribers and an empty cache — so it stays an always-on,
+      // durable home/convergence-anchor for topics in its keyspace neighborhood.
+      // Without this the role is torn down the instant its cache empties, so the
+      // no-arg host() volunteers nothing in the routing-only kernel (the relay
+      // fleet's default mode). Root-ness is still decided by ROUTING (this only
+      // protects roles the node legitimately won as terminus); the set is bounded
+      // by the node's keyspace share of topics that actually see traffic.
+      // TODO(Phase 4): age out keyspace-pinned empty roles after a long idle TTL.
+      const keyspacePinned = this._hostKeyspace && role.isRoot;
+      if (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
         this.axonRoles.delete(t);
         this._upstream.delete(t);
       }
