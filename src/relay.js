@@ -92,6 +92,12 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {} }) {
 export async function startRelay({ peer, transport }) {
   await transport.start();
   await peer.start();
+  // Self-integration (kernel v4.7.0): weave into our keyspace neighbourhood
+  // (findKClosest(ownId) + authenticated channel opens) so neighbours adopt us
+  // and route to us, rather than waiting on ambient annealing. Non-blocking.
+  if (typeof peer.integrate === 'function') {
+    peer.integrate().catch(() => { /* best-effort; anneal still heals slowly */ });
+  }
 }
 
 /** Best-effort graceful shutdown. */
