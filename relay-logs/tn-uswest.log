@@ -1928,3 +1928,474 @@
 [02:03:01] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
 [02:03:02] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
 [02:03:03] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:04] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:05] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:06] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:07] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:08] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:09] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:10] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:11] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:12] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:13] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:14] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:15] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:16] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:17] bindPeer {"nodeId":"15961892027530788751605358121143387576607554427497882230738560534559717720452378","meshId":"c532"}
+[02:03:17] auth-mesh-complete {"meshId":"c532","peer":"89d97ebb1341d5d1e4c977198ce1e4ebcc16012420b969f80ef80a9f8f4ff5ed1a"}
+[02:03:17] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:18] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:19] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:20] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:21] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:22] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:23] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:24] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:25] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:26] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:27] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:28] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:29] peer-leaving {"from":"89ac262e51fdd84ef65b380dd70fdb3496e07bd11e6b57ed8b0b38d67599ec2a91"}
+[02:03:29] peer-lost-redundant-channel {"meshId":"c531","nodeId":null}
+[02:03:29] peer-leaving {"from":"89d97ebb1341d5d1e4c977198ce1e4ebcc16012420b969f80ef80a9f8f4ff5ed1a"}
+[02:03:29] dc-close {"peerId":"c531"}
+[02:03:29] peer-lost-redundant-channel {"meshId":"c532","nodeId":null}
+[02:03:29] dc-close {"peerId":"c532"}
+[02:03:29] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:03:30] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:03:31] bindPeer {"nodeId":"15924142809628791364015479502762512663885743147925395249987356491506561266266400","meshId":"c533"}
+[02:03:31] auth-mesh-complete {"meshId":"c533","peer":"8986096e3afff8701ecff57998f73e57c4ebc505ceded50fe042c98585effcb120"}
+[02:03:31] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:32] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:03:33] bindPeer {"nodeId":"15887198029605579003431629051503155683278877772282912142025149213741273016124579","meshId":"c534"}
+[02:03:33] auth-mesh-complete {"meshId":"c534","peer":"89345b6d16055d3d92d648781c4e98fd325ae0ea0890753ab6986bd33da4cb44a3"}
+[02:03:33] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:34] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:03:34] bindPeer {"nodeId":"15904094952221076901138552362601681948086235634607212938508407604577274156649733","meshId":"c535"}
+[02:03:34] auth-mesh-complete {"meshId":"c535","peer":"8959b6bed2f3af737dcc4274cabac56fc3c24d2596fbdad48ffb76d91a90dd8d05"}
+[02:03:35] state=open peers=9 synaptome=9 mesh(open/bound)=8/8 roles=0 subs=0
+[02:03:36] state=open peers=9 synaptome=9 mesh(open/bound)=8/8 roles=0 subs=0
+[02:03:36] bindPeer {"nodeId":"15866973703900795492716677178150440800893981416615995608373767759879080367466038","meshId":"c536"}
+[02:03:36] auth-mesh-complete {"meshId":"c536","peer":"8907a4dd090b47f69f1f65e351c86cd9b2854116d71481a0d975a69b771d49a636"}
+[02:03:37] state=open peers=10 synaptome=10 mesh(open/bound)=9/9 roles=0 subs=0
+[02:03:38] state=open peers=10 synaptome=10 mesh(open/bound)=9/9 roles=0 subs=0
+[02:03:38] bindPeer {"nodeId":"15904952341485484950100552168556492295505474143043081299827796974550053178970874","meshId":"c537"}
+[02:03:38] auth-mesh-complete {"meshId":"c537","peer":"895b9c02b2485bf0f64ce4fc83be45a3c60b0a2c643f34d1af4ee3e0ce046212fa"}
+[02:03:39] state=open peers=11 synaptome=11 mesh(open/bound)=10/10 roles=0 subs=0
+[02:03:40] bindPeer {"nodeId":"15891828730889887941822030467162389170037784870179411869233141113750458175437962","meshId":"c538"}
+[02:03:40] auth-mesh-complete {"meshId":"c538","peer":"893e984f66e0e58af93f113d418ab627ffc644e348b9d61355e0e6562df349bc8a"}
+[02:03:40] state=open peers=12 synaptome=12 mesh(open/bound)=11/11 roles=0 subs=0
+[02:03:41] state=open peers=12 synaptome=12 mesh(open/bound)=11/11 roles=0 subs=0
+[02:03:42] bindPeer {"nodeId":"15923778835276730606281193431422491495707019861872518140878624990031640817133574","meshId":"c539"}
+[02:03:42] auth-mesh-complete {"meshId":"c539","peer":"89853b6dabf2422d96f068e86a4cfd8399f2501286599287f8c4f3307f33cd6806"}
+[02:03:42] state=open peers=13 synaptome=13 mesh(open/bound)=12/12 roles=0 subs=0
+[02:03:43] state=open peers=13 synaptome=13 mesh(open/bound)=12/12 roles=0 subs=0
+[02:03:44] bindPeer {"nodeId":"15928733356355068436158137735874574142676670844511375765935898390091886496870890","meshId":"c53a"}
+[02:03:44] auth-mesh-complete {"meshId":"c53a","peer":"89902f9684856906f9017f9bb5f5aa1de305437e7b5b3034cfa6cda722009071ea"}
+[02:03:44] state=open peers=14 synaptome=14 mesh(open/bound)=13/13 roles=0 subs=0
+[02:03:45] state=open peers=14 synaptome=14 mesh(open/bound)=13/13 roles=0 subs=0
+[02:03:46] bindPeer {"nodeId":"15904352730139760883196110293266135485130118729260850722194030228589945432868282","meshId":"c53b"}
+[02:03:46] auth-mesh-complete {"meshId":"c53b","peer":"895a48a47d5de8fa3b24e3e70bcfe7dd68d2f810419ef22ecd002f6a85d5b885ba"}
+[02:03:46] state=open peers=15 synaptome=15 mesh(open/bound)=14/14 roles=0 subs=0
+[02:03:47] state=open peers=15 synaptome=15 mesh(open/bound)=14/14 roles=0 subs=0
+[02:03:48] bindPeer {"nodeId":"15899965608109063632200543370051663418687052932644628029303448623727163556074964","meshId":"c53c"}
+[02:03:48] auth-mesh-complete {"meshId":"c53c","peer":"8950959e952a824f43ca2b64b7d59f76695ab3bd7488f9c61be15f2ae9bfe595d4"}
+[02:03:48] state=open peers=16 synaptome=16 mesh(open/bound)=15/15 roles=0 subs=0
+[02:03:49] state=open peers=16 synaptome=16 mesh(open/bound)=15/15 roles=0 subs=0
+[02:03:50] bindPeer {"nodeId":"15935396255093662513105305609557699096772424296394020790704474559381263081857312","meshId":"c53d"}
+[02:03:50] auth-mesh-complete {"meshId":"c53d","peer":"899eeaa7ae58de2a01aa0ed53e0e0baee7ad0ecec8d80c37e0221effbb2528e120"}
+[02:03:50] state=open peers=17 synaptome=17 mesh(open/bound)=16/16 roles=0 subs=0
+[02:03:51] state=open peers=17 synaptome=17 mesh(open/bound)=16/16 roles=0 subs=0
+[02:03:52] bindPeer {"nodeId":"15898176385574009358800328848877398246492080218024591924556143651856199882410582","meshId":"c53e"}
+[02:03:52] auth-mesh-complete {"meshId":"c53e","peer":"894ca0f494d8a93cb5ea55b4b2e20fbb4d5b1f3f580f219cd601bfa9a34efc8a56"}
+[02:03:52] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:03:53] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:03:54] bindPeer {"nodeId":"15913006874630412318448708435160383216567987107142640765096101991969837828565712","meshId":"c53f"}
+[02:03:54] auth-mesh-complete {"meshId":"c53f","peer":"896d6ab6f91a7c153ba4542570854e8a5aa7767c2d350dc9b43474060ff7206ad0"}
+[02:03:54] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:03:55] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:03:56] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:03:57] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:03:58] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:03:59] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:00] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:01] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:02] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:03] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:04] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:05] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:06] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:07] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:08] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:09] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:10] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:11] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:12] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:13] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:14] peer-leaving {"from":"89345b6d16055d3d92d648781c4e98fd325ae0ea0890753ab6986bd33da4cb44a3"}
+[02:04:14] peer-lost-redundant-channel {"meshId":"c534","nodeId":null}
+[02:04:14] dc-close {"peerId":"c534"}
+[02:04:14] peer-leaving {"from":"8959b6bed2f3af737dcc4274cabac56fc3c24d2596fbdad48ffb76d91a90dd8d05"}
+[02:04:14] peer-lost-redundant-channel {"meshId":"c535","nodeId":null}
+[02:04:14] dc-close {"peerId":"c535"}
+[02:04:14] peer-leaving {"from":"8907a4dd090b47f69f1f65e351c86cd9b2854116d71481a0d975a69b771d49a636"}
+[02:04:14] dc-close {"peerId":"c536"}
+[02:04:14] peer-lost-redundant-channel {"meshId":"c536","nodeId":null}
+[02:04:14] peer-leaving {"from":"895b9c02b2485bf0f64ce4fc83be45a3c60b0a2c643f34d1af4ee3e0ce046212fa"}
+[02:04:14] peer-lost-redundant-channel {"meshId":"c537","nodeId":null}
+[02:04:14] dc-close {"peerId":"c537"}
+[02:04:14] state=open peers=15 synaptome=15 mesh(open/bound)=14/14 roles=0 subs=0
+[02:04:15] state=open peers=15 synaptome=15 mesh(open/bound)=14/14 roles=0 subs=0
+[02:04:16] bindPeer {"nodeId":"15935862614714886697054452474282531593235093633567595226352951529908032627778231","meshId":"c53g"}
+[02:04:16] auth-mesh-complete {"meshId":"c53g","peer":"899ff29aee1a16c531bc2aaf5ea36fe93323a48ecfd13c938966e47b365ae3a2b7"}
+[02:04:16] state=open peers=16 synaptome=16 mesh(open/bound)=15/15 roles=0 subs=0
+[02:04:17] state=open peers=16 synaptome=16 mesh(open/bound)=15/15 roles=0 subs=0
+[02:04:18] bindPeer {"nodeId":"15917598914901444128564202079112380170679603284669463706453135753982661068746781","meshId":"c53h"}
+[02:04:18] auth-mesh-complete {"meshId":"c53h","peer":"897791b7a947530e7685491f291c8d224f198a2b34e3f7da8ce6da590b58aa701d"}
+[02:04:18] state=open peers=17 synaptome=17 mesh(open/bound)=16/16 roles=0 subs=0
+[02:04:19] state=open peers=17 synaptome=17 mesh(open/bound)=16/16 roles=0 subs=0
+[02:04:19] bindPeer {"nodeId":"15959346529923773152871601032043387303978455719870756227624032260642459805894263","meshId":"c53i"}
+[02:04:19] auth-mesh-complete {"meshId":"c53i","peer":"89d3de07b973bfc9260203b797e59e3423afd00a551223f5b86bc9f1e1a39d4677"}
+[02:04:20] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:04:21] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:04:21] bindPeer {"nodeId":"15917564559458551019573430671278030210702056916113085316651775093604769609639045","meshId":"c53j"}
+[02:04:21] auth-mesh-complete {"meshId":"c53j","peer":"89777e45df13e5b823c5d3da23957a7902dc3dc92a711030d979d0a151a6796485"}
+[02:04:22] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:23] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:24] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:25] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:26] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:27] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:28] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:29] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:30] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:31] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:32] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:33] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:34] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:35] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:36] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:37] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:38] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:39] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:40] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:41] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:42] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:43] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:44] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:45] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:46] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:47] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:48] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:49] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:50] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:51] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:52] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:53] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:54] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:55] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:56] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:57] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:58] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:04:59] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:00] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:01] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:02] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:03] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:04] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:05] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:06] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:07] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:08] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:09] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:10] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:11] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:12] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:13] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:14] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:15] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:16] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:17] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:18] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:19] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:20] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:21] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:22] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:23] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:24] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:25] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:26] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:27] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:28] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:29] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:30] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:31] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:32] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:33] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:34] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:35] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:36] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:37] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:38] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:39] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:05:40] peer-leaving {"from":"8986096e3afff8701ecff57998f73e57c4ebc505ceded50fe042c98585effcb120"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c533","nodeId":null}
+[02:05:40] peer-leaving {"from":"893e984f66e0e58af93f113d418ab627ffc644e348b9d61355e0e6562df349bc8a"}
+[02:05:40] dc-close {"peerId":"c533"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c538","nodeId":null}
+[02:05:40] dc-close {"peerId":"c538"}
+[02:05:40] peer-leaving {"from":"89853b6dabf2422d96f068e86a4cfd8399f2501286599287f8c4f3307f33cd6806"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c539","nodeId":null}
+[02:05:40] peer-leaving {"from":"89902f9684856906f9017f9bb5f5aa1de305437e7b5b3034cfa6cda722009071ea"}
+[02:05:40] dc-close {"peerId":"c539"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53a","nodeId":null}
+[02:05:40] peer-leaving {"from":"895a48a47d5de8fa3b24e3e70bcfe7dd68d2f810419ef22ecd002f6a85d5b885ba"}
+[02:05:40] dc-close {"peerId":"c53a"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53b","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53b"}
+[02:05:40] peer-leaving {"from":"8950959e952a824f43ca2b64b7d59f76695ab3bd7488f9c61be15f2ae9bfe595d4"}
+[02:05:40] dc-close {"peerId":"c53c"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53c","nodeId":null}
+[02:05:40] peer-leaving {"from":"899eeaa7ae58de2a01aa0ed53e0e0baee7ad0ecec8d80c37e0221effbb2528e120"}
+[02:05:40] peer-leaving {"from":"894ca0f494d8a93cb5ea55b4b2e20fbb4d5b1f3f580f219cd601bfa9a34efc8a56"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53d","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53d"}
+[02:05:40] peer-leaving {"from":"896d6ab6f91a7c153ba4542570854e8a5aa7767c2d350dc9b43474060ff7206ad0"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53e","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53e"}
+[02:05:40] peer-leaving {"from":"899ff29aee1a16c531bc2aaf5ea36fe93323a48ecfd13c938966e47b365ae3a2b7"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53f","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53f"}
+[02:05:40] peer-leaving {"from":"897791b7a947530e7685491f291c8d224f198a2b34e3f7da8ce6da590b58aa701d"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53g","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53g"}
+[02:05:40] state=open peers=8 synaptome=8 mesh(open/bound)=8/7 roles=0 subs=0
+[02:05:40] peer-leaving {"from":"89d3de07b973bfc9260203b797e59e3423afd00a551223f5b86bc9f1e1a39d4677"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53h","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53h"}
+[02:05:40] peer-leaving {"from":"89777e45df13e5b823c5d3da23957a7902dc3dc92a711030d979d0a151a6796485"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53i","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53i"}
+[02:05:40] peer-lost-redundant-channel {"meshId":"c53j","nodeId":null}
+[02:05:40] dc-close {"peerId":"c53j"}
+[02:05:41] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:05:42] bindPeer {"nodeId":"15930737137396901642650909250270075942265288437828045339197912630391580906503482","meshId":"c53k"}
+[02:05:42] auth-mesh-complete {"meshId":"c53k","peer":"89949db0162bce7eeca7844b4926f6f7c08532a942a755ebba9c805ab029b43d3a"}
+[02:05:42] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:05:43] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:05:44] bindPeer {"nodeId":"15939150831898786146129516052791879977262286546783300777076574544021209966975805","meshId":"c53l"}
+[02:05:44] auth-mesh-complete {"meshId":"c53l","peer":"89a737ab902293e24af4d311f2d46ad62998254345ed22989caeebdc432d141b3d"}
+[02:05:44] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:45] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:46] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:47] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:48] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:49] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:50] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:51] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:52] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:53] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:54] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:55] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:56] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:57] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:58] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:05:59] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:00] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:01] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:02] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:03] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:04] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:05] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:06] peer-leaving {"from":"89a737ab902293e24af4d311f2d46ad62998254345ed22989caeebdc432d141b3d"}
+[02:06:06] state=open peers=7 synaptome=7 mesh(open/bound)=7/6 roles=0 subs=0
+[02:06:06] peer-lost-redundant-channel {"meshId":"c53l","nodeId":null}
+[02:06:06] dc-close {"peerId":"c53l"}
+[02:06:07] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:08] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:09] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:10] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:11] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:12] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:13] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:14] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:15] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:16] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:17] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:18] bindPeer {"nodeId":"15922836562034978771088532062969648262986361758776851536099442428710095699925508","meshId":"c53m"}
+[02:06:18] auth-mesh-complete {"meshId":"c53m","peer":"8983261ee2e82ff00bcf740376e39a9bfef09b14d2c1cc2d728dc8a381f0595a04"}
+[02:06:18] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:19] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:20] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:21] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:22] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:23] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:24] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:25] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:26] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:27] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:28] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:29] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:30] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:30] peer-leaving {"from":"89949db0162bce7eeca7844b4926f6f7c08532a942a755ebba9c805ab029b43d3a"}
+[02:06:30] peer-lost-redundant-channel {"meshId":"c53k","nodeId":null}
+[02:06:30] peer-leaving {"from":"8983261ee2e82ff00bcf740376e39a9bfef09b14d2c1cc2d728dc8a381f0595a04"}
+[02:06:30] dc-close {"peerId":"c53k"}
+[02:06:31] peer-lost-redundant-channel {"meshId":"c53m","nodeId":null}
+[02:06:31] dc-close {"peerId":"c53m"}
+[02:06:31] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:06:32] bindPeer {"nodeId":"15870608299525265494037403439036429078580755408900016268888824761366500631509240","meshId":"c53n"}
+[02:06:32] auth-mesh-complete {"meshId":"c53n","peer":"890fadf8bd7fe0ce2265c2fb64cd707de97d5f7b666fc7f859cbf781a776e5f8f8"}
+[02:06:32] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:33] state=open peers=7 synaptome=7 mesh(open/bound)=6/6 roles=0 subs=0
+[02:06:34] bindPeer {"nodeId":"15884122409349552268251876849775334767175152107080848055566065248004281494348112","meshId":"c53o"}
+[02:06:34] auth-mesh-complete {"meshId":"c53o","peer":"892d8eafce500800a6c21405bd49919c92bcadcf2b60ea2116503253dc4a632150"}
+[02:06:34] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:35] state=open peers=8 synaptome=8 mesh(open/bound)=7/7 roles=0 subs=0
+[02:06:36] bindPeer {"nodeId":"15893079041380409064003635187284008296657795034103777119868734910447522311454937","meshId":"c53p"}
+[02:06:36] auth-mesh-complete {"meshId":"c53p","peer":"89415bf5f87edfc7209bbbc652662d0b3dca9a0b784cca7ee4d1b27a49283a40d9"}
+[02:06:36] state=open peers=9 synaptome=9 mesh(open/bound)=8/8 roles=0 subs=0
+[02:06:37] state=open peers=9 synaptome=9 mesh(open/bound)=8/8 roles=0 subs=0
+[02:06:38] bindPeer {"nodeId":"15971320839019153133414165814682006724659626863418143037460776439889461726514891","meshId":"c53q"}
+[02:06:38] auth-mesh-complete {"meshId":"c53q","peer":"89ee573fbaeb98f5bfee40b7897fa386560a6fd8ad93f8262878adad724e458ecb"}
+[02:06:38] state=open peers=10 synaptome=10 mesh(open/bound)=9/9 roles=0 subs=0
+[02:06:39] bindPeer {"nodeId":"15954652518223676595975206478143105261225754633118563415779865953075527499618985","meshId":"c53r"}
+[02:06:39] auth-mesh-complete {"meshId":"c53r","peer":"89c97d504ec217daa123ec758bc2e4e012e818c36dc7c864f83722b7c7457f9aa9"}
+[02:06:39] state=open peers=11 synaptome=11 mesh(open/bound)=10/10 roles=0 subs=0
+[02:06:40] state=open peers=11 synaptome=11 mesh(open/bound)=10/10 roles=0 subs=0
+[02:06:41] state=open peers=11 synaptome=11 mesh(open/bound)=10/10 roles=0 subs=0
+[02:06:41] bindPeer {"nodeId":"15949515066373066715489108352213660828031796422365196764338308793437495716773030","meshId":"c53s"}
+[02:06:41] auth-mesh-complete {"meshId":"c53s","peer":"89be219e76ba0c4a6ba88d7034b8b4e888d403de7905f3a2ae9166271f833c7ca6"}
+[02:06:42] state=open peers=12 synaptome=12 mesh(open/bound)=11/11 roles=0 subs=0
+[02:06:43] state=open peers=12 synaptome=12 mesh(open/bound)=11/11 roles=0 subs=0
+[02:06:43] bindPeer {"nodeId":"15866963598984524746227397776014113533063179910978084154878401501775519327506876","meshId":"c53t"}
+[02:06:43] auth-mesh-complete {"meshId":"c53t","peer":"89079f24ecde445a5167cc0e7785268c169846cdf86f822a52a14d8d4b58e4d1bc"}
+[02:06:44] state=open peers=13 synaptome=13 mesh(open/bound)=12/12 roles=0 subs=0
+[02:06:45] bindPeer {"nodeId":"15908298852290306675988366528083950568024197278508711153940517656477886991283333","meshId":"c53u"}
+[02:06:45] auth-mesh-complete {"meshId":"c53u","peer":"896302118ae3760382d0651d6e022ce58d9a97bc25a8db533a95d912b80a77b485"}
+[02:06:45] state=open peers=14 synaptome=14 mesh(open/bound)=13/13 roles=0 subs=0
+[02:06:46] state=open peers=14 synaptome=14 mesh(open/bound)=13/13 roles=0 subs=0
+[02:06:47] bindPeer {"nodeId":"15897584559915678782266778433238363024953495161985890517556573698792289893568087","meshId":"c53v"}
+[02:06:47] auth-mesh-complete {"meshId":"c53v","peer":"894b51fe73204de0205a9362e691c8aa3f799a0c35666b9d7d0508236ec6374e57"}
+[02:06:47] state=open peers=15 synaptome=15 mesh(open/bound)=14/14 roles=0 subs=0
+[02:06:48] state=open peers=15 synaptome=15 mesh(open/bound)=14/14 roles=0 subs=0
+[02:06:49] bindPeer {"nodeId":"15932870312433146970362106700909185040670792662753192320213736734744067566752836","meshId":"c53w"}
+[02:06:49] auth-mesh-complete {"meshId":"c53w","peer":"89995505a9d209a9d49098997b6e6da275ae83911b21931926e7c97d1326c45444"}
+[02:06:49] state=open peers=16 synaptome=16 mesh(open/bound)=15/15 roles=0 subs=0
+[02:06:50] state=open peers=16 synaptome=16 mesh(open/bound)=15/15 roles=0 subs=0
+[02:06:51] bindPeer {"nodeId":"15956913982074401533361655849285378915884255249241034748380905504550843741057170","meshId":"c53x"}
+[02:06:51] auth-mesh-complete {"meshId":"c53x","peer":"89ce7d41c3013d18006b1df83f5e0e565b179053eb94c01970b48afcbc66533092"}
+[02:06:51] state=open peers=17 synaptome=17 mesh(open/bound)=16/16 roles=0 subs=0
+[02:06:52] state=open peers=17 synaptome=17 mesh(open/bound)=16/16 roles=0 subs=0
+[02:06:53] bindPeer {"nodeId":"15978074955380502104226011516561215961974219415368003476101378634028067053920871","meshId":"c53y"}
+[02:06:53] auth-mesh-complete {"meshId":"c53y","peer":"89fd45f17e6b8804a5ebd34aeec0551ac90fe3f3ad6dc7ecab82c16bb105286267"}
+[02:06:53] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:06:54] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:06:55] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:06:56] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:06:57] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:06:58] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:06:59] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:00] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:01] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:02] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:03] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:04] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:05] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:06] state=open peers=18 synaptome=18 mesh(open/bound)=17/17 roles=0 subs=0
+[02:07:07] bindPeer {"nodeId":"15929657062211447590655608630582250157949509030419552485429652220983682153006538","meshId":"c53z"}
+[02:07:07] auth-mesh-complete {"meshId":"c53z","peer":"89923a630ef5d047c54c506510addabab48107e74eafb191327fef700a5db345ca"}
+[02:07:07] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:08] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:09] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:10] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:11] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:12] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:13] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:14] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:15] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:16] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:17] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:18] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:19] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:20] state=open peers=19 synaptome=19 mesh(open/bound)=18/18 roles=0 subs=0
+[02:07:21] peer-leaving {"from":"890fadf8bd7fe0ce2265c2fb64cd707de97d5f7b666fc7f859cbf781a776e5f8f8"}
+[02:07:21] peer-lost-redundant-channel {"meshId":"c53n","nodeId":null}
+[02:07:21] peer-leaving {"from":"892d8eafce500800a6c21405bd49919c92bcadcf2b60ea2116503253dc4a632150"}
+[02:07:21] dc-close {"peerId":"c53n"}
+[02:07:21] peer-lost-redundant-channel {"meshId":"c53o","nodeId":null}
+[02:07:21] dc-close {"peerId":"c53o"}
+[02:07:21] peer-leaving {"from":"89415bf5f87edfc7209bbbc652662d0b3dca9a0b784cca7ee4d1b27a49283a40d9"}
+[02:07:21] state=open peers=16 synaptome=16 mesh(open/bound)=16/15 roles=0 subs=0
+[02:07:21] peer-lost-redundant-channel {"meshId":"c53p","nodeId":null}
+[02:07:21] dc-close {"peerId":"c53p"}
+[02:07:21] peer-leaving {"from":"89ee573fbaeb98f5bfee40b7897fa386560a6fd8ad93f8262878adad724e458ecb"}
+[02:07:21] peer-lost-redundant-channel {"meshId":"c53q","nodeId":null}
+[02:07:21] dc-close {"peerId":"c53q"}
+[02:07:21] peer-leaving {"from":"89c97d504ec217daa123ec758bc2e4e012e818c36dc7c864f83722b7c7457f9aa9"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53r","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53r"}
+[02:07:22] peer-leaving {"from":"89be219e76ba0c4a6ba88d7034b8b4e888d403de7905f3a2ae9166271f833c7ca6"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53s","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53s"}
+[02:07:22] peer-leaving {"from":"89079f24ecde445a5167cc0e7785268c169846cdf86f822a52a14d8d4b58e4d1bc"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53t","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53t"}
+[02:07:22] peer-leaving {"from":"896302118ae3760382d0651d6e022ce58d9a97bc25a8db533a95d912b80a77b485"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53u","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53u"}
+[02:07:22] peer-leaving {"from":"894b51fe73204de0205a9362e691c8aa3f799a0c35666b9d7d0508236ec6374e57"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53v","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53v"}
+[02:07:22] peer-leaving {"from":"89995505a9d209a9d49098997b6e6da275ae83911b21931926e7c97d1326c45444"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53w","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53w"}
+[02:07:22] peer-leaving {"from":"89ce7d41c3013d18006b1df83f5e0e565b179053eb94c01970b48afcbc66533092"}
+[02:07:22] peer-leaving {"from":"89fd45f17e6b8804a5ebd34aeec0551ac90fe3f3ad6dc7ecab82c16bb105286267"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53x","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53x"}
+[02:07:22] peer-leaving {"from":"89923a630ef5d047c54c506510addabab48107e74eafb191327fef700a5db345ca"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53y","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53y"}
+[02:07:22] peer-lost-redundant-channel {"meshId":"c53z","nodeId":null}
+[02:07:22] dc-close {"peerId":"c53z"}
+[02:07:22] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:23] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:24] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:25] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:26] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:27] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:28] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:29] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:30] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:31] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:32] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:33] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:34] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:35] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:36] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:37] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:38] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:39] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:40] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:41] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:42] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:43] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:44] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:45] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:46] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:47] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:48] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:49] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:50] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:51] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:52] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+[02:07:53] state=open peers=6 synaptome=6 mesh(open/bound)=5/5 roles=0 subs=0
+
+axona-relay shutting down (SIGTERM)…
+[02:07:54] peer-leaving {"from":"876ff5e47fed7f0aca42e41de77e9ec34d242ffdab934b82e9d16f64699302ac41"}
+[02:07:54] peer-leaving {"from":"89ca436d02fdd34d929134f26bde02d87127819650a4ca2c2622bea0175915ff3c"}
+[02:07:54] peer-lost-redundant-channel {"meshId":"c4yd","nodeId":null}
+[02:07:54] dc-close {"peerId":"c4yd"}
+[02:07:54] peer-lost-redundant-channel {"meshId":"c4ye","nodeId":null}
+[02:07:54] dc-close {"peerId":"c4ye"}
