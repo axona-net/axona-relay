@@ -83,12 +83,11 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {} }) {
   // transport/connection key). There is NO `publishIdentity:` — publishes name
   // their author per-call via pub(..., { signWith }). The transport factory
   // above keeps `identity:` (it's the same node key, used for the auth hello).
-  // Synaptome maintenance ON (Synaptome-Maintenance-v0.1): continuously refill the
-  // K_NEAR XOR-nearest successor quota so greedy routing's last-mile descent stays
-  // complete through churn. Enabled in development per decision 2026-06-29 (no live
-  // adversary; E-1 costly-identity is pre-production hardening, not a dev blocker).
-  const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport,
-                                 synaptomeMaintain: { kNear: 5, intervalMs: 15000, maxPerTick: 3 } });
+  // Synaptome maintenance: REVERTED to off (2026-06-29) — enabling it on the
+  // backbone regressed Howard's suite (0/9/6 failures across 3 runs; connection-count
+  // storm + convergence wedge). Re-enable only behind a fix + Howard gate. Opt back in
+  // via env once fixed: synaptomeMaintain: process.env.RELAY_SYNAPTOME_MAINTAIN==='1' ? {...} : null
+  const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport });
 
   return { peer, transport, node, domain };
 }
