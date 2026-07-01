@@ -45,8 +45,9 @@ function snapshotFor(r, nodeId, now) {
     ts:            now,
     by:            nodeId,            // computing relay's node id (provenance)
     signer:        nodeId,            // self-asserted provenance; peer.metrics() prefers the envelope's signerPubkey
-    current_count: r.current_count,   // live (non-expired) cached posts
-    subscribers:   r.subscribers,     // children in this relay's root set
+    current_count: r.current_count,   // messages currently in cache (live, non-expired)
+    seq:           r.seq,             // message counter — root's dense per-topic high-water (monotonic)
+    subscribers:   r.subscribers,     // subscribers in THIS cohort member's root set (reader aggregates)
     bytes:         r.bytes,           // live cached envelope bytes
   };
 }
