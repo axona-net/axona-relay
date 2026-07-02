@@ -7,3 +7,6 @@ npm-debug.log*
 .DS_Store
 pow-results*.jsonl
 backups/
+
+# fleet runtime logs (start-fleet.sh writes here; churn — never commit)
+relay-logs/
