@@ -116,7 +116,7 @@ const REPLICA_STALE_MS = 65_000;         // a backup whose root stopped replicat
 // (root momentarily absent, still alive) doesn't spuriously split the root; the
 // _selfClosestReachable gate + beacon-demote reconciliation make a rare over-promotion
 // self-healing regardless.
-const REPLICA_GONE_MS  = 15_000;         // root observably departed the mesh → promote after this (raised 8s→15s: at 8s a transiently-unreachable root got a backup promoted over it → split root → dropped pubs/kills; vs 65s of pure silence)
+const REPLICA_GONE_MS  = 65_000;         // root observably departed the mesh → promote after this. EXPERIMENT (8s→15s→65s): 15s still split roots on the restart path (axonSpec 2/5 hard-fail); set equal to REPLICA_STALE_MS to disable fast promotion entirely (pre-4.17.0 timing) and isolate whether departure-triggered promotion is the split cause vs the root-rejoin path
 // ≈1 renewFastMs cycle: long enough that a genuinely reachable multi-hop closer
 // root adopts us first (deliver-`from` pin), short enough that a cold topic roots
 // within a couple of seconds instead of stranding. (12s was measured too slow —
