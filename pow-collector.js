@@ -118,6 +118,15 @@ function isConnected() {
   catch { return false; }
 }
 
+// Bound every await in the recovery path. Observed live (2026-07-09, after a
+// bridge restart): attempt 3's connect() never settled — the loop was alive
+// but wedged on the await, and the watchdog no-oped behind `reconnecting`.
+// A recovery path must never wait unboundedly on the thing it is recovering.
+const withTimeout = (p, ms, what) => Promise.race([
+  p,
+  new Promise((_, rej) => { const t = setTimeout(() => rej(new Error(`${what} timed out after ${Math.round(ms / 1000)}s`)), ms); t.unref?.(); }),
+]);
+
 async function reconnect(reason) {
   if (reconnecting) return;
   reconnecting = true;
@@ -126,8 +135,13 @@ async function reconnect(reason) {
   try { cleanupWebRTC(); } catch { /* */ }
   h = null;
   for (let attempt = 1; ; attempt++) {
-    try { await connect(); console.log(`  ✓ reconnected on attempt ${attempt}\n`); break; }
+    console.log(`  reconnect attempt ${attempt}…`);
+    try { await withTimeout(connect(), 60_000, 'connect'); console.log(`  ✓ reconnected on attempt ${attempt}\n`); break; }
     catch (e) {
+      // Tear down any half-built peer so a late-completing zombie can't linger.
+      try { await h?.close(); } catch { /* */ }
+      try { cleanupWebRTC(); } catch { /* */ }
+      h = null;
       const wait = Math.min(30000, 2000 * attempt);
       console.log(`  reconnect attempt ${attempt} failed: ${e.message || e} — retry in ${Math.round(wait / 1000)}s`);
       await sleep(wait);
