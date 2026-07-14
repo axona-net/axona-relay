@@ -4,3 +4,4 @@ pow-collector → pow-results.jsonl
   connected as 89a9e9905e… — collecting
   collecting (auto-reconnect armed; Ctrl-C to stop)
 
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh

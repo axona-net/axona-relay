@@ -12,3 +12,4 @@ pow-collector → pow-results-prod.jsonl
   connected as 89679ca05e… — collecting
   collecting (auto-reconnect armed; Ctrl-C to stop)
 
+  ✓ backed up 24669 results (2.3M gz) @ 2026-07-14T13:58:31Z → https://github.com/axona-net/pow-data-backup.git
