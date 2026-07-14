@@ -1,0 +1,6 @@
+pow-collector → pow-results.jsonl
+  topic=pow-bench/results region=useast bridge=wss://bridge.axona.net
+  24669 result(s) already on file; connecting…
+  connected as 89a9e9905e… — collecting
+  collecting (auto-reconnect armed; Ctrl-C to stop)
+
