@@ -5,3 +5,36 @@ pow-collector → pow-results.jsonl
   collecting (auto-reconnect armed; Ctrl-C to stop)
 
   backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-14T17:58:31Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: fatal: Unable to create '/Users/croqueteer/Documents/claude/pow-data-backup/.git/index.lock': File exists.
+
+Another git process seems to be running in this repository, e.g.
+an editor opened by 'git commit'. Please make sure all processes
+are terminated then try again. If it still fails, a git process
+may have crashed in this repository earlier:
+remove the file manually to continue.
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-15T05:58:32Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.3M gz) @ 2026-07-15T09:58:32Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-15T15:58:32Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-15T19:58:32Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.8M gz) @ 2026-07-15T23:58:32Z → https://github.com/axona-net/pow-data-backup.git
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-16T01:58:32Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-16T11:58:33Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
