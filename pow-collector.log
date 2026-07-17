@@ -38,3 +38,10 @@ remove the file manually to continue.
   backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
   backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
   backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-16T21:58:33Z → https://github.com/axona-net/pow-data-backup.git
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-16T23:58:33Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  ✓ backed up 24669 results (2.1M gz) @ 2026-07-17T03:58:33Z → https://github.com/axona-net/pow-data-backup.git
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
+  backup failed: Command failed: /Users/croqueteer/Documents/claude/axona-relay/backup-pow-data.sh
