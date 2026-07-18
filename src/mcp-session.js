@@ -128,10 +128,18 @@ export async function getAuthorClass({ authorId } = {}) {
 }
 
 // ── point operations over the live peer ─────────────────────────────────
-export async function publish({ topic, message, region }) {
+export async function publish({ topic, message, region, handle, authorClass, raw = false }) {
   const s = await ensureSession();
-  const msgId = await s.peer.pub(descriptorFor(topic, region), message, { signWith: s.author });
-  return { ok: true, topic, region: region || REGION, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true };
+  // Default to the cross-app std/message shape WITH an in-payload declaration.
+  // Chat clients enforce §6.5 at render: a message whose payload lacks
+  // handle/authorClass is withheld as undeclared — a bare-string publish is
+  // invisible to exactly the humans it addresses. authorClass defaults to
+  // this peer's declared class; raw:true opts out for machine topics.
+  const body = raw
+    ? message
+    : { v: 1, text: message, handle: handle || 'Claude', authorClass: authorClass || AUTHOR_CLASS };
+  const msgId = await s.peer.pub(descriptorFor(topic, region), body, { signWith: s.author });
+  return { ok: true, topic, region: region || REGION, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
 
 export async function pull({ topic, region }) {
