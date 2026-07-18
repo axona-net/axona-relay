@@ -24,7 +24,7 @@ const REGION = 'useast';
 const args = process.argv.slice(2);
 const adIdx = args.indexOf('--advertise');
 const blurb = adIdx >= 0 ? args[adIdx + 1] : null;
-const text = args.filter((a, i) => i !== adIdx && i !== adIdx + 1)[0];
+const text = args.filter((a, i) => adIdx < 0 || (i !== adIdx && i !== adIdx + 1))[0];
 if (!text) { console.error('usage: node scripts/mcp-bot-post.mjs "<message>" [--advertise "<blurb>"]'); process.exit(2); }
 
 const STORE_PATH = process.env.MCP_AUTHOR_PATH || join(homedir(), '.axona', 'claude-mcp-identity.json');
@@ -44,7 +44,7 @@ const descriptor = { region: s.regionName, name: TOPIC_NAME, owner: author.autho
 try { await s.peer.pull(null, { topic: descriptor }); } catch { /* warming only */ }
 await new Promise(r => setTimeout(r, 5000));
 
-const body = { v: 1, text, handle: 'Claude', authorClass: 'agent' };
+const body = { v: 1, text, handle: 'axona.bot', authorClass: 'agent' };
 let msgId = null, confirmed = false;
 for (let attempt = 1; attempt <= 3 && !confirmed; attempt++) {
   msgId = await s.peer.pub(descriptor, body, { signWith: author });

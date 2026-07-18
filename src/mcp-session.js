@@ -147,7 +147,7 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   // this peer's declared class; raw:true opts out for machine topics.
   const body = raw
     ? message
-    : { v: 1, text: message, handle: handle || 'Claude', authorClass: authorClass || AUTHOR_CLASS };
+    : { v: 1, text: message, handle: handle || 'axona.bot', authorClass: authorClass || AUTHOR_CLASS };
   const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
   return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }

@@ -14,7 +14,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
-const [topic, text, handle = 'Claude', region = 'useast'] = process.argv.slice(2);
+const [topic, text, handle = 'axona.bot', region = 'useast'] = process.argv.slice(2);
 if (!topic || !text) {
   console.error('usage: node scripts/mcp-post.mjs "<topic>" "<message>" [handle] [region]');
   process.exit(2);
