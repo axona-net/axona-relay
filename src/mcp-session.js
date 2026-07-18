@@ -69,11 +69,21 @@ const WATCHES = new Map();    // "region|topic" → { topic, region, descriptor,
 const HOSTED  = new Map();    // "region|topic" → { topic, region, descriptor, since }
 const ARRIVAL_LISTENERS = new Set();   // fn({topic,region,message,signer,msgId})
 
-const keyOf = (region, topic) => `${region}|${topic}`;
+// owner + write FOLD INTO THE TOPIC ID — an owned topic is a different topic
+// from the open one of the same name, so both the descriptor and the watch
+// key must carry them (else a watch on "axona.bot" listens to the wrong topic).
+const keyOf = (region, topic, owner, write) => `${region}|${topic}|${owner || ''}|${write || 'open'}`;
 const now = () => Date.now();
-function descriptorFor(topic, region) {
+function descriptorFor(topic, region, owner, write) {
   const { name: regionName } = regionToDescriptor(region || REGION);
-  return { region: regionName, name: topic };
+  const d = { region: regionName, name: topic };
+  if (owner) d.owner = owner;
+  if (write) d.write = write;
+  return d;
+}
+/** 'self' resolves to this peer's durable Author ID (for owner-only topics we own). */
+function resolveOwner(s, owner) {
+  return owner === 'self' ? s.author.authorId : (owner || undefined);
 }
 
 /** Register a push sink — called for every arrival on any watch (best-effort, never throws into the peer). */
@@ -128,7 +138,7 @@ export async function getAuthorClass({ authorId } = {}) {
 }
 
 // ── point operations over the live peer ─────────────────────────────────
-export async function publish({ topic, message, region, handle, authorClass, raw = false }) {
+export async function publish({ topic, message, region, handle, authorClass, raw = false, owner, write }) {
   const s = await ensureSession();
   // Default to the cross-app std/message shape WITH an in-payload declaration.
   // Chat clients enforce §6.5 at render: a message whose payload lacks
@@ -138,23 +148,24 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   const body = raw
     ? message
     : { v: 1, text: message, handle: handle || 'Claude', authorClass: authorClass || AUTHOR_CLASS };
-  const msgId = await s.peer.pub(descriptorFor(topic, region), body, { signWith: s.author });
-  return { ok: true, topic, region: region || REGION, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
+  const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
+  return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
 
-export async function pull({ topic, region }) {
+export async function pull({ topic, region, owner, write }) {
   const s = await ensureSession();
-  const env = await s.peer.pull(null, { topic: descriptorFor(topic, region) });
+  const env = await s.peer.pull(null, { topic: descriptorFor(topic, region, resolveOwner(s, owner), write) });
   return { ok: true, topic, region: region || REGION, found: !!env, message: env ? env.message : null, msgId: env?.msgId ?? null };
 }
 
 // ── standing subscription ───────────────────────────────────────────────
-export async function watch({ topic, region, since = 'all' }) {
+export async function watch({ topic, region, since = 'all', owner, write }) {
   const s = await ensureSession();
   const r = region || REGION;
-  const key = keyOf(r, topic);
+  const ro = resolveOwner(s, owner);
+  const key = keyOf(r, topic, ro, write);
   if (WATCHES.has(key)) { const w = WATCHES.get(key); return { ok: true, watching: true, alreadyWatching: true, topic, region: r, buffered: w.buffer.length, total: w.total }; }
-  const descriptor = descriptorFor(topic, region);
+  const descriptor = descriptorFor(topic, region, ro, write);
   const w = { topic, region: r, descriptor, buffer: [], total: 0, dropped: 0, since, startedAt: now(), waiters: [] };
   // kernel `since`: 'all' (replay backlog) | 'latest' (most recent only) | a
   // timestamp | undefined (live tail). Expose 'live' as the friendly name for
@@ -175,7 +186,9 @@ export async function watch({ topic, region, since = 'all' }) {
 }
 
 /** Drain (or peek) buffered messages. With `wait`, long-poll: block until an arrival or `timeoutSec`. */
-export async function poll({ topic, region, peek = false, max, wait = false, timeoutSec = 25 } = {}) {
+export async function poll({ topic, region, peek = false, max, wait = false, timeoutSec = 25, owner, write } = {}) {
+  const s0 = await ensureSession();
+  const pollKey = topic ? keyOf(region || REGION, topic, resolveOwner(s0, owner), write) : null;
   const collect = (w) => {
     const out = max ? w.buffer.slice(0, Number(max)) : w.buffer.slice();
     if (!peek) { if (max) w.buffer.splice(0, out.length); else w.buffer.length = 0; }
@@ -184,29 +197,30 @@ export async function poll({ topic, region, peek = false, max, wait = false, tim
   const anyBuffered = () => [...WATCHES.values()].some((w) => w.buffer.length);
 
   if (wait && !peek) {
-    const targetEmpty = topic ? !(WATCHES.get(keyOf(region || REGION, topic))?.buffer.length) : !anyBuffered();
+    const targetEmpty = topic ? !(WATCHES.get(pollKey)?.buffer.length) : !anyBuffered();
     if (targetEmpty) {
       const secs = Math.max(1, Math.min(60, Number(timeoutSec) || 25));
       await new Promise((resolve) => {
         let done = false; const fire = () => { if (!done) { done = true; resolve(); } };
         const t = setTimeout(fire, secs * 1000);
         const wrap = () => { clearTimeout(t); fire(); };
-        if (topic) { const w = WATCHES.get(keyOf(region || REGION, topic)); if (w) w.waiters.push(wrap); else fire(); }
+        if (topic) { const w = WATCHES.get(pollKey); if (w) w.waiters.push(wrap); else fire(); }
         else { for (const w of WATCHES.values()) w.waiters.push(wrap); }   // any watch wakes us
       });
     }
   }
 
   if (topic) {
-    const w = WATCHES.get(keyOf(region || REGION, topic));
-    if (!w) return { ok: false, error: `not watching ${region || REGION}|${topic} (call axona_watch first)` };
+    const w = WATCHES.get(pollKey);
+    if (!w) return { ok: false, error: `not watching ${region || REGION}|${topic} (call axona_watch first, with matching owner/write)` };
     return { ok: true, peek, waited: !!wait, ...collect(w) };
   }
   return { ok: true, peek, waited: !!wait, watches: [...WATCHES.values()].map(collect) };
 }
 
-export async function unwatch({ topic, region }) {
-  const r = region || REGION; const key = keyOf(r, topic); const w = WATCHES.get(key);
+export async function unwatch({ topic, region, owner, write }) {
+  const s0 = await ensureSession();
+  const r = region || REGION; const key = keyOf(r, topic, resolveOwner(s0, owner), write); const w = WATCHES.get(key);
   if (!w) return { ok: false, error: `not watching ${r}|${topic}` };
   const s = await ensureSession();
   try { await s.peer.unsub?.(w.descriptor); } catch { /* */ }
@@ -216,16 +230,18 @@ export async function unwatch({ topic, region }) {
 }
 
 // ── hosting: root Claude's own topics (store + serve, no subscribe) ──────
-export async function host({ topic, region }) {
+export async function host({ topic, region, owner, write }) {
   const s = await ensureSession();
-  const r = region || REGION; const key = keyOf(r, topic);
-  const descriptor = descriptorFor(topic, region);
+  const ro = resolveOwner(s, owner);
+  const r = region || REGION; const key = keyOf(r, topic, ro, write);
+  const descriptor = descriptorFor(topic, region, ro, write);
   if (!HOSTED.has(key)) { await s.peer.host(descriptor); HOSTED.set(key, { topic, region: r, descriptor, since: now() }); }
   return { ok: true, hosting: true, topic, region: r };
 }
 
-export async function unhost({ topic, region }) {
-  const r = region || REGION; const key = keyOf(r, topic);
+export async function unhost({ topic, region, owner, write }) {
+  const s0 = await ensureSession();
+  const r = region || REGION; const key = keyOf(r, topic, resolveOwner(s0, owner), write);
   if (!HOSTED.has(key)) return { ok: false, error: `not hosting ${r}|${topic}` };
   const s = await ensureSession();
   try { await s.peer.unhost?.(HOSTED.get(key).descriptor); } catch { /* */ }

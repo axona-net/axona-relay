@@ -41,46 +41,47 @@ const run = (fn) => async (args) => { try { return J(await fn(args)); } catch (e
 const server = new McpServer({ name: 'axona', version: VERSION });
 
 const REGION = { region: z.string().optional().describe('Region name or code for the topic anchor (default "useast" / 0x89)') };
+const OWNED = { owner: z.string().optional().describe('Owner Author ID for an OWNED topic — owner+write fold into the topic id, so they must match on every call. "self" = this peer\'s durable author (e.g. the axona.bot channel)'), write: z.enum(['open', 'owner']).optional().describe('Write policy of the target topic (owner-only topics need write:"owner")') };
 
 server.tool(
   'axona_publish',
   'Publish a message to a topic on the live Axona peer-to-peer network (production by default). Uses the server\'s persistent peer and its STABLE author identity, so every publish comes from the same Author ID. Returns the msgId + signer. Topics are anchored at a region (default "useast"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo.axona.net feed.',
-  { topic: z.string().describe('Topic name, e.g. "us-east/hello-world" or "claude/test"'), message: z.string().describe('Message body to publish'), ...REGION, handle: z.string().optional().describe('Display handle carried in the payload (default "Claude"); chat apps render it'), authorClass: z.enum(['human', 'agent']).optional().describe('In-payload §6.5 declaration (default: this peer\'s declared class, "agent"); chat apps HIDE undeclared messages'), raw: z.boolean().optional().describe('true = publish the bare string without the std/message wrapper (machine topics)') },
+  { topic: z.string().describe('Topic name, e.g. "us-east/hello-world" or "claude/test"'), message: z.string().describe('Message body to publish'), ...REGION, ...OWNED, handle: z.string().optional().describe('Display handle carried in the payload (default "Claude"); chat apps render it'), authorClass: z.enum(['human', 'agent']).optional().describe('In-payload §6.5 declaration (default: this peer\'s declared class, "agent"); chat apps HIDE undeclared messages'), raw: z.boolean().optional().describe('true = publish the bare string without the std/message wrapper (machine topics)') },
   run(publish),
 );
 
 server.tool(
   'axona_watch',
   'Open a STANDING subscription to an Axona topic on the server\'s persistent peer. Messages that arrive are BUFFERED on the server; call axona_poll to read them. Unlike axona_subscribe (which blocks for a fixed window), this returns immediately and keeps listening across later tool calls — this is how the agent participates as a continuous subscriber. Idempotent: watching an already-watched topic is a no-op. since:"all" (default) replays the cached backlog into the buffer; "new" buffers only future messages.',
-  { topic: z.string().describe('Topic name to watch'), ...REGION, since: z.enum(['all', 'latest', 'live']).optional().describe('"all" replays the cached backlog into the buffer (default); "latest" only the most recent; "live" only future messages') },
+  { topic: z.string().describe('Topic name to watch'), ...REGION, ...OWNED, since: z.enum(['all', 'latest', 'live']).optional().describe('"all" replays the cached backlog into the buffer (default); "latest" only the most recent; "live" only future messages') },
   run(watch),
 );
 
 server.tool(
   'axona_poll',
   'Drain buffered messages collected by axona_watch. With `topic`, drains that one watch; without it, drains every active watch. Returns the messages and clears them from the buffer (peek:true reads without clearing). `max` caps how many are returned. This is the agent\'s "inbox". Set wait:true to LONG-POLL — if nothing is buffered, the call blocks server-side until a message arrives or `timeoutSec` (default 25, max 60) elapses, so you get near-zero-latency delivery instead of fixed-interval polling.',
-  { topic: z.string().optional().describe('Topic to drain (omit to drain ALL active watches)'), ...REGION, peek: z.boolean().optional().describe('true = read without clearing the buffer'), max: z.number().optional().describe('Cap the number of messages returned'), wait: z.boolean().optional().describe('Long-poll: block until an arrival (or timeout) if the buffer is empty'), timeoutSec: z.number().optional().describe('Long-poll timeout, 1–60 (default 25)') },
+  { topic: z.string().optional().describe('Topic to drain (omit to drain ALL active watches)'), ...REGION, ...OWNED, peek: z.boolean().optional().describe('true = read without clearing the buffer'), max: z.number().optional().describe('Cap the number of messages returned'), wait: z.boolean().optional().describe('Long-poll: block until an arrival (or timeout) if the buffer is empty'), timeoutSec: z.number().optional().describe('Long-poll timeout, 1–60 (default 25)') },
   run(poll),
 );
 
 server.tool(
   'axona_host',
   'Host (root) a topic on Claude\'s persistent peer: the peer stores and serves the topic\'s messages for the network WITHOUT subscribing — Claude becomes durable infrastructure for that topic, so its backlog stays answerable even when no other node holds it. Idempotent.',
-  { topic: z.string().describe('Topic name to host/root'), ...REGION },
+  { topic: z.string().describe('Topic name to host/root'), ...REGION, ...OWNED },
   run(host),
 );
 
 server.tool(
   'axona_unhost',
   'Stop hosting a topic previously rooted with axona_host.',
-  { topic: z.string().describe('Topic name to stop hosting'), ...REGION },
+  { topic: z.string().describe('Topic name to stop hosting'), ...REGION, ...OWNED },
   run(unhost),
 );
 
 server.tool(
   'axona_unwatch',
   'Stop a standing subscription started by axona_watch and discard its buffer. Returns how many messages were still buffered.',
-  { topic: z.string().describe('Topic to stop watching'), ...REGION },
+  { topic: z.string().describe('Topic to stop watching'), ...REGION, ...OWNED },
   run(unwatch),
 );
 
@@ -108,7 +109,7 @@ server.tool(
 server.tool(
   'axona_pull',
   'Fetch only the single most recent message on an Axona topic (no listening window). Faster than watch/poll when you just want the latest value. Returns { found, message, msgId }.',
-  { topic: z.string().describe('Topic name'), ...REGION },
+  { topic: z.string().describe('Topic name'), ...REGION, ...OWNED },
   run(pull),
 );
 

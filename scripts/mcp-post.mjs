@@ -29,8 +29,16 @@ const store = {
 
 const author = await createAuthorIdentity({ persistAs: 'claude', store });   // the MCP's durable Author ID
 const s = await connectPeer({ region, author });                             // ephemeral node identity
+const descriptor = { region: s.regionName, name: topic };
+// A freshly-connected peer's K-closest estimate is built from a barely-warmed
+// table (readiness gate = synaptome ≥ 1); publishing immediately can distribute
+// to the wrong cohort and strand the message. Warm the route with a lookup-read
+// of the target topic first, then let the mesh settle before publishing.
+try { await s.peer.pull(null, { topic: descriptor }); } catch { /* warming only */ }
+await new Promise(r => setTimeout(r, 5000));
 const body = { v: 1, text, handle, authorClass: 'agent' };
-const msgId = await s.peer.pub({ region: s.regionName, name: topic }, body, { signWith: author });
+const msgId = await s.peer.pub(descriptor, body, { signWith: author });
+await new Promise(r => setTimeout(r, 3000));   // let distribution finish before teardown
 console.log(JSON.stringify({ ok: true, topic, region: s.regionName, msgId, signer: author.authorId }));
 await s.close();
 try { cleanupWebRTC(); } catch { /* */ }
