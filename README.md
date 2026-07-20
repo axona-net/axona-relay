@@ -5,9 +5,15 @@ joins an Axona network over **real WebRTC**, helps route lookups, roots pub/sub
 topics, and relays signaling for other peers, while showing its live state in a
 console dashboard.
 
-**v0.9.0** on kernel **v2.35.0** (`axona/5` wire epoch). Defaults to the
+**v0.59.0** on the kernel **4.x line** (wire 4.0; the exact vendored version is
+in `vendor/axona-protocol` and shown in the dashboard header). Defaults to the
 **production** network ([bridge.axona.net](https://bridge.axona.net)); set
 `RELAY_NETWORK=testnet` to target the SF staging line instead.
+
+Beyond routing, a relay **hosts the keyspace by default** (the kernel's
+`host()` — it stores and serves topics that route to it without consuming
+them) and publishes **signed metric snapshots** to each rooted topic's derived
+metric topic, so clients read metrics by subscribing instead of polling.
 
 It runs the *same* kernel stack a browser peer runs (`webTransport` +
 `NeuronNode` + `AxonaDomain` + `AxonaPeer`) — the only difference is Node has no
@@ -89,7 +95,7 @@ to be — the 192 region cells are ~2000 km across. Auto identities persist to a
 fixed `identity.auto.json` (so re-detection variance never orphans the nodeId).
 The default (no `RELAY_REGION`) makes **no** network call.
 
-> The relay sends its **kernel** version (2.x) in the bridge handshake, which
+> The relay sends its **kernel** version (4.x) in the bridge handshake, which
 > clears the kernel-namespace floor (`MIN_KERNEL_VERSION`). It does **not** send
 > its 0.x app version on the wire (that would be classified kernel-namespace and
 > rejected); the app version is display-only.
@@ -179,6 +185,14 @@ and returns JSON.
 | `axona_publish` | `topic`, `message`, `region?` | `{ ok, msgId, … }` |
 | `axona_subscribe` | `topic`, `region?`, `seconds?` (1–120), `since?` (`all`\|`new`) | `{ received, messages[] }` |
 | `axona_pull` | `topic`, `region?` | `{ found, message, msgId }` |
+| `axona_watch` / `axona_poll` / `axona_unwatch` | `topic` … | standing subscription on the **persistent session peer** — accumulate messages across calls, drain with `poll` |
+| `axona_status` | — | the session peer's identity, mesh state, and active watches |
+| `axona_host` / `axona_unhost` | `topic` | host a topic (store + serve without consuming) |
+| `axona_set_class` / `axona_get_class` | `topic`, … | topic write-policy / class inspection |
+
+The server also maintains a **long-lived session peer** with a durable author
+identity, so an agent can be a *standing participant* (watch a channel across
+an entire working session) rather than a per-call visitor.
 
 Register it as a project-scoped MCP server — a `.mcp.json` at your project root:
 
@@ -323,8 +337,6 @@ scripts/sync-protocol.sh
 
 ## Roadmap ideas
 
-- Topic **pinning** (`RELAY_PIN=us-east/hello-world,…`) so a relay proactively
-  subscribes/roots chosen topics for durability.
 - Prometheus `/metrics` (peers, binds, roles, replay-cache sizes).
 - Multiple relays + a small chaos harness to measure pub/sub durability vs
   churn.
