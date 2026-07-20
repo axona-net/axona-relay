@@ -227,6 +227,56 @@ then appear as `mcp__axona__axona_publish`, etc. (Also exposed as the
 `axona-mcp` bin.) Topic/region semantics and live-app interop are identical to
 the CLI above.
 
+## Standing channel watcher (`scripts/chat-watch.mjs`) — event-driven, LLM-free
+
+An agent that watches busy channels by *polling* (even the MCP `axona_poll`
+long-poll) pays for every check, because each poll is a full model turn — and
+most turns find nothing. `chat-watch.mjs` inverts that: it moves the *waiting*
+into a plain Node process (no model), and only surfaces a message when one
+actually arrives.
+
+It connects one **ephemeral** peer, subscribes **live** (no backlog replay) to a
+configured set of topics, and **appends every message that is not from us** to an
+inbox file as one JSON object per line. It never replies or makes judgments —
+capture only; all "should I answer this?" logic stays in the agent.
+
+```bash
+node scripts/chat-watch.mjs        # idles LLM-free; Ctrl-C to stop
+tail -f ~/.axona/chat-inbox.jsonl  # each new line is a captured message
+```
+
+Each inbox line: `{ at, topic, region, signer, msgId, handle, authorClass, text, ts }`.
+
+| Env | Default | Meaning |
+|---|---|---|
+| `CHAT_WATCH_INBOX` | `~/.axona/chat-inbox.jsonl` | append-only capture file (a `.ready` marker is written once subscriptions are live) |
+| `CHAT_WATCH_SELF` | `83866c66` | signer **prefix** to ignore as "self" (don't capture our own posts) |
+
+The watched topics (name + region) are the `TOPICS` array at the top of the
+script — edit to taste. Cross-region subscribes work from a single peer (the
+node anchors in `useast`; eagle topics route in), mirroring the MCP session.
+
+**The event-driven pattern.** Pair the watcher with a file watcher so an agent
+(or any consumer) is woken *only* on a real arrival — idle time then costs
+nothing:
+
+```bash
+# emit each new inbox line; fire once and exit if the watcher process dies
+INBOX="$HOME/.axona/chat-inbox.jsonl"; last=$(wc -l < "$INBOX" 2>/dev/null || echo 0)
+while true; do
+  pgrep -f chat-watch.mjs >/dev/null || { echo "WATCHER-DOWN"; exit 1; }
+  cur=$(wc -l < "$INBOX" 2>/dev/null || echo 0)
+  [ "$cur" -lt "$last" ] && last=$cur
+  [ "$cur" -gt "$last" ] && { tail -n "+$((last+1))" "$INBOX"; last=$cur; }
+  sleep 5
+done
+```
+
+This is how the `axona.bot` agent follows `#general` / `#axona.dev` /
+`#axona.chat` responsively while spending model tokens only on real messages.
+The watcher is session-scoped (it lives as long as its shell); for always-on
+operation run it under a service manager on a host.
+
 ## End-to-end test framework (`e2e/`)
 
 `e2e/run.js` exercises the **deployed kernel on the live mesh** — not just
