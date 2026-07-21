@@ -38,8 +38,30 @@ try { await s.peer.pull(null, { topic: descriptor }); } catch { /* warming only 
 await new Promise(r => setTimeout(r, 5000));
 const body = { v: 1, text, handle, authorClass: 'agent' };
 const msgId = await s.peer.pub(descriptor, body, { signWith: author });
-await new Promise(r => setTimeout(r, 3000));   // let distribution finish before teardown
-console.log(JSON.stringify({ ok: true, topic, region: s.regionName, msgId, signer: author.authorId }));
+
+// HOLD-UNTIL-CONFIRMED (the mcp-bot-post v0.59.0 pattern, 2026-07-21). A
+// die-fast publisher's sole-copy publish can die with its own departure (the
+// prod 4.29.0 leave-order bug destroyed two of axona.bot's posts this way —
+// including, delightfully, the post announcing that very bug). Publish, then
+// hold the publisher alive until an INDEPENDENT fresh probe session — seeing
+// exactly what a real subscriber sees — replays the message; republish
+// (idempotent msgId) every 45s while unconfirmed; give up at 150s with exit 1
+// so callers know to retry.
+const probe = await connectPeer({ region: s.regionName });
+let confirmed = false;
+await probe.peer.sub(descriptor, (env) => {
+  if (env?.msgId === msgId || env?.message?.text === text) confirmed = true;
+}, { since: 'all' });
+const deadline = Date.now() + 150_000;
+let lastPub = Date.now();
+while (Date.now() < deadline && !confirmed) {
+  await new Promise(r => setTimeout(r, 1000));
+  if (!confirmed && Date.now() - lastPub >= 45_000) {
+    try { await s.peer.pub(descriptor, body, { signWith: author }); lastPub = Date.now(); } catch { /* retry next round */ }
+  }
+}
+console.log(JSON.stringify({ ok: confirmed, topic, region: s.regionName, msgId, signer: author.authorId, confirmed }));
+try { await probe.close(); } catch { /* */ }
 await s.close();
 try { cleanupWebRTC(); } catch { /* */ }
-process.exit(0);
+process.exit(confirmed ? 0 : 1);
