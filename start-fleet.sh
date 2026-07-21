@@ -16,8 +16,17 @@ REGION="${REGION:-useast}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 mkdir -p relay-logs
 
-echo "→ stopping any existing relay fleet…"
-pkill -f "node src/index.js" 2>/dev/null && sleep 2 || true
+echo "→ stopping any existing relay fleet (ROLLING — one at a time)…"
+# Mass-simultaneous SIGTERM makes every relay's graceful-leave heirs the OTHER
+# dying relays (total-cohort teardown) and shreds the region's held history on
+# every deploy. Stop one, wait for its leave() to complete (process exit) so
+# its roles land on still-alive heirs, then move to the next.
+for pid in $(pgrep -f "node src/index.js"); do
+  kill -TERM "$pid" 2>/dev/null || continue
+  for _ in $(seq 1 40); do kill -0 "$pid" 2>/dev/null || break; sleep 1; done
+  kill -9 "$pid" 2>/dev/null || true   # 40s cap, then hard-stop a wedged leaver
+  sleep 2                              # let heirs settle before the next departure
+done
 
 echo "→ starting $N relay(s): region=$REGION bridge=$BRIDGE"
 for n in $(seq 1 "$N"); do
