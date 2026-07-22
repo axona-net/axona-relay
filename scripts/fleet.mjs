@@ -40,6 +40,10 @@ const region  = typeof opts.region === 'string' ? opts.region : 'useast';
 const count   = Math.max(1, Number.parseInt(opts.count ?? '1', 10) || 1);
 const network = typeof opts.network === 'string' ? opts.network : 'prod';
 const bridge  = typeof opts.bridge === 'string' ? opts.bridge : null;
+// Stagger launches so N relays don't hit the bridge with N simultaneous
+// authenticated handshakes — a thundering herd that can overwhelm a small
+// bridge host's CPU into dropping connections (which then reconnect → storm).
+const staggerMs = Math.max(0, Number.parseInt(opts.stagger ?? '600', 10) || 0);
 
 const here  = dirname(fileURLToPath(import.meta.url));
 const entry = join(here, '..', 'src', 'index.js');
@@ -53,6 +57,8 @@ const emit = (tag, buf) => {
   for (const line of String(buf).split('\n')) if (line) process.stdout.write(`${tag} ${line}\n`);
 };
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 for (let i = 1; i <= count; i++) {
   const env = { ...process.env, RELAY_REGION: region, RELAY_NETWORK: network, RELAY_TUI: '0' };
   if (bridge) env.BRIDGE_URL = bridge;
@@ -62,6 +68,7 @@ for (let i = 1; i <= count; i++) {
   child.stderr.on('data', (d) => emit(tag, d));
   child.on('exit', (code, sig) => console.log(`${tag} exited (code=${code} signal=${sig})`));
   children.push(child);
+  if (i < count && staggerMs > 0) await sleep(staggerMs);   // spread the handshakes
 }
 
 let shuttingDown = false;
