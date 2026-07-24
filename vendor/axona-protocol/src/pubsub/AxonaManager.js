@@ -363,7 +363,8 @@ export class AxonaManager {
     role.metricsLastPub = now;
     const snap = { v: 1, topic: idHex(topicBig), ts: now, by: idHex(this.nodeId),
       current_count: role.cache.length, seq: role.seq,
-      subscribers: role.subscribers.size, bytes: role.cacheBytes };
+      subscribers: role.subscribers.size, bytes: role.cacheBytes,
+      publishes: role.publishes ?? 0 };
     try { const p = this._metricsPublisher(idHex(topicBig), snap); if (p && typeof p.catch === 'function') p.catch(() => {}); }
     catch { /* advisory — never let a metrics publish break the caller */ }
   }
@@ -457,6 +458,7 @@ export class AxonaManager {
         seq:           role.seq,             // message counter — dense per-topic high-water (monotonic)
         subscribers:   role.subscribers.size,// this cohort member's local subscriber subset
         bytes:         role.cacheBytes,      // live cached envelope bytes
+        publishes:     role.publishes ?? 0,  // advisory throughput: distinct messages ever cached here
       });
     }
     return out;

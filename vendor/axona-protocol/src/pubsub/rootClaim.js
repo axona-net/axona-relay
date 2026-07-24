@@ -72,6 +72,13 @@ export function makeRole(topicId, isRoot) {
                                      // ⇒ a message was missed). Distinct from the time-floored
                                      // publishTs (which is monotonic but sparse). Recovered to the
                                      // max seen seq on replay-up/handoff so a new root continues densely.
+    publishes: 0,                    // ADVISORY throughput counter: ++ per DISTINCT message inserted
+                                     // into cache (real messages only, NOT kills). Monotonic, never
+                                     // decremented on eviction. Every cohort member counts each
+                                     // message it caches, so it converges + survives handoff; the
+                                     // metric snapshot maxes it across the cohort. Surfaced as
+                                     // metrics().publishes (v4.41.0). Distinct from seq (which counts
+                                     // kills too and is a gap-detection high-water).
     tombstones: new Map(),           // msgId -> { exp, killTs, signer, seq }  (kill; thin)
     // The per-topic CONVERGENCE LEDGER (v4.25.0, Phase 6): every guard the data
     // plane keeps about "what have I already exchanged, with whom" lives here —
