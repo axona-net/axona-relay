@@ -104,6 +104,13 @@ function ingest(idx, line) {
   }
 }
 
+// Rolling-op flags — declared BEFORE render() so the 1s render timer, which
+// reads `restarting` in its footer, never hits the temporal dead zone (a `let`
+// declared lower in the file is uninitialized until its line runs → the first
+// render tick crashed with "Cannot access 'restarting' before initialization").
+let draining = false;
+let restarting = false;
+
 // ── Dashboard renderer (in-place, no scrolling) ──────────────────────
 let kernelVer = '';
 function pad(v, w) { const s = String(v); return s.length >= w ? s.slice(0, w) : s + ' '.repeat(w - s.length); }
@@ -206,7 +213,7 @@ for (let i = 1; i <= count; i++) {
 // ── ROLLING drain: stop the whole fleet ONE relay at a time ──────────────
 // Never a mass SIGTERM: that leaves every dying relay's heirs to be the OTHER
 // dying relays (total-cohort teardown) and shreds the region's held history.
-let draining = false;
+// (draining declared above, before render)
 async function rollingShutdown() {
   if (draining) return; draining = true;
   if (renderTimer) clearInterval(renderTimer);
@@ -225,7 +232,7 @@ async function rollingShutdown() {
 // Keeps N-1 relays live throughout, so the region's cache never loses all its
 // holders at once. After respawning a slot we wait for it to re-mesh (so heirs
 // exist) before touching the next. This is the robust "restart the fleet" path.
-let restarting = false;
+// (restarting declared above, before render)
 async function rollingRestart() {
   if (restarting || draining) return; restarting = true;
   if (rawMode) process.stdout.write(`[fleet] rolling restart of ${count} relay(s)…\n`);
