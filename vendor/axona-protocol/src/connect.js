@@ -1,7 +1,7 @@
 // =====================================================================
-// connect.js — the one-call bootstrap.
+// connect.js — THE way an application brings up an Axona peer.
 //
-//   import { connect } from '@axona/protocol/connect.js';
+//   import { connect } from '@axona/protocol';
 //   const { peer, author } = await connect({
 //     bridge:   'wss://testnet.axona.net',
 //     location: { lat: 38.0, lng: -77.0 },
@@ -9,14 +9,22 @@
 //   await peer.sub(topic, handler);
 //   await peer.pub(topic, msg, { signWith: author });
 //
-// Everything an application previously assembled by hand — two identity
-// factories, the web transport, a NeuronNode (with the hex→BigInt id
-// conversion), an AxonaDomain, the AxonaPeer, transport.start, peer.start,
-// and the peer.ready() mesh warm-up — collapses into one awaited call.
-// The primitives all remain public and unchanged; connect() is sugar,
-// not a new layer. Apps that need custom wiring (an explicit transport,
-// a persistence adapter, several peers on one page) keep using the
-// constructors directly.
+// This is the ONE bootstrap path. Everything an application used to
+// assemble by hand — two identity factories, a transport, a NeuronNode
+// (with the hex→BigInt id conversion), an AxonaDomain, the AxonaPeer,
+// transport.start, peer.start, the peer.ready() mesh warm-up, AND the
+// peer.integrate() self-integration — is composed here, in the right
+// order, once. Assembling it by hand is how apps silently skipped
+// self-integration and self-rooted their topics as singletons (the 0x80
+// cross-region loss); connect() makes the correct setup the ONLY setup.
+//
+// Every legitimate variation is an OPTION here, not a reason to drop to
+// the constructors: inject a `transport` (sim/tests/custom), a `domain`
+// (several peers sharing one mesh in a process), a `nodeIdentity` or
+// durable `author` (persisted keys), a `persist` adapter, or the peer
+// tuning knobs (rootReplicas / maxPublishBytes / synaptomeMaintain). The
+// lower-level constructors + peer.start/join/integrate/ready remain public
+// but are ADVANCED building blocks — connect() is what applications call.
 //
 // This module lives OUTSIDE the main barrel on purpose: the default
 // transport is the browser/web stack, and importing that from the
@@ -56,6 +64,18 @@ import { AxonaPeer }   from './dht/AxonaPeer.js';
  * @param {object}  [opts.transport]     Inject a pre-built Transport (tests,
  *                                       sim, custom stacks). Skips webTransport.
  * @param {object}  [opts.nodeIdentity]  Inject a pre-minted node identity.
+ * @param {object}  [opts.domain]        Inject a shared AxonaDomain so several
+ *                                       peers in one process share a mesh
+ *                                       (sim harnesses, tests, multi-identity
+ *                                       apps). Omit → a fresh domain from `k`.
+ * @param {object}  [opts.persist]       Persistence adapter (checkpoint/recover),
+ *                                       forwarded to the peer.
+ * @param {number}  [opts.rootReplicas]  Backup-root fan-out (advanced; null →
+ *                                       kernel default). 0 disables backup roots.
+ * @param {number}  [opts.maxPublishBytes] Per-publish size cap (advanced; capped
+ *                                       at the interop floor for browser reach).
+ * @param {boolean|object} [opts.synaptomeMaintain] Continuous nearest-successor
+ *                                       refill (advanced; default off).
  * @param {object}  [opts.web]           Extra options forwarded to the
  *                                       webTransport factory (log, reconnect…).
  *
@@ -76,6 +96,11 @@ export async function connect({
   ready = {},
   transport,
   nodeIdentity,
+  domain,
+  persist,
+  rootReplicas,
+  maxPublishBytes,
+  synaptomeMaintain,
   web = {},
 } = {}) {
   // 1. Identities — connection (place-anchored) + authorship (place-free).
@@ -127,10 +152,17 @@ export async function connect({
   });
   node.transport = transport;
   const peer = new AxonaPeer({
-    domain: new AxonaDomain({ k }),
+    // Inject a shared domain (several peers on one mesh in a process — sim,
+    // tests, multi-identity apps); otherwise mint a fresh one from `k`.
+    domain: domain ?? new AxonaDomain({ k }),
     node,
     nodeIdentity,
     transport,
+    // Passthroughs so no app has to drop to `new AxonaPeer(...)` for these.
+    ...(persist != null ? { persist } : {}),
+    ...(rootReplicas != null ? { rootReplicas } : {}),
+    ...(maxPublishBytes != null ? { maxPublishBytes } : {}),
+    ...(synaptomeMaintain != null ? { synaptomeMaintain } : {}),
   });
 
   // 4. Lifecycle: start the wire, start the peer, wait for the mesh.

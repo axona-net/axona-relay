@@ -292,3 +292,12 @@ export {
   cbvFromFingerprints,
   AUTH_PROTO,
 } from './transport/handshake-auth.js';
+
+// connect() — THE application bootstrap. One call: identities, transport,
+// domain, peer, start, ready, and self-integration, composed in order.
+// Applications import this from the barrel; the lower-level constructors
+// above are advanced building blocks connect() assembles. Safe to export
+// here — the web transport it defaults to is loaded via dynamic import
+// INSIDE connect(), so this adds no static WebRTC dependency to the barrel
+// (sim/server contexts that inject their own transport never load it).
+export { connect } from './connect.js';
