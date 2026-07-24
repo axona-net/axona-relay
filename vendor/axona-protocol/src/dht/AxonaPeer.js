@@ -811,10 +811,20 @@ export class AxonaPeer extends DHT {
       }
     }
 
-    // No sponsor → standalone start.  We're "joined" but isolated;
-    // inbound connections from other peers will populate our
-    // synaptome via the usual handshake + bindPeer flow.
-    if (sponsor === undefined || sponsor === null) return;
+    // No sponsor → standalone bring-up. Even so, if a transport is present it
+    // may already be bridge-connected (peers seeded via inbound adoption), so
+    // proactively self-integrate rather than sitting at the passive-adoption
+    // churn floor — otherwise a no-sponsor join() never runs the
+    // findKClosest(self) discovery below and self-roots its topics as SINGLETON
+    // roots in a sparse region (the cross-region pub/sub loss). _selfIntegrate
+    // no-ops instantly when there is nothing to integrate against (no transport
+    // or an empty neighbourhood), so a genuine standalone peer still returns at
+    // once. Best-effort; a failure just means slower ambient heal, never a
+    // failed join.
+    if (sponsor === undefined || sponsor === null) {
+      try { await this._selfIntegrate(); } catch { /* best-effort; anneal still heals */ }
+      return;
+    }
 
     if (!isHexId(sponsor)) {
       throw new (await import('../errors.js')).TransportError(

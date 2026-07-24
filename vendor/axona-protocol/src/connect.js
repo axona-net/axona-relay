@@ -138,6 +138,20 @@ export async function connect({
   await peer.start();
   const status = (ready === false) ? null : await peer.ready(ready);
 
+  // 4b. Proactively self-integrate into our keyspace neighbourhood
+  //     (findKClosest(self) + open authenticated channels) so we are
+  //     discoverable and our topic-closest peers are reachable. WITHOUT this a
+  //     connect()-bootstrapped node sits at the passive-adoption churn floor and
+  //     self-roots its topics as SINGLETON roots in a sparse region — the
+  //     cross-region pub/sub loss (fresh subscribers read 0, publishers strand on
+  //     leave). Runs AFTER ready() so the bridge welcome has seeded peers to query.
+  //     Best-effort, never throws; awaited only when we already waited for the
+  //     mesh (ready !== false), otherwise it heals in the background.
+  if (typeof peer.integrate === 'function') {
+    const integrating = Promise.resolve(peer.integrate()).catch(() => {});
+    if (ready !== false) await integrating;
+  }
+
   // 5. One-call teardown, mirror of the one-call bring-up.
   const disconnect = async () => {
     try { await peer.leave(); } catch { /* best-effort */ }
