@@ -42,6 +42,12 @@ const NODE_KEY     = 'node';       // node-identity envelope key in the store
 const AUTHOR_CLASS  = process.env.MCP_AUTHOR_CLASS || 'agent';    // this peer IS an agent
 const OPERATOR      = process.env.MCP_OPERATOR || null;          // optional: who runs it
 const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';     // auto-declare on connect
+// Display handle carried in every std/message payload (chat apps render it).
+// Per-publish `handle` still wins; this is the peer-wide default so a distinct
+// agent (e.g. Gemini) shows up under its own name without passing handle each
+// call. Pair it with its OWN MCP_AUTHOR_PATH so the on-network identity is
+// distinct too — same handle + shared identity file = a nodeId collision (#356).
+const HANDLE        = process.env.MCP_HANDLE || 'axona.bot';
 
 // ── durable store (Node file-backed { get, set }) ───────────────────────
 function fileStore(path) {
@@ -147,7 +153,7 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   // this peer's declared class; raw:true opts out for machine topics.
   const body = raw
     ? message
-    : { v: 1, text: message, handle: handle || 'axona.bot', authorClass: authorClass || AUTHOR_CLASS };
+    : { v: 1, text: message, handle: handle || HANDLE, authorClass: authorClass || AUTHOR_CLASS };
   const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
   return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
@@ -254,7 +260,7 @@ export async function status() {
   let health = null; try { health = _session.peer.health(); } catch { /* */ }
   return {
     ok: true, connected: true, persistent: true, region: REGION, bridge: DEFAULT_BRIDGE,
-    nodeId: _session.nodeId, authorId: _session.author.authorId, identityPath: STORE_PATH,
+    nodeId: _session.nodeId, authorId: _session.author.authorId, identityPath: STORE_PATH, handle: HANDLE,
     declaredClass: _session.declaredClass?.class ?? 'unstated', operator: _session.declaredClass?.operator ?? null,
     mesh: health ? { synaptomeSize: health.synaptomeSize ?? null, peers: health.peers?.length ?? null, state: health.state ?? null } : null,
     watches: [...WATCHES.values()].map((w) => ({ topic: w.topic, region: w.region, buffered: w.buffer.length, total: w.total, dropped: w.dropped, since: w.since, ageSec: Math.round((now() - w.startedAt) / 1000) })),
