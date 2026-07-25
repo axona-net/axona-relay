@@ -64,6 +64,15 @@ export const SYNC_POLICIES = Object.freeze({
     ledger: 'probeTries/probeAt (per-topic, max EMPTY_ROOT_PROBE_MAX, rate EMPTY_ROOT_PROBE_INTERVAL_MS — enforced at the trigger sweep)',
     rateBound: 'EMPTY_ROOT_PROBE_MAX tries, EMPTY_ROOT_PROBE_FANOUT targets',
   }),
+  READ_REPAIR: Object.freeze({
+    mode: 'pull', verb: 'PULLUP',
+    trigger: 'a pinned subscriber whose topic-closest upstream is alive-but-not-serving pulls the cohort into a local NON-ROOT read-holder (#364 part 2)',
+    summary: 'stuck-subscriber (renewals unanswered, no delivery, empty local cache)',
+    createsOnReceiver: null,
+    evictor: 'n/a — the PULLER marks itself role.readHolder (isRoot stays false; no claim to evict)',
+    ledger: 'probeTries/probeAt + probed (reuses the EMPTY_ROOT_PROBE per-topic ledger and per-target rotation set)',
+    rateBound: 'EMPTY_ROOT_PROBE_MAX tries at EMPTY_ROOT_PROBE_INTERVAL_MS, EMPTY_ROOT_PROBE_FANOUT targets',
+  }),
   COHORT_REPLICATE: Object.freeze({
     mode: 'push', verb: 'REPLICATE',
     trigger: 'live root, every tick (keepalive) + eager on stamp/kill; full state on sig delta',
@@ -87,6 +96,12 @@ export const SYNC_POLICIES = Object.freeze({
     ledger: 'handoffAcked (leaver-side ack set; HANDOFFACK)',
     rateBound: 'HANDOFF_TRIES rounds × HANDOFF_ACK_MS, heirs re-resolved per round (#340)',
   }),
+  // NOTE (review 2026-07-25): mode 'gate' has NO engine method — the gate is
+  // realized inline at the PUB/KILL ingress (wireHandlers._ingestPublish and
+  // the kill path), which defer _confirmPending until the eager replicate
+  // dispatches. The table documents the policy; ownership is external BY
+  // DESIGN. Do not add a second gate site, and do not add a _syncGate without
+  // migrating both handler sites into it.
   PUB_DURABLE: Object.freeze({
     mode: 'gate', verb: 'REPLICATE',
     trigger: 'a SELF-ROOTED stamp (publisher is the topic’s root) with a non-empty cohort',

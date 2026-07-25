@@ -176,12 +176,6 @@ export {
   verifyTouch,
   TOUCH_DOMAIN,
 } from './pubsub/touch.js';
-export {
-  buildUnpub,
-  verifyUnpub,
-  UNPUB_DOMAIN,
-} from './pubsub/unpub.js';
-
 // ── Ed25519 helpers (Web Crypto wrapper) ─────────────────────────
 // Optional companion to post.js for runtimes that support Web Crypto
 // Ed25519 (Chrome 110+, Safari 17+, Firefox 130+, Node 20+).

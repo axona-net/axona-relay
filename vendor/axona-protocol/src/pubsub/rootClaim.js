@@ -93,12 +93,22 @@ export function makeRole(topicId, isRoot) {
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
                                      // a refused pull — e.g. the child's oldest is tombstoned here —
                                      // must not re-fire on every renewal; re-arm only if lw DECREASES)
+      probed: null,                  // Set of cohort ids already pulled this probe episode (empty-root +
+                                     // read-repair rotation); lazily materialized, declared here so the
+                                     // role shape stays CLOSED (review 2026-07-25: no runtime graft-ons)
     },
     replicas: new Map(),             // (when ROOT) backupHex -> { at }  nodes holding a warm copy of our cache
     backupOf: null,                  // (when BACKUP) hex of the root replicating to us; null if we're not a backup
     lastReplicaAt: 0,                // (when BACKUP) _now() of the last replica push from our root (staleness → presume root gone)
     metricsOn: 0,                    // (when ROOT) lease expiry ts; while > now, this root publishes snapshots to metricTopic(T)
     metricsLastPub: 0,               // _now() of the last metric snapshot we published (throttle to METRICS_PUB_MS)
+    // Closed-shape rule (review 2026-07-25): every field a role can carry is
+    // declared HERE. These four were previously grafted on at runtime in three
+    // other files — the exact drift the derived-natures discipline exists to end.
+    formedAt: 0,                     // _now() when this role took the ROOT claim (schedules the early self-verify)
+    lastVerify: 0,                   // _now() of the last iterative root self-verify (ROOT_VERIFY cadence)
+    readHolder: false,               // (non-root) read-repair pull-holder marker (#364 part 2); NEVER a claim
+    _warnedSingleton: false,         // once-per-topic singleton-root warn latch (#362)
   };
 }
 
