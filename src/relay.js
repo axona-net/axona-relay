@@ -92,16 +92,56 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {} }) {
   return { peer, transport, node, domain };
 }
 
-/** Start the transport (bridge handshake) then the peer (mesh + routing). */
-export async function startRelay({ peer, transport }) {
+/**
+ * Bring the relay up: wire, then peer, then WAIT FOR THE MESH, then integrate.
+ *
+ * This mirrors kernel `connect()`'s lifecycle EXACTLY and on purpose — it is the
+ * one bootstrap site for this repo (src/index.js, src/cli.js and src/ops.js all
+ * come through here), so getting the order right here fixes every relay, every
+ * CLI call, and every mcp-post/mcp-bot-post publisher at once.
+ *
+ * THE ORDER IS THE WHOLE POINT (fixed 2026-07-25). This function used to do:
+ *
+ *     await transport.start(); await peer.start();
+ *     peer.integrate().catch(() => {});        // ← fire-and-forget
+ *
+ * with no `peer.ready()` in between. `integrate()` is `findKClosest(self)` plus
+ * authenticated channel opens, so running it before the bridge welcome has
+ * seeded ANY peers means it queries a near-empty routing table and does
+ * essentially nothing — and because it was never awaited, a pub() could be
+ * issued while the node was still unknown to its neighbours. Kernel connect.js
+ * states the consequence outright: without effective self-integration a node
+ * "sits at the passive-adoption churn floor and self-roots its topics as
+ * SINGLETON roots in a sparse region — the cross-region pub/sub loss (fresh
+ * subscribers read 0, publishers strand on leave)". That matches the live
+ * #axona.bot symptom: K-closest populated, publishes vanish, reads empty.
+ *
+ * So: ready() FIRST (the welcome seeds peers to query), integrate() SECOND, and
+ * AWAIT it, so a caller that got a resolved startRelay() is genuinely woven in.
+ *
+ * `peer.ready()` never throws — on timeout it returns { ready, peers, ms,
+ * reason:'timeout' } — so awaiting it cannot wedge start-up. Pass `ready:false`
+ * to skip the warm-up (integration then heals in the background, connect()'s
+ * own semantics); pass an object to tune { minPeers, timeoutMs, stableMs }.
+ *
+ * Returns the readiness status plus what integration did, so a caller can log or
+ * refuse to publish instead of guessing. Integration failure is non-fatal but no
+ * longer INVISIBLE — the old `.catch(() => {})` swallowed it completely.
+ */
+export async function startRelay({ peer, transport, ready = {} }) {
   await transport.start();
   await peer.start();
-  // Self-integration (kernel v4.7.0): weave into our keyspace neighbourhood
-  // (findKClosest(ownId) + authenticated channel opens) so neighbours adopt us
-  // and route to us, rather than waiting on ambient annealing. Non-blocking.
+  const status = (ready === false) ? null : await peer.ready(ready);
+
+  let integrated = null;
+  let integrateError = null;
   if (typeof peer.integrate === 'function') {
-    peer.integrate().catch(() => { /* best-effort; anneal still heals slowly */ });
+    const integrating = Promise.resolve(peer.integrate())
+      .then((r) => { integrated = r ?? true; })
+      .catch((e) => { integrateError = e; });
+    if (ready !== false) await integrating;
   }
+  return { ...(status ?? {}), integrated, integrateError };
 }
 
 /** Best-effort graceful shutdown. */
