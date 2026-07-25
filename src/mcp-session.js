@@ -50,15 +50,22 @@ const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';     // auto-declare
 const HANDLE        = process.env.MCP_HANDLE || 'axona.bot';
 // Topics this peer HOSTS for the whole run — durable infrastructure, not
 // subscriptions (host() stores+serves without consuming). Default: our own
-// channel. WHY (live diagnosis 2026-07-25): every post to axona.bot came from
-// a THROWAWAY publisher (scripts/mcp-post.mjs connects, publishes, exits), so
-// the channel's history survived only on whatever transient node accepted the
-// leave-handoff. Symptom: a FRESH subscriber found the messages via the
-// read/replay path while a long-lived browser subscription — pinned to a root
-// that no longer held the topic — never got the live fan-out, and the channel
-// held just 3 messages because everything else aged past TTL_MS with no home.
-// A topic whose only publisher is ephemeral has no home; give it one.
-// Same durability class as the alert-bot residual (#341), on a quiet channel.
+// channel, at the SAME id we publish to (see ownedDefaults).
+//
+// CORRECTION (supersedes the v0.78.0 rationale): an earlier version of this
+// comment claimed "a topic whose only publisher is ephemeral has no home."
+// That is wrong and imports a client-server intuition the architecture does
+// not have. A topic lives where the KEYSPACE puts it — on the nodes XOR-
+// closest to its topic id. Publish is fire-and-forget: the publisher routes
+// toward the root and walks away; the root decides. Owned topics only add a
+// signed write-authorization check at ingress — still fire-and-forget, still
+// the root's decision. Nothing about a publisher determines where a topic
+// lives, and host() does NOT make this peer a topic's "home": it volunteers
+// this peer as one more holder that stores and serves. Measured 2026-07-25:
+// this peer is not even in the K-closest set for the channel it hosts.
+//
+// The real defect v0.78.0 was reaching for is in ownedDefaults below: we were
+// publishing to the wrong topic id entirely.
 const HOST_TOPICS   = (process.env.MCP_HOST_TOPICS ?? HANDLE)
   .split(',').map(s => s.trim()).filter(Boolean);   // MCP_HOST_TOPICS='' opts out
 
@@ -105,6 +112,26 @@ function resolveOwner(s, owner) {
   return owner === 'self' ? s.author.authorId : (owner || undefined);
 }
 
+// This peer's OWN channel is owner-write: only its author may post, everyone
+// reads. owner+write FOLD INTO the topic id, so the owned descriptor addresses
+// a DIFFERENT topic than the bare name — `{name}` and `{name, write:'owner',
+// owner}` are two unrelated topics that merely share a display string.
+//
+// Live incident 2026-07-25: axona.bot is advertised on the DISCOVER ticker as
+// mode:'controlled', write:'owner', owner:<this author> → topicId 89f7f877…,
+// and that is the id every reader joins. But publish/host defaulted to the
+// BARE descriptor → 89ba78c0…, so weeks of task updates landed on a topic
+// nobody subscribes to, while our own read-back (using the same bare
+// descriptor) always "found" them — verifying our own mailbox. The lesson is
+// in the id, not the name: ALWAYS resolve the channel's descriptor, never
+// assume the name is the address.
+const OWNED_TOPICS = (process.env.MCP_OWNED_TOPICS ?? HANDLE)
+  .split(',').map(s => s.trim()).filter(Boolean);   // MCP_OWNED_TOPICS='' opts out
+function ownedDefaults(topic, owner, write) {
+  if (owner !== undefined || write !== undefined) return { owner, write };   // explicit wins
+  return OWNED_TOPICS.includes(topic) ? { owner: 'self', write: 'owner' } : { owner, write };
+}
+
 /** Register a push sink — called for every arrival on any watch (best-effort, never throws into the peer). */
 export function onArrival(fn) { ARRIVAL_LISTENERS.add(fn); return () => ARRIVAL_LISTENERS.delete(fn); }
 function emitArrival(evt) {
@@ -129,7 +156,10 @@ export async function ensureSession() {
     // session and must be re-armed, exactly like the author-class attestation
     // above). Best-effort per topic: a failed host must never fail the session.
     for (const name of HOST_TOPICS) {
-      try { await host({ topic: name, region: REGION }); }
+      // Host the topic at the SAME id we publish to — for our own channel that
+      // is the owner-write id, not the bare name (see ownedDefaults).
+      const od = ownedDefaults(name, undefined, undefined);
+      try { await host({ topic: name, region: REGION, owner: od.owner, write: od.write }); }
       catch { /* best-effort: the channel still publishes, just less durably */ }
     }
     return h;
@@ -175,7 +205,8 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   const body = raw
     ? message
     : { v: 1, text: message, handle: handle || HANDLE, authorClass: authorClass || AUTHOR_CLASS };
-  const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
+  const od = ownedDefaults(topic, owner, write);
+  const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, od.owner), od.write), body, { signWith: s.author });
   return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
 
