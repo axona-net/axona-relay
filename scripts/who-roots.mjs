@@ -24,7 +24,9 @@ console.log(`\nK-closest to the topic id (keyspace truth):`);
 for (const id of (Array.isArray(arr) ? arr : [])) {
   let b; try { b = typeof id === 'bigint' ? id : BigInt('0x' + String(id)); } catch { continue; }
   const hex = b.toString(16).padStart(66, '0');
-  const dist = (b ^ tBig).toString(16).slice(0, 8);
+  // PAD before slicing: toString(16) strips leading zeros, so 0x0070… printed as
+  // "706c23…" and compared visually ABOVE 0x1485… — distances were not comparable.
+  const dist = (b ^ tBig).toString(16).padStart(66, '0').slice(0, 10);
   console.log(`  ${hex.slice(0, 24)}…  xor≈${dist}`);
 }
 

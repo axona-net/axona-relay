@@ -49,7 +49,8 @@ export function regionDescriptor(token = 'useast') {
  *
  * @param {object}   opts
  * @param {string}   opts.bridgeUrl   wss:// bridge for bootstrap + signaling
- * @param {object}   opts.identity    loaded Identity (stable nodeId)
+ * @param {object}   opts.identity    ephemeral transport Identity, minted fresh
+ *                                    every process start and never persisted (I-ID)
  * @param {{lat:number,lng:number}} opts.region
  * @param {(level:string, event:string, ctx?:object)=>void} [opts.onLog]
  */

@@ -6,8 +6,9 @@
 //
 //   RELAY_NETWORK        prod|testnet                   (default prod)
 //   BRIDGE_URL           explicit bridge URL (overrides RELAY_NETWORK)
-//   RELAY_IDENTITY_PATH  persisted keypair file        (default ./identity.relay.json)
 //   RELAY_LAT/RELAY_LNG  geo prefix for the nodeId      (default SF 37.77,-122.42)
+//   (there is no identity-path setting: a relay's transport id is minted fresh
+//    every start and is never written to disk — INVARIANT I-ID)
 //   RELAY_TUI            1=force dashboard, 0=plain log (default: auto by isTTY)
 //   RELAY_HOST_KEYSPACE  1=host this relay's keyspace neighborhood so it gets
 //                        recruited as a root for whatever topics land near its
@@ -160,13 +161,12 @@ async function main() {
     `mint@16b≈${c.estMintMs[16]}ms 20b≈${c.estMintMs[20]}ms 24b≈${c.estMintMs[24]}ms · ` +
     `active diff transport=${powDifficulty('transport')} publish=${powDifficulty('publish')}`)).catch(() => {});
 
-  // Sticky-region warning: the region is baked into the persisted identity, so
-  // an explicit region request is ignored once the file exists.
-  if (mode === 'primary' && !created && cfg.source !== 'default' && regionCodeN !== cfg.code) {
-    present.logLine(`{yellow-fg}WRN{/} identity file pins region ${regionLabel} (0x${regionCode}); ` +
-      `requested ${cfg.label} (0x${cfg.code.toString(16)}) ignored — delete ${IDENTITY_PATH} ` +
-      `or set RELAY_IDENTITY_PATH to re-mint`);
-  }
+  // REMOVED 2026-07-25 — a "sticky region" warning that only made sense when the
+  // identity was persisted: the region was baked into the file, so an explicit
+  // region request was ignored once it existed. Transport ids are now minted
+  // fresh every start (I-ID), so the requested region is always honoured. The
+  // block was also dead-and-broken: it referenced `created` and `IDENTITY_PATH`,
+  // neither of which exists any more, guarded by a mode that is never 'primary'.
 
   const onLog = (level, event, ctx) => {
     if (level === 'debug' && !INTERESTING.test(event)) return;

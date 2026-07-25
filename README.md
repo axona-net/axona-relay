@@ -69,7 +69,6 @@ Quit the dashboard with **q** or **Ctrl-C**.
 | `BRIDGE_URL` | — | Explicit bridge URL; **overrides** `RELAY_NETWORK` |
 | `RELAY_REGION` | — | `auto` (detect), a region **name** (`useast`), or a code (`0x89`) — sets the nodeId's geo prefix |
 | `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`uswest`) |
-| `RELAY_IDENTITY_PATH` | `./identity.<region>.json` | Persisted keypair (stable nodeId). Default name is region-keyed |
 | `RELAY_TUI` | auto (`stdout.isTTY`) | `1` force dashboard, `0` force plain log |
 
 Bridge selection precedence: `BRIDGE_URL` › `RELAY_NETWORK` › default (`prod`).
@@ -110,17 +109,15 @@ npm start    # terminal 2 → ADDITIONAL: a fresh ephemeral node, same region
 npm start    # terminal 3 → ADDITIONAL: another one …
 ```
 
-The **first** instance claims the known persistent identity (stable nodeId
-across restarts; `identity.<region>.json`, guarded by `<identity>.lock`). Any
-**additional** instance sees that identity is in use and, instead of refusing,
-mints a **fresh ephemeral identity** in the same region — a unique nodeId, not
-written to disk. So you always have one well-known node plus as many throwaway
-nodes as you like for testing and extra capacity; the header/log marks each
-**PRIMARY** or **ADDITIONAL**.
+Every instance mints a **fresh ephemeral identity** in its region — a unique
+nodeId, never written to disk — so you can run as many as you like, in one region
+or several, with no shared file and no lock. There is no "primary" instance and
+no well-known node: relays are found by where their id lands in the keyspace, not
+by having a name you can remember.
 
-You can still pin a *second persistent, known* node by giving it its own region
-or path: `RELAY_REGION=uknorth npm start` (→ `identity.uknorth.json`) or
-`RELAY_IDENTITY_PATH=./identity.b.json npm start`.
+Place a relay in a different region with `RELAY_REGION=uknorth npm start` — the
+region sets the nodeId's geo prefix, and since nothing is persisted you can change
+it freely between runs.
 
 (The region is baked into a persisted identity; once its file exists, changing
 `RELAY_REGION`/`RELAY_LAT` for that file is ignored and the relay warns — delete
@@ -322,13 +319,24 @@ attacker is limited to the wire frames A1/A2 forge. Cases that need a forged
 slot into `e2e/run.js` as each security wave ships — the natural home for
 validating it on the real network.
 
-## Identity
+## Identity — INVARIANT I-ID
 
-On first run the relay derives an Ed25519 keypair and writes the envelope to
-`RELAY_IDENTITY_PATH`; later runs reload it, so the relay keeps a **stable
-264-bit nodeId** across restarts (what makes a relay a dependable, well-known
-node). The file holds a **private key** — it is git-ignored; `chmod 600` it in
-production.
+**The relay's transport identity is ephemeral.** Every start mints a new Ed25519
+keypair and a new 264-bit nodeId, in memory, written nowhere. There is no identity
+file and no setting that creates one.
+
+This is deliberate and not negotiable. A nodeId that survived restarts would be a
+durable correlator: it links a relay's sessions over time, and through them its IP
+and its physical location. It would buy nothing in return — a relay returning under
+its old id gains no advantage, because the mesh has already restructured and healed
+around its absence. Re-identification would be the only thing it added.
+
+Nothing depends on a relay keeping its address. Relays are recruited by *where their
+id lands in the keyspace*, so a restarted relay simply covers a new neighbourhood and
+the cold-start anti-entropy drain re-warms it.
+
+Publishing identity is the opposite case and does persist: an **author** key is
+place-free and meant to be durable and recognizable. Durable WHO, ephemeral WHERE.
 
 ## What the dashboard shows
 
@@ -357,7 +365,6 @@ Wants=network-online.target
 ExecStart=/usr/bin/node /opt/axona-relay/src/index.js
 Environment=RELAY_TUI=0
 Environment=RELAY_NETWORK=prod
-Environment=RELAY_IDENTITY_PATH=/var/lib/axona-relay/identity.relay.json
 StateDirectory=axona-relay
 Restart=always
 User=axona

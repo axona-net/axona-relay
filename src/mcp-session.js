@@ -12,16 +12,24 @@
 //   • onArrival(fn)              — register a push sink (mcp.js → MCP notifications)
 //   • status()                   — peer + mesh + watches + hosted topics
 //
-// Identity is DURABLE: both the NODE identity (stable nodeId) and the AUTHOR
-// identity (stable Author ID) persist to ~/.axona/claude-mcp-identity.json, so
-// Claude keeps the same on-network identity across restarts. `cleanupWebRTC()`
-// is process-global, so this module owns the only peer and tears it down ONCE.
+// Identity is SPLIT — durable WHO, ephemeral WHERE (INVARIANT I-ID):
+//
+//   • the AUTHOR identity persists to ~/.axona/claude-mcp-identity.json. It is
+//     the durable WHO, and for owned topics it IS the authority: owner + write
+//     fold into the topic id, so this key is what makes #axona.bot addressable.
+//   • the TRANSPORT identity is minted FRESH on every start and is never
+//     written anywhere. A long-lived nodeId is a durable correlator — it links a
+//     node's sessions, which exposes its IP, which locates it physically. A
+//     returning node gains nothing from its old id either: the mesh has already
+//     restructured and healed around its absence. All cost, no benefit.
+//
+// `cleanupWebRTC()` is process-global, so this module owns the only peer and
+// tears it down ONCE.
 
 import './polyfill.js';                          // RTCPeerConnection/WebSocket globals — first
 import { cleanupWebRTC } from './polyfill.js';
 import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
-import { createNodeIdentity, createAuthorIdentity, dumpIdentity, loadIdentity }
-  from '../vendor/axona-protocol/src/identity/index.js';
+import { createAuthorIdentity } from '../vendor/axona-protocol/src/identity/index.js';
 import { authorClassTopic } from '../vendor/axona-protocol/src/index.js';   // kernel author-class helper
 export { authorClassTopic };                                               // re-export for callers/smoke
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
@@ -32,7 +40,8 @@ const REGION       = process.env.MCP_REGION || 'useast';
 const STORE_PATH   = process.env.MCP_AUTHOR_PATH || join(homedir(), '.axona', 'claude-mcp-identity.json');
 const BUFFER_CAP   = Number(process.env.MCP_BUFFER_CAP) || 1000;
 const AUTHOR_KEY   = 'claude';     // author keypair key in the store
-const NODE_KEY     = 'node';       // node-identity envelope key in the store
+// There is deliberately NO node key. The store holds authors only — see I-ID
+// in the header. A 'node' entry left behind by an older build is not read.
 
 // ── author-class attestation (human/agent provenance) ───────────────────
 // Voluntary, signed "this author is an agent" claim. The object, the owner-only
@@ -53,14 +62,13 @@ function fileStore(path) {
 }
 const STORE = fileStore(STORE_PATH);
 
-/** Load the durable node identity (stable nodeId) or mint + persist one. */
-async function loadOrCreateNodeIdentity(center) {
-  const saved = STORE.get(NODE_KEY);
-  if (saved) { try { return await loadIdentity(saved); } catch { /* corrupt → re-mint */ } }
-  const id = await createNodeIdentity({ lat: center.lat, lng: center.lng, extractable: true });   // extractable so we can dump
-  STORE.set(NODE_KEY, await dumpIdentity(id));
-  return id;
-}
+// REMOVED 2026-07-25 — loadOrCreateNodeIdentity(). This function loaded, and on
+// first run minted-and-persisted, a durable transport keypair, giving this peer a
+// stable nodeId across every restart. That is the anti-pattern I-ID forbids: the
+// id became a correlator tying all of Claude's sessions together, and it also put
+// two peers on prod under one nodeId whenever two sessions ran at once (#356).
+// connectPeer() now mints an ephemeral transport identity per connection; there
+// is no way to hand it a durable one.
 
 // ── module state ────────────────────────────────────────────────────────
 let _session = null;          // { peer, regionName, center, nodeId, author, close }
@@ -96,10 +104,8 @@ export async function ensureSession() {
   if (_session) return _session;
   if (_connecting) return _connecting;
   _connecting = (async () => {
-    const { center } = regionToDescriptor(REGION);
-    const identity = await loadOrCreateNodeIdentity(center);                                  // stable nodeId
-    const author   = await createAuthorIdentity({ persistAs: AUTHOR_KEY, store: STORE });     // stable Author ID
-    const h = await connectPeer({ region: REGION, identity, author });
+    const author = await createAuthorIdentity({ persistAs: AUTHOR_KEY, store: STORE });   // durable WHO
+    const h = await connectPeer({ region: REGION, author });   // transport identity: fresh, ephemeral, per connection
     _session = h;
     _connecting = null;
     // Voluntary, signed self-declaration: this peer is an AI agent. Best-effort —

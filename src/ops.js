@@ -42,12 +42,14 @@ export function regionToDescriptor(region = 'useast') {
  * The returned `ctx` carries `regionName` (the structured-topic region) and a
  * fresh ephemeral `author` to sign publishes with.
  */
-export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor, identity: providedIdentity } = {}) {
+export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor } = {}) {
   const { name: regionName, center } = regionToDescriptor(region);
-  // A caller (e.g. the persistent MCP session) may supply a DURABLE node identity
-  // (stable nodeId across restarts) and/or a DURABLE author (stable Author ID);
-  // both default to throwaway per call.
-  const identity = providedIdentity || await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
+  // A caller may supply a DURABLE author (stable Author ID); it defaults to a
+  // throwaway. There is deliberately NO way to supply a transport identity —
+  // it is always minted fresh here (INVARIANT I-ID). The parameter used to
+  // exist, and the persistent MCP session used it to pin one long-lived nodeId,
+  // which made the peer correlatable across every restart. Removed 2026-07-25.
+  const identity = await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
   const author   = providedAuthor   || await createEphemeralAuthor();
   const { peer, transport } = createRelay({ bridgeUrl: bridge, identity, region: center, onLog: () => {} });
   if (onError) peer.onError?.((e) => onError(e));

@@ -28,14 +28,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 const ROOT_SET = Number(process.env.RELAY_ROOT_SET ?? 5);   // R (kernel default)
 
-function relayNodeId(regionTok) {
+function relayNodeId() {
+  // A relay's nodeId is ephemeral and lives only in that process (I-ID), so it
+  // cannot be read off disk — this used to scan for per-region identity files
+  // that no longer exist. Pass RELAY_NODEID explicitly (the running relay prints
+  // its id in the header) when a check needs to name a specific node.
   if (process.env.RELAY_NODEID) return process.env.RELAY_NODEID.toLowerCase();
-  // Default identity file the relay persists per region: identity.<name>.json
-  const name = regionName(resolveRegion(regionTok)) ?? regionTok;
-  for (const f of [process.env.RELAY_IDENTITY_PATH, `./identity.${name}.json`, `./identity.${regionTok}.json`]) {
-    if (!f) continue;
-    try { const j = JSON.parse(readFileSync(f, 'utf8')); if (j.id) return String(j.id).toLowerCase(); } catch { /* */ }
-  }
   return null;
 }
 

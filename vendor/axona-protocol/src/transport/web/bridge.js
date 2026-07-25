@@ -89,7 +89,7 @@ export class BridgeTransport extends Transport {
    * 'sent' on each outgoing ping and 'recv' on each incoming pong.
    * Fires only after the bridge has been bound (hello-ack received);
    * pre-bind ping traffic is silently dropped because there's no
-   * stable nodeId to attribute it to yet.
+   * bound nodeId to attribute it to yet.
    */
   onPingTraffic(callback) {
     this._pingTrafficHandlers.push(callback);

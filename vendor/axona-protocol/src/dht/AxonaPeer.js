@@ -1175,14 +1175,28 @@ export class AxonaPeer extends DHT {
    */
   // ─── Persistence wiring (P4) ──────────────────────────────────────
   //
-  // Four namespaces, one PersistenceAdapter key each:
-  //   'identity'       — IdentityEnvelope from dumpIdentity()
+  // Three namespaces, one PersistenceAdapter key each:
   //   'synaptome'      — [{peerId, weight, latency, stratum, addedBy}]
   //   'subscriptions'  — [{topic, since}]
   //   'wireVersion'    — string (the kernel build that wrote this)
   //
-  // On start(): all four loaded if persist is wired and the
-  // constructor didn't already supply identity / synaptome.
+  // THE TRANSPORT IDENTITY IS NEVER PERSISTED (removed 2026-07-25). It used to
+  // be a fourth namespace, which meant any app that wired `persist` silently kept
+  // one single nodeId alive through every restart. That is a privacy defect: a
+  // long-lived transport id is a durable correlator that links a node's sessions
+  // over time, and through them its IP and physical location. The ephemerality is
+  // the defence, and it costs nothing — a node returning with its old id gains no
+  // value, because the mesh has already healed and restructured around its
+  // absence. The only thing the old id buys is re-identification.
+  //
+  // AUTHORSHIP is the opposite and persists by design: an author key is
+  // place-free and meant to be durable and recognizable (createAuthorIdentity
+  // ({ persistAs })). That split — durable WHO, ephemeral WHERE — is the whole
+  // point of the dual-key model, and it is why the envelope names a signer and
+  // never a node or a region.
+  //
+  // On start(): all three loaded if persist is wired and the
+  // constructor didn't already supply synaptome.
   // On sub() / sub.stop() / synapse-add: namespace marked dirty,
   // debounced flush scheduled (~5s).  On leave(): force flush.
   //
@@ -1193,18 +1207,10 @@ export class AxonaPeer extends DHT {
     const p = this._persist;
     if (!p) return;
 
-    // Identity — only if constructor didn't supply one.
-    if (!this._identity) {
-      try {
-        const env = await p.load('identity');
-        if (env && typeof env === 'object') {
-          const { loadIdentity } = await import('../identity/index.js');
-          this._identity = await loadIdentity(env);
-        }
-      } catch (err) {
-        this._emitLog?.('warn', 'persist-identity-load-failed', { err: err.message });
-      }
-    }
+    // NO IDENTITY LOAD. A restarted peer mints a fresh transport identity every
+    // time; it must never inherit its previous nodeId from storage. If an older
+    // build left an 'identity' envelope behind, it is deliberately ignored rather
+    // than adopted — see the namespace note above.
 
     // Synaptome — only if it's currently empty.
     if (this._node?.synaptome && this._node.synaptome.size === 0) {
@@ -1270,12 +1276,10 @@ export class AxonaPeer extends DHT {
   async _writeNamespace(ns) {
     const p = this._persist;
     if (!p) return;
-    if (ns === 'identity') {
-      if (!this._identity) return;
-      const { dumpIdentity } = await import('../identity/index.js');
-      await p.save('identity', await dumpIdentity(this._identity));
-      return;
-    }
+    // 'identity' is NOT a namespace. Writing the transport keypair to storage is
+    // what made a stable, correlatable nodeId available to every app that wired
+    // persist; a request to write it is ignored rather than honoured.
+    if (ns === 'identity') return;
     if (ns === 'synaptome') {
       const snap = await this.snapshot();
       await p.save('synaptome', snap.synaptome);
@@ -1300,9 +1304,9 @@ export class AxonaPeer extends DHT {
       clearTimeout(this._persistTimer);
       this._persistTimer = null;
     }
-    // Make sure identity gets written at least once even if it wasn't
-    // explicitly marked dirty (first-run case).
-    if (this._identity) this._persistDirty.add('identity');
+    // The transport identity is deliberately NOT flushed here. It used to be
+    // force-written on every shutdown ("first-run case"), which is precisely how
+    // a node's address became durable across restarts.
     this._persistDirty.add('wireVersion');
     await this._flushDirtyToPersist();
   }
@@ -1315,9 +1319,17 @@ export class AxonaPeer extends DHT {
   // through a different channel, written to a custom database), and
   // reconstruct a peer from it via Peer.fromSnapshot(state, opts).
   //
+  // The snapshot carries STATE, never IDENTITY (INVARIANT I-ID). It used to
+  // embed the full transport keypair — id + pubkey + PRIVATE KEY — and
+  // fromSnapshot restored it, deriving the node id from it. Since the entire
+  // purpose of a snapshot is to be stored and reloaded, that was a complete
+  // second path to a durable, correlatable nodeId, bypassing the persistence
+  // namespaces altogether. A restoring caller supplies a FRESH identity via
+  // `nodeIdentity`; what is worth carrying across a restart is the peer's
+  // knowledge (who it knows, what it subscribes to), not its address.
+  //
   // The snapshot carries:
   //   - formatVersion: '1.0'
-  //   - identity envelope (id + pubkey hex + privkey base64 + region + createdAt)
   //   - synaptome (list of {peerId, weight, latency, stratum, addedBy})
   //   - subscriptions ([{ topic, lastSeenTs, opts }])
   //   - wireVersion (the kernel build that produced this snapshot)
@@ -1334,12 +1346,10 @@ export class AxonaPeer extends DHT {
    * @returns {Promise<object>}
    */
   async snapshot() {
-    const { dumpIdentity } = await import('../identity/index.js');
     const { WIRE_VERSION } = await import('../transport/handshake.js');
 
-    const identityEnv = this._identity
-      ? await dumpIdentity(this._identity)
-      : null;
+    // No identity envelope — see the I-ID note above. Nothing here may carry
+    // the transport keypair or the nodeId derived from it.
 
     const syn = this._node?.synaptome;
     const synaptome = [];
@@ -1374,7 +1384,6 @@ export class AxonaPeer extends DHT {
       formatVersion: '1.0',
       snapshotAt:    Date.now(),
       wireVersion:   WIRE_VERSION,
-      identity:      identityEnv,
       synaptome,
       subscriptions,
     };
@@ -1400,7 +1409,7 @@ export class AxonaPeer extends DHT {
    * @param {object} [opts.transport]
    * @returns {Promise<AxonaPeer>}
    */
-  static async fromSnapshot(state, { engine, node, axonaManager, transport } = {}) {
+  static async fromSnapshot(state, { engine, node, axonaManager, transport, nodeIdentity } = {}) {
     if (!state || typeof state !== 'object') {
       throw new TypeError('AxonaPeer.fromSnapshot: state must be a snapshot object');
     }
@@ -1408,11 +1417,11 @@ export class AxonaPeer extends DHT {
       throw new RangeError(`AxonaPeer.fromSnapshot: unsupported formatVersion ${state.formatVersion}`);
     }
 
-    let identity = null;
-    if (state.identity) {
-      const { loadIdentity } = await import('../identity/index.js');
-      identity = await loadIdentity(state.identity);
-    }
+    // The caller supplies a FRESH transport identity; a snapshot never carries
+    // one. An `identity` field from a pre-I-ID snapshot is deliberately ignored
+    // rather than adopted — restoring it would resurrect the old nodeId, which
+    // is the whole thing this invariant exists to prevent.
+    const identity = nodeIdentity ?? null;
 
     // Reconstitute the node + synaptome.  If the caller passed a node
     // we honour it (and skip our own construction), otherwise build a

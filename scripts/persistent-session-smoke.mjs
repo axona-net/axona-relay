@@ -1,6 +1,7 @@
 // persistent-session-smoke.mjs — verify the persistent MCP peer end-to-end on a
 // live network: standing watch, cross-peer receive, poll-drain, session publish,
-// PLUS the v0.18 additions — durable nodeId (round-trips from disk), host(),
+// PLUS the v0.18 additions — identity split (durable author, EPHEMERAL transport
+// id: INVARIANT I-ID), host(),
 // long-poll (wake-on-arrival), and the onArrival push sink. Defaults to testnet.
 //
 //   RELAY_NETWORK=testnet node scripts/persistent-session-smoke.mjs
@@ -10,7 +11,6 @@ process.env.MCP_AUTHOR_PATH = process.env.MCP_AUTHOR_PATH || '/tmp/claude-mcp-id
 const S = await import('../src/mcp-session.js');
 const { connectPeer, regionToDescriptor } = await import('../src/ops.js');
 const { cleanupWebRTC } = await import('../src/polyfill.js');
-const { loadIdentity } = await import('../vendor/axona-protocol/src/identity/index.js');
 const { readFileSync } = await import('node:fs');
 
 const RUN = `${process.pid}-${Math.floor(performance.now())}`;
@@ -29,12 +29,14 @@ try {
   const w = await S.watch({ topic: TOPIC, since: 'all' });
   check('watch opened', w.ok && w.watching);
   const st0 = await S.status();
-  check('connected w/ durable node + author', st0.connected && !!st0.nodeId && !!st0.authorId, `node ${String(st0.nodeId).slice(0,10)}… author ${String(st0.authorId).slice(0,10)}…`);
+  check('connected w/ ephemeral node + durable author', st0.connected && !!st0.nodeId && !!st0.authorId, `node ${String(st0.nodeId).slice(0,10)}… author ${String(st0.authorId).slice(0,10)}…`);
 
-  // durable nodeId: the on-disk envelope must round-trip to the SAME nodeId
+  // INVARIANT I-ID — the store is for AUTHORS ONLY. The transport identity is
+  // minted fresh per connection and must never reach disk; if a 'node' entry
+  // ever reappears here, a stable correlatable nodeId has come back with it.
   const env = JSON.parse(readFileSync(process.env.MCP_AUTHOR_PATH, 'utf8'));
-  const reloaded = await loadIdentity(env.node);
-  check('persistent nodeId round-trips from disk', reloaded.id === st0.nodeId, `disk ${String(reloaded.id).slice(0,10)}…`);
+  check('NO transport identity on disk (I-ID)', !('node' in env), `store keys: ${Object.keys(env).join(',') || '(empty)'}`);
+  check('author identity DOES persist', !!env.claude, 'durable WHO preserved');
 
   // cross-peer publish → standing watch buffers it + push sink fires
   B = await connectPeer({ region: 'useast' });
