@@ -176,6 +176,12 @@ export {
   verifyTouch,
   TOUCH_DOMAIN,
 } from './pubsub/touch.js';
+export {
+  buildUnpub,
+  verifyUnpub,
+  UNPUB_DOMAIN,
+} from './pubsub/unpub.js';
+
 // ── Ed25519 helpers (Web Crypto wrapper) ─────────────────────────
 // Optional companion to post.js for runtimes that support Web Crypto
 // Ed25519 (Chrome 110+, Safari 17+, Firefox 130+, Node 20+).
@@ -286,12 +292,3 @@ export {
   cbvFromFingerprints,
   AUTH_PROTO,
 } from './transport/handshake-auth.js';
-
-// connect() — THE application bootstrap. One call: identities, transport,
-// domain, peer, start, ready, and self-integration, composed in order.
-// Applications import this from the barrel; the lower-level constructors
-// above are advanced building blocks connect() assembles. Safe to export
-// here — the web transport it defaults to is loaded via dynamic import
-// INSIDE connect(), so this adds no static WebRTC dependency to the barrel
-// (sim/server contexts that inject their own transport never load it).
-export { connect } from './connect.js';

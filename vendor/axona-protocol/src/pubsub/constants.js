@@ -230,13 +230,5 @@ export const EMPTY_ROOT_PROBE_FANOUT      = 4;      // candidates contacted per 
 // CONFIRMATION failure, not a window failure). The leaver now waits briefly for
 // HANDOFFACK, retries once, and finally sprays the cache to the K-closest
 // cohort as REPLICATE (idempotent; backups store it, roots union-ingest it).
-export const HANDOFF_ACK_MS  = 700;   // per-round ack window BASE (also the stall-exit horizon)
+export const HANDOFF_ACK_MS  = 700;   // per-attempt ack wait
 export const HANDOFF_TRIES   = 2;     // sends before falling back to cohort spray
-// Review 2026-07-25 (mass-leaver scaling): the round ack window was a FLAT
-// HANDOFF_ACK_MS while heir-side ingest is O(topics received) — a mass leaver's
-// few heirs absorb dozens of simultaneous cache ingests (time-sliced), so acks
-// arrive in O(K) and "unacked" overwhelmingly meant ACKED LATE; every late
-// topic fell through to a single unconfirmed Phase C fallback (68/68 warns on
-// a ~68-root prod leaver). The window now scales with the round's batch size.
-export const HANDOFF_ACK_PER_TOPIC_MS = 25;    // per-unacked-topic margin added to the round window
-export const HANDOFF_ACK_MAX_MS       = 5000;  // per-round window cap (leave()'s outer bound already scales with role count)

@@ -768,16 +768,10 @@ export class AxonaPeer extends DHT {
   }
 
   /**
-   * Bootstrap into the Axona mesh. ADVANCED building block — applications
-   * should call `connect()` (the one-call bootstrap: identities + transport +
-   * domain + start + ready + self-integration, composed in the right order).
-   * Hand-assembling the lifecycle is how apps skipped self-integration and
-   * self-rooted their topics as singletons. Use join() directly only when you
-   * are driving the peer lifecycle yourself (custom transport, sim, tests).
+   * Bootstrap into the Axona mesh.
    *
    *   await peer.join()           — start standalone; wait for inbound
-   *                                 connections (self-integrates if a
-   *                                 transport is already bridge-seeded).
+   *                                 connections.
    *   await peer.join(sponsorId)  — open a channel to a known sponsor
    *                                 (66-char hex node ID) and seed
    *                                 the synaptome from it.

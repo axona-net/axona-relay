@@ -29,20 +29,7 @@ const store = {
 
 const author = await createAuthorIdentity({ persistAs: 'claude', store });   // the MCP's durable Author ID
 const s = await connectPeer({ region, author });                             // ephemeral node identity
-// This peer's OWN channel is OWNER-WRITE: owner+write fold into the topic id,
-// so `{name}` and `{name, write:'owner', owner}` are DIFFERENT topics that
-// merely share a display name. axona.bot is advertised on the DISCOVER ticker
-// as mode:'controlled'/write:'owner' → topicId 89f7f877…, which is the id every
-// reader joins; publishing to the bare name put weeks of updates on 89ba78c0…,
-// a topic with no subscribers (and our own bare-descriptor read-back kept
-// "confirming" them — we were reading our own mailbox). Resolve the channel's
-// descriptor; never assume the name is the address.  MCP_OWNED_TOPICS='' opts out.
-const OWNED_TOPICS = (process.env.MCP_OWNED_TOPICS ?? 'axona.bot')
-  .split(',').map(v => v.trim()).filter(Boolean);
-const descriptor = OWNED_TOPICS.includes(topic)
-  ? { region: s.regionName, name: topic, write: 'owner', owner: author.authorId }
-  : { region: s.regionName, name: topic };
-console.error(`[mcp-post] topic=${topic} write=${descriptor.write ?? 'open'} owner=${(descriptor.owner ?? 'none').slice(0, 12)}`);
+const descriptor = { region: s.regionName, name: topic };
 // A freshly-connected peer's K-closest estimate is built from a barely-warmed
 // table (readiness gate = synaptome ≥ 1); publishing immediately can distribute
 // to the wrong cohort and strand the message. Warm the route with a lookup-read

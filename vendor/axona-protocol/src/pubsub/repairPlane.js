@@ -19,7 +19,6 @@ import {
   METRICS_PUB_MS, METRICS_COALESCE_MS,
   EMPTY_ROOT_PROBE_DELAY_MS, EMPTY_ROOT_PROBE_MAX, EMPTY_ROOT_PROBE_INTERVAL_MS,
   EMPTY_ROOT_PROBE_FANOUT, HANDOFF_ACK_MS, HANDOFF_TRIES,
-  HANDOFF_ACK_PER_TOPIC_MS, HANDOFF_ACK_MAX_MS,
   ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
   INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
 } from './constants.js';
@@ -876,26 +875,8 @@ export const repairPlaneMethods = {
           this._handoffAcked.add(j.key);   // fire-and-forget: exempt from retry rounds + Phase C
         } catch { /* best-effort */ }
       }
-      // Ack window — SCALED and PROGRESS-AWARE (review 2026-07-25). The flat
-      // HANDOFF_ACK_MS window was batch-size-invariant while heir-side ingest
-      // is O(topics received): a mass leaver's heirs (a few relays absorbing
-      // dozens of simultaneous cache ingests, time-sliced per I-11) ack in
-      // O(K), so "unacked" overwhelmingly meant ACKED LATE (Phase C note
-      // below) and sole-copy topics fell through to a single unconfirmed
-      // fallback send. Window = base + per-topic margin (capped); early-exit
-      // when all acked (unchanged); stall-exit when no NEW ack lands for a
-      // full base window — acks stopped flowing, further waiting is dead time
-      // (same evidence-not-time shape as leave()'s drain stall clock).
-      const windowMs = Math.min(HANDOFF_ACK_MAX_MS,
-        HANDOFF_ACK_MS + HANDOFF_ACK_PER_TOPIC_MS * unacked().length);
-      const deadline = Date.now() + windowMs;
-      let lastAckCount = this._handoffAcked.size, lastProgressAt = Date.now();
-      while (Date.now() < deadline && unacked().length) {
-        await sleep(25);
-        if (this._handoffAcked.size > lastAckCount) {
-          lastAckCount = this._handoffAcked.size; lastProgressAt = Date.now();
-        } else if (Date.now() - lastProgressAt >= HANDOFF_ACK_MS) break;
-      }
+      const deadline = Date.now() + HANDOFF_ACK_MS;
+      while (Date.now() < deadline && unacked().length) await sleep(25);
     }
 
     // Phase C — durability fallback (v4.24.1, #333). A departing node must
