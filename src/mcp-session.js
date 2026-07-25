@@ -48,6 +48,19 @@ const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';     // auto-declare
 // call. Pair it with its OWN MCP_AUTHOR_PATH so the on-network identity is
 // distinct too — same handle + shared identity file = a nodeId collision (#356).
 const HANDLE        = process.env.MCP_HANDLE || 'axona.bot';
+// Topics this peer HOSTS for the whole run — durable infrastructure, not
+// subscriptions (host() stores+serves without consuming). Default: our own
+// channel. WHY (live diagnosis 2026-07-25): every post to axona.bot came from
+// a THROWAWAY publisher (scripts/mcp-post.mjs connects, publishes, exits), so
+// the channel's history survived only on whatever transient node accepted the
+// leave-handoff. Symptom: a FRESH subscriber found the messages via the
+// read/replay path while a long-lived browser subscription — pinned to a root
+// that no longer held the topic — never got the live fan-out, and the channel
+// held just 3 messages because everything else aged past TTL_MS with no home.
+// A topic whose only publisher is ephemeral has no home; give it one.
+// Same durability class as the alert-bot residual (#341), on a quiet channel.
+const HOST_TOPICS   = (process.env.MCP_HOST_TOPICS ?? HANDLE)
+  .split(',').map(s => s.trim()).filter(Boolean);   // MCP_HOST_TOPICS='' opts out
 
 // ── durable store (Node file-backed { get, set }) ───────────────────────
 function fileStore(path) {
@@ -111,6 +124,14 @@ export async function ensureSession() {
     // Voluntary, signed self-declaration: this peer is an AI agent. Best-effort —
     // a failed declare must never fail the connection.
     if (DECLARE_CLASS) { try { await setAuthorClass({ cls: AUTHOR_CLASS, operator: OPERATOR, label: 'axona-relay MCP peer' }); } catch { /* */ } }
+    // Re-establish durable hosting for our standing topics on EVERY connect
+    // (including reconnects — a host role lives on the peer, so it dies with the
+    // session and must be re-armed, exactly like the author-class attestation
+    // above). Best-effort per topic: a failed host must never fail the session.
+    for (const name of HOST_TOPICS) {
+      try { await host({ topic: name, region: REGION }); }
+      catch { /* best-effort: the channel still publishes, just less durably */ }
+    }
     return h;
   })();
   try { return await _connecting; } catch (e) { _connecting = null; throw e; }
