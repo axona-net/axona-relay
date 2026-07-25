@@ -116,16 +116,23 @@ export async function setAuthorClass({ cls = AUTHOR_CLASS, operator = OPERATOR, 
   const s = await ensureSession();
   const { attestation } = await s.peer.setAuthorClass(cls, { signWith: s.author, operator, label });   // kernel peer method
   _session.declaredClass = attestation;
-  // Durability: HOST our own owner-only profile topic so the attestation is served
-  // from our persistent peer even after the K-closest roots evict it from their
-  // bounded queues. A declare-once-on-connect peer otherwise becomes unresolvable
-  // after a few hours (observed: a 12h-old prod attestation was gone from roots).
-  // Mirrors the bridge-directory "host so the launch publish survives" pattern.
-  try {
-    const descriptor = authorClassTopic(s.author.pubkeyHex);
-    const key = `${descriptor.region}|class:${s.author.pubkeyHex}`;
-    if (!HOSTED.has(key)) { await s.peer.host(descriptor); HOSTED.set(key, { topic: 'axona:author-class', region: descriptor.region, descriptor, since: now() }); }
-  } catch { /* hosting is best-effort; the declare already published */ }
+  // REMOVED 2026-07-25 — we used to host() our own owner-only profile topic here,
+  // reasoning that our persistent peer should keep the attestation alive after the
+  // K-closest roots evict it. That reasoning is architecturally wrong and the fix
+  // was a fix to the wrong layer.
+  //
+  // Hosting is decided by ADDRESS, never by ownership or interest: a node hosts a
+  // topic only if its own nodeId lands in that topic's keyspace neighbourhood
+  // (David's rule; now enforced in kernel peer.host() as HOST_NOT_IN_NEIGHBOURHOOD).
+  // Owning the profile, publishing it, and caring whether it survives are all
+  // irrelevant to whether THIS node is one of its holders — and hosting it anyway
+  // gave us a role for a topic we are not near, which makes this node eligible to
+  // handle and stamp its traffic: an interloper root.
+  //
+  // The real problem (attestations aging out of bounded root queues) is a
+  // DURABILITY problem and belongs where durability lives — replication width,
+  // retention, or periodic re-publish by the owner. Re-declaring on a timer is a
+  // legitimate owner action; hosting is not.
   return { ok: true, declared: { class: attestation.class, operator: attestation.operator ?? null, label: attestation.label ?? null }, msgId: undefined };
 }
 

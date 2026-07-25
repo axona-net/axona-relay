@@ -179,6 +179,7 @@ export const ErrorCodes = Object.freeze({
 
   // Region occupancy (a topic can only be served by nodes in its own region)
   REGION_UNPOPULATED:        'REGION_UNPOPULATED',              // pub/sub/host to a region with no reachable in-region node
+  HOST_NOT_IN_NEIGHBOURHOOD: 'HOST_NOT_IN_NEIGHBOURHOOD',       // host(topic) for a topic this node's ADDRESS is not close to
 
   // Subscribe
   SUBSCRIBE_INVALID_TOPIC:   'SUBSCRIBE_INVALID_TOPIC',

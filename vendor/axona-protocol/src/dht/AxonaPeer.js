@@ -2078,10 +2078,89 @@ export class AxonaPeer extends DHT {
         `peer.host: cannot host a topic in region 0x${topicRegion.toString(16)} from a node in region 0x${(selfRegion ?? 0).toString(16)} — a node roots/hosts only topics in its own region`,
         { context: { topicRegion, selfRegion } });
     }
+    // ADDRESS RULE — hosting and owning are DISJOINT properties.
+    //
+    // A node may host a topic only if its own ADDRESS puts it in that topic's
+    // keyspace neighbourhood. Owning a topic, publishing to it, caring about it,
+    // or being its only publisher are NOT reasons to host it — and were the
+    // reasons an app (this codebase's own MCP peer) hand-hosted its own channel
+    // and quietly became a competing root for it.
+    //
+    // Why this has to be enforced, not documented: pubsubHost() joins the topic
+    // tree, which creates a ROLE, and a role changes routing decisions —
+    // wireHandlers gives a via-routed packet to a node BECAUSE it holds a role,
+    // and the PUB path stamps with an existing role rather than resolving the
+    // true root. So hosting a distant topic is exactly how you mint an interloper
+    // root: it captures writes that readers, who route by the keyspace, never see.
+    //
+    // The test is deliberately CONSERVATIVE — refuse only when the node can
+    // positively demonstrate it does not belong: K other nodes all strictly
+    // closer to the topic than itself. A sparse or cold table (fewer than K
+    // known candidates) cannot prove exclusion, so it is allowed — small
+    // networks, sim transports and fresh nodes keep working. `host()` with no
+    // topic (keyspace hosting) never reaches here; that IS the address rule.
+    const near = await this._hostNeighbourhoodCheck(desc.topicIdBig);
+    if (!near.ok) {
+      throw new PublishError(ErrorCodes.HOST_NOT_IN_NEIGHBOURHOOD,
+        `peer.host: this node is not in the keyspace neighbourhood of topic ${desc.topicId.slice(0, 12)}… — ` +
+        `${near.closer} known nodes are closer. Hosting is decided by ADDRESS, never by ownership or interest; ` +
+        `call host() with no topic to host this node's own neighbourhood.`,
+        { context: { topicId: desc.topicId, closerNodes: near.closer, selfDistanceRank: near.rank } });
+    }
+
     this._applySince(am, desc.topicIdBig, opts.since);
     am.pubsubHost(desc.topicIdBig);
     this._markPersistDirty('hosting');
     return { ok: true, scope: 'topic', topicId: desc.topicId };
+  }
+
+  /**
+   * ADDRESS RULE test for host(topic): is this node in the topic's keyspace
+   * neighbourhood?
+   *
+   * Deliberately asymmetric — it answers "can we PROVE this node does not
+   * belong?", not "is this node definitely the best holder?". Refusing requires
+   * positive evidence: at least K OTHER nodes strictly closer to the topic id
+   * than we are. Anything less (sparse table, cold start, tiny network, sim
+   * transport, lookup failure) is allowed, because a node that cannot see the
+   * neighbourhood cannot be shown to be outside it — and a false refusal would
+   * break legitimate hosting on small or freshly-joined networks.
+   *
+   * K matches the cohort candidate width the repair plane already uses for
+   * "who could hold this topic" ((rootReplicas + 1) * 2), so the guard and the
+   * replication machinery share one notion of neighbourhood instead of drifting.
+   *
+   * findKClosest(self-adjacent target) may include our own id; self is excluded
+   * from the closer-count so we never count ourselves against ourselves.
+   *
+   * @param {bigint} topicIdBig
+   * @returns {Promise<{ok: boolean, closer: number, rank: number|null}>}
+   */
+  async _hostNeighbourhoodCheck(topicIdBig) {
+    const selfId = this._node?.id;
+    if (typeof selfId !== 'bigint') return { ok: true, closer: 0, rank: null };  // no address → cannot judge
+
+    const replicas = (typeof this._rootReplicas === 'number' && this._rootReplicas >= 0) ? this._rootReplicas : 2;
+    const K = Math.max(3, (replicas + 1) * 2);
+
+    let candidates;
+    try { candidates = await this.findKClosest(topicIdBig, K + 1); }              // +1: self may occupy a slot
+    catch { return { ok: true, closer: 0, rank: null }; }                          // lookup failed → allow
+    if (!Array.isArray(candidates)) return { ok: true, closer: 0, rank: null };
+
+    const selfDist = selfId ^ topicIdBig;
+    let closer = 0;
+    let others = 0;
+    for (const raw of candidates) {
+      let id;
+      try { id = (typeof raw === 'bigint') ? raw : BigInt('0x' + String(raw)); } catch { continue; }
+      if (id === selfId) continue;                                                // never count self against self
+      others++;
+      if ((id ^ topicIdBig) < selfDist) closer++;
+    }
+    // Too few OTHER nodes known to establish exclusion → allow.
+    if (others < K) return { ok: true, closer, rank: closer + 1 };
+    return { ok: closer < K, closer, rank: closer + 1 };
   }
 
   /**
