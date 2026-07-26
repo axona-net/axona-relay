@@ -40,12 +40,12 @@ const run = (fn) => async (args) => { try { return J(await fn(args)); } catch (e
 
 const server = new McpServer({ name: 'axona', version: VERSION });
 
-const REGION = { region: z.string().optional().describe('Region name or code for the topic anchor (default "useast" / 0x89)') };
+const REGION = { region: z.string().optional().describe('Region name or code for the topic anchor (default "eagle" / 0x89)') };
 const OWNED = { owner: z.string().optional().describe('Owner Author ID for an OWNED topic — owner+write fold into the topic id, so they must match on every call. "self" = this peer\'s durable author (e.g. the axona.bot channel)'), write: z.enum(['open', 'owner']).optional().describe('Write policy of the target topic (owner-only topics need write:"owner")') };
 
 server.tool(
   'axona_publish',
-  'Publish a message to a topic on the live Axona peer-to-peer network (production by default). Uses the server\'s persistent peer and its STABLE author identity, so every publish comes from the same Author ID. Returns the msgId + signer. Topics are anchored at a region (default "useast"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo.axona.net feed.',
+  'Publish a message to a topic on the live Axona peer-to-peer network (production by default). Uses the server\'s persistent peer and its STABLE author identity, so every publish comes from the same Author ID. Returns the msgId + signer. Topics are anchored at a region (default "eagle"/0x89) — subscribers MUST use the same region. Interoperates with the live apps: publishing to "us-east/hello-world" appears in the axona.net / demo.axona.net feed.',
   { topic: z.string().describe('Topic name, e.g. "us-east/hello-world" or "claude/test"'), message: z.string().describe('Message body to publish'), ...REGION, ...OWNED, handle: z.string().optional().describe('Display handle carried in the payload (default "axona.bot"); chat apps render it'), authorClass: z.enum(['human', 'agent']).optional().describe('In-payload §6.5 declaration (default: this peer\'s declared class, "agent"); chat apps HIDE undeclared messages'), raw: z.boolean().optional().describe('true = publish the bare string without the std/message wrapper (machine topics)') },
   run(publish),
 );

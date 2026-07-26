@@ -16,7 +16,7 @@ import { idHex, idBig, lc } from '../vendor/axona-protocol/src/pubsub/ids.js';
 import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
 
 export const OWNER = '83866c66598304ed57767cf66b42b7a33b1884a47d8124317d3ad557995bb8df';
-export const DESCRIPTOR = { region: 'useast', name: 'axona.bot', owner: OWNER, write: 'owner' };
+export const DESCRIPTOR = { region: 'eagle', name: 'axona.bot', owner: OWNER, write: 'owner' };
 
 let TOPIC_BIG = null;
 export async function topicBig() {

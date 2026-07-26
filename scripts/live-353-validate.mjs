@@ -51,15 +51,15 @@ const author = await createAuthorIdentity();
 
 // ── A. warm topic + ephemeral publisher ────────────────────────────────
 {
-  const topic = { region: 'useast', name: `v353-warm-${Math.floor(Math.random() * 1e9)}`, write: 'open' };
+  const topic = { region: 'eagle', name: `v353-warm-${Math.floor(Math.random() * 1e9)}`, write: 'open' };
   log('A: standing subscriber connecting', { topic: topic.name, bridge: BRIDGE });
-  const S = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const S = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   const seen = new Set();
   await S.peer.sub(topic, (env) => { seen.add(env.message); }, { since: 'all' });
   await wait(3000);
 
   log('A: warm publisher posting m1..m3');
-  const P = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const P = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   for (const m of ['m1', 'm2', 'm3']) await P.peer.pub(topic, m, { signWith: author });
   let d = Date.now() + 45_000;
   while (Date.now() < d && !['m1', 'm2', 'm3'].every(m => seen.has(m))) await wait(1000);
@@ -68,7 +68,7 @@ const author = await createAuthorIdentity();
   await P.close();
 
   log('A: EPHEMERAL publisher posts m4..m6 and dies');
-  const E = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const E = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   for (const m of ['m4', 'm5', 'm6']) await E.peer.pub(topic, m, { signWith: author });
   await wait(1500);                          // one beat, then gone — the bot-post shape
   await E.close();
@@ -82,7 +82,7 @@ const author = await createAuthorIdentity();
   if (healed) log('A: healed', { secondsAfterDeath: Math.round((Date.now() - tDead) / 1000) });
 
   log('A: fresh probe replays since:all');
-  const F = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const F = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   const fseen = new Set();
   await F.peer.sub(topic, (env) => fseen.add(env.message), { since: 'all' });
   d = Date.now() + 30_000;
@@ -94,15 +94,15 @@ const author = await createAuthorIdentity();
 
 // ── B. cold watcher-first ──────────────────────────────────────────────
 {
-  const topic = { region: 'useast', name: `v352-cold-${Math.floor(Math.random() * 1e9)}`, write: 'open' };
+  const topic = { region: 'eagle', name: `v352-cold-${Math.floor(Math.random() * 1e9)}`, write: 'open' };
   log('B: watcher subscribes FIRST on a fresh topic', { topic: topic.name });
-  const W = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const W = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   const wseen = new Set();
   await W.peer.sub(topic, (env) => wseen.add(env.message), { since: 'all' });
   await wait(8000);                          // watcher-first settling (the #352 trigger)
 
   log('B: publisher appears and posts c1..c3');
-  const P2 = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const P2 = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   for (const m of ['c1', 'c2', 'c3']) await P2.peer.pub(topic, m, { signWith: author });
   let d = Date.now() + 90_000;
   while (Date.now() < d && !['c1', 'c2', 'c3'].every(m => wseen.has(m))) await wait(1000);
@@ -111,7 +111,7 @@ const author = await createAuthorIdentity();
   if (!b1ok) { await dumpAttachment('watcher', W, topic); await dumpAttachment('publisher', P2, topic); }
   await P2.close();
 
-  const F2 = await connectPeer({ region: 'useast', bridge: BRIDGE });
+  const F2 = await connectPeer({ region: 'eagle', bridge: BRIDGE });
   const f2 = new Set();
   await F2.peer.sub(topic, (env) => f2.add(env.message), { since: 'all' });
   d = Date.now() + 30_000;

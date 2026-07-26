@@ -37,7 +37,7 @@ const check = (label, cond, extra = '') => {
   else      { console.log(`  ✗ ${label} ${extra}`); failed++; }
 };
 
-const REGION = opt('region', 'useast');
+const REGION = opt('region', 'eagle');
 const bridge = resolveBridgeUrl({ override: opt('bridge'), network: opt('network', 'testnet') });
 const rd = regionDescriptor(REGION);
 if (!rd) { elog('unknown region', REGION); process.exit(2); }

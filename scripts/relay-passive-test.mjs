@@ -8,7 +8,7 @@ import { connectPeer, regionToDescriptor } from '../src/ops.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
-const REGION = (process.env.REGION || 'useast').trim();
+const REGION = (process.env.REGION || 'eagle').trim();
 const BRIDGE = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
 const SETTLE = Number(process.env.SETTLE_MS || 40000);
 const { name: TOPIC_REGION } = regionToDescriptor(REGION);   // structured-topic region name

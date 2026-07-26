@@ -25,7 +25,7 @@ mkdirSync(dirname(INBOX), { recursive: true });
 
 // The three watched topics (topic name + region), matching the shared links.
 const TOPICS = [
-  { topic: 'general',    region: 'useast' },
+  { topic: 'general',    region: 'eagle' },
   { topic: 'axona.dev',  region: 'eagle'  },
   { topic: 'axona.chat', region: 'eagle'  },
 ];
@@ -33,10 +33,10 @@ const TOPICS = [
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 const seen = new Set();   // msgId dedup within this process
 
-// Place the node in useast (native region of the busiest channel); the kernel
+// Place the node in eagle (native region of the busiest channel); the kernel
 // routes cross-region subscribes for the eagle topics, exactly as the MCP
-// session (also useast) does.
-const s = await connectPeer({ region: 'useast', onError: (e) => log('peer error:', e?.message || e) });
+// session (also eagle) does.
+const s = await connectPeer({ region: 'eagle', onError: (e) => log('peer error:', e?.message || e) });
 log(`connected nodeId=${s.nodeId?.slice?.(0, 12)}… mesh ready; watching ${TOPICS.length} topics → ${INBOX}`);
 
 for (const t of TOPICS) {

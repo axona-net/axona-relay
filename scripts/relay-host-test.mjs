@@ -7,7 +7,7 @@
 //   • topic     — peer.host('pow-bench/results')            (expect roles ↑)
 // None register a delivery handler. We poll health().axonRoles over ~40s.
 //
-//   REGION=useast node scripts/relay-host-test.mjs
+//   REGION=eagle node scripts/relay-host-test.mjs
 // =====================================================================
 import '../src/polyfill.js';
 import { cleanupWebRTC } from '../src/polyfill.js';
@@ -15,7 +15,7 @@ import { connectPeer, regionToDescriptor } from '../src/ops.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
-const REGION = (process.env.REGION || 'useast').trim();
+const REGION = (process.env.REGION || 'eagle').trim();
 const BRIDGE = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
 const SETTLE = Number(process.env.SETTLE_MS || 45000);
 const { name: TOPIC_REGION } = regionToDescriptor(REGION);   // structured-topic region name

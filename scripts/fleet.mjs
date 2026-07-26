@@ -4,11 +4,11 @@
 // and Linux. No global environment variables required — everything is a flag.
 //
 //   node scripts/fleet.mjs --region grizzly --count 10 --network testnet
-//   node scripts/fleet.mjs --region useast  --count 3                 # prod
+//   node scripts/fleet.mjs --region eagle  --count 3                 # prod
 //   node scripts/fleet.mjs --region grizzly --count 5 --bridge wss://my-bridge:8080
 //
 // Flags:
-//   --region  <name|code>      region to host (e.g. grizzly / 0x80). default useast
+//   --region  <name|code>      region to host (e.g. grizzly / 0x80). default eagle
 //   --count   <n>              how many relay processes to launch.       default 1
 //   --network <prod|testnet>   which bridge network to bootstrap from.   default prod
 //   --bridge  <wss-url>        explicit bridge URL (overrides --network).
@@ -54,7 +54,7 @@ if (opts.help || opts.h) {
   process.exit(0);
 }
 
-const region  = typeof opts.region === 'string' ? opts.region : 'useast';
+const region  = typeof opts.region === 'string' ? opts.region : 'eagle';
 const count   = Math.max(1, Number.parseInt(opts.count ?? '1', 10) || 1);
 const network = typeof opts.network === 'string' ? opts.network : 'prod';
 const bridge  = typeof opts.bridge === 'string' ? opts.bridge : null;

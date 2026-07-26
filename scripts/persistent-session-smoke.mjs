@@ -39,8 +39,8 @@ try {
   check('author identity DOES persist', !!env.claude, 'durable WHO preserved');
 
   // cross-peer publish → standing watch buffers it + push sink fires
-  B = await connectPeer({ region: 'useast' });
-  const { name: regionName } = regionToDescriptor('useast');
+  B = await connectPeer({ region: 'eagle' });
+  const { name: regionName } = regionToDescriptor('eagle');
   const want1 = `hello-1-${RUN}`;
   await B.peer.pub({ region: regionName, name: TOPIC }, want1, { signWith: B.author });
   await wait(7000);

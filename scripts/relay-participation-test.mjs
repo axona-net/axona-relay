@@ -14,7 +14,7 @@
 // If MATCH relays show isRoot and MISMATCH relays don't, that is the whole story:
 // relays participate when (and only when) they share the topic's keyspace.
 //
-//   N=4 TOPIC_REGION=useast MISMATCH_REGION=uswest \
+//   N=4 TOPIC_REGION=eagle MISMATCH_REGION=grizzly \
 //   node scripts/relay-participation-test.mjs
 // =====================================================================
 import '../src/polyfill.js';
@@ -26,8 +26,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (...a) => console.log(...a);
 
 const N             = Number(process.env.N || 3);
-const TOPIC_REGION  = (process.env.TOPIC_REGION || 'useast').trim();
-const MISMATCH      = (process.env.MISMATCH_REGION || 'uswest').trim();
+const TOPIC_REGION  = (process.env.TOPIC_REGION || 'eagle').trim();
+const MISMATCH      = (process.env.MISMATCH_REGION || 'grizzly').trim();
 const BRIDGE        = process.env.BRIDGE_URL || 'wss://bridge.axona.net';
 const TOPIC         = `relaytest/${TOPIC_REGION}-${N}`;
 const CONVERGE_MS   = Number(process.env.CONVERGE_MS || 35000);

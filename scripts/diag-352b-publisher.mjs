@@ -28,7 +28,7 @@ const store = {
 const author = await createAuthorIdentity({ persistAs: 'claude', store });
 if (author.authorId !== DESCRIPTOR.owner) { log('fatal', { error: 'author mismatch', got: author.authorId }); process.exit(1); }
 
-const s = await connectPeer({ region: 'useast', author });
+const s = await connectPeer({ region: 'eagle', author });
 log('connected', { nodeId: s.nodeId.slice(0, 12), fullNodeId: s.nodeId });
 managerOf(s.peer);
 log('snap-preWarm', snapshot(s.peer));

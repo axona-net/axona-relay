@@ -36,7 +36,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
-const REGION       = process.env.MCP_REGION || 'useast';
+const REGION       = process.env.MCP_REGION || 'eagle';
 const STORE_PATH   = process.env.MCP_AUTHOR_PATH || join(homedir(), '.axona', 'claude-mcp-identity.json');
 const BUFFER_CAP   = Number(process.env.MCP_BUFFER_CAP) || 1000;
 const AUTHOR_KEY   = 'claude';     // author keypair key in the store

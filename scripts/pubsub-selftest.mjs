@@ -6,9 +6,9 @@
 // (publishes route there) AND in the same keyspace as the topic's anchor region.
 // This probe answers it directly, from the network, for the topics you care about.
 //
-//   RELAY_REGION=uswest \
+//   RELAY_REGION=grizzly \
 //   RELAY_TOPICS=axona-share/public-images,pow-bench/results \
-//   [RELAY_NODEID=80ab…]  [RELAY_TOPIC_REGION=uswest]  [BRIDGE_URL=wss://…] \
+//   [RELAY_NODEID=80ab…]  [RELAY_TOPIC_REGION=grizzly]  [BRIDGE_URL=wss://…] \
 //   node scripts/pubsub-selftest.mjs
 //
 // RELAY_NODEID defaults to the id in ./identity.<region>.json (what `npm start`
@@ -38,7 +38,7 @@ function relayNodeId() {
 }
 
 async function main() {
-  const region  = (process.env.RELAY_REGION || 'uswest').trim();
+  const region  = (process.env.RELAY_REGION || 'grizzly').trim();
   const anchor  = (process.env.RELAY_TOPIC_REGION || region).trim();
   const topics  = (process.env.RELAY_TOPICS || '').split(',').map((s) => s.trim()).filter(Boolean);
   const bridge  = process.env.BRIDGE_URL || 'wss://bridge.axona.net';

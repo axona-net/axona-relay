@@ -11,7 +11,7 @@
 //   node src/cli.js pull <topic>                # fetch the latest message
 //
 // Options:
-//   --region <name|code>   topic region (default useast / 0x89, matching the
+//   --region <name|code>   topic region (default eagle / 0x89, matching the
 //                          demo's us-east topics so this interops with
 //                          axona.net / the kernel demo)
 //   --for <seconds>        sub: how long to listen          (default 25)
@@ -22,7 +22,7 @@
 //
 // Topic convention (v0.3): the topic is a STRUCTURED descriptor
 // { region, name }. The topic STRING is the `name`; --region names the region
-// (e.g. "useast"), which anchors the topic id's keyspace — both pub and sub
+// (e.g. "eagle"), which anchors the topic id's keyspace — both pub and sub
 // MUST use the same region or they derive different topic IDs and never meet.
 // (Replaces the old synthetic-publisher anchor; the region→keyspace mapping is
 // unchanged.) Publishes are signed by a fresh ephemeral AUTHOR identity.
@@ -36,7 +36,7 @@ import { resolveBridgeUrl } from './network.js';
 // ── arg parsing ──────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const cmd  = argv[0];
-const opts = { region: 'useast', for: 25, since: 'all', 'ready-timeout': 30 };
+const opts = { region: 'eagle', for: 25, since: 'all', 'ready-timeout': 30 };
 const positional = [];
 for (let i = 1; i < argv.length; i++) {
   const a = argv[i];

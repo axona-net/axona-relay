@@ -6,9 +6,9 @@
 // operation, tear everything down.
 //
 // v0.3 topic addressing: topics are STRUCTURED descriptors { region, name }.
-// The region NAME (e.g. "useast") anchors the topic in a keyspace — replacing
+// The region NAME (e.g. "eagle") anchors the topic in a keyspace — replacing
 // the old "synthetic publisher = <s2-prefix>‖0^256" anchor. An app and this
-// relay both open { region: 'useast', name: 'foo' } and meet on the same
+// relay both open { region: 'eagle', name: 'foo' } and meet on the same
 // topic id, so these still interoperate with the live apps. Publishes are
 // signed by an ephemeral AUTHOR identity (key separation: the node key never
 // signs); pass { signWith } on each pub.
@@ -25,9 +25,9 @@ export const DEFAULT_BRIDGE = resolveBridgeUrl();   // BRIDGE_URL env › RELAY_
  * region name|code → { code, name, center:{lat,lng} }.
  * `name` is the structured-topic region (use it as `{ region: name, name: topic }`).
  */
-export function regionToDescriptor(region = 'useast') {
+export function regionToDescriptor(region = 'eagle') {
   const d = regionDescriptor(region);
-  if (!d) throw new Error(`unknown region "${region}" (use a name like "useast" or a code like "0x89")`);
+  if (!d) throw new Error(`unknown region "${region}" (use a name like "eagle" or a code like "0x89")`);
   return d;
 }
 
@@ -42,7 +42,7 @@ export function regionToDescriptor(region = 'useast') {
  * The returned `ctx` carries `regionName` (the structured-topic region) and a
  * fresh ephemeral `author` to sign publishes with.
  */
-export async function connectPeer({ region = 'useast', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor } = {}) {
+export async function connectPeer({ region = 'eagle', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor } = {}) {
   const { name: regionName, center } = regionToDescriptor(region);
   // A caller may supply a DURABLE author (stable Author ID); it defaults to a
   // throwaway. There is deliberately NO way to supply a transport identity —
@@ -82,7 +82,7 @@ export async function withConnectedPeer(opts, fn) {
   }
 }
 
-export async function publish({ topic, message, region = 'useast', bridge = DEFAULT_BRIDGE } = {}) {
+export async function publish({ topic, message, region = 'eagle', bridge = DEFAULT_BRIDGE } = {}) {
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
     const msgId = await peer.pub({ region: ctx.regionName, name: topic }, message, { signWith: ctx.author });
     await new Promise(r => setTimeout(r, 1500));        // let it propagate to roots
@@ -90,14 +90,14 @@ export async function publish({ topic, message, region = 'useast', bridge = DEFA
   });
 }
 
-export async function pull({ topic, region = 'useast', bridge = DEFAULT_BRIDGE } = {}) {
+export async function pull({ topic, region = 'eagle', bridge = DEFAULT_BRIDGE } = {}) {
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
     const env = await peer.pull(null, { topic: { region: ctx.regionName, name: topic } });   // null msgId → latest
     return { ok: true, topic, region, found: !!env, message: env ? env.message : null, msgId: env?.msgId ?? null };
   });
 }
 
-export async function subscribe({ topic, region = 'useast', bridge = DEFAULT_BRIDGE, seconds = 20, since = 'all' } = {}) {
+export async function subscribe({ topic, region = 'eagle', bridge = DEFAULT_BRIDGE, seconds = 20, since = 'all' } = {}) {
   const secs = Math.max(1, Math.min(120, Number(seconds) || 20));
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
     const messages = [];

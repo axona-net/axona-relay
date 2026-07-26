@@ -25,20 +25,20 @@ import { WebSocketImpl } from './polyfill.js';
 export { KERNEL_VERSION, regionName, resolveRegion, regionCenter, POPULATED_REGIONS };
 
 /**
- * Resolve a region token (name like "useast" or code like "0x89") to the
+ * Resolve a region token (name like "eagle" or code like "0x89") to the
  * structured-topic region descriptor used by the v0.3 pub/sub API.
  *
  * v0.3 replaces the old "synthetic publisher = <s2-prefix>‖0^256" anchor with
  * a region NAME carried in the topic descriptor ({ region, name }). The topic
  * id's region byte is derived from this name, so a relay/CLI that opens
- * { region: 'useast', name: 'foo' } lands in the SAME keyspace as any app that
+ * { region: 'eagle', name: 'foo' } lands in the SAME keyspace as any app that
  * does the same — preserving the old region→keyspace mapping with no synthetic
  * publisher.
  *
  * @param {string} token  region name or code
  * @returns {{ code:number, name:string, center:{lat,lng} } | null}  null if unknown
  */
-export function regionDescriptor(token = 'useast') {
+export function regionDescriptor(token = 'eagle') {
   const code = resolveRegion(token);
   if (code == null) return null;
   return { code, name: regionName(code), center: regionCenter(code) };

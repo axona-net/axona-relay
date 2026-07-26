@@ -30,7 +30,7 @@ try {
   await wait(5000);   // let the attestation propagate to roots
 
   // 2. a SEPARATE peer resolves the class from the Author ID ALONE
-  B = await connectPeer({ region: 'useast' });
+  B = await connectPeer({ region: 'eagle' });
   const topic = S.authorClassTopic(authorId);
   const env = await B.peer.pull(null, { topic });
   let resolved = 'unstated', operator = null;

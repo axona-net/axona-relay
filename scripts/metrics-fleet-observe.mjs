@@ -1,6 +1,6 @@
 // metrics-fleet-observe.mjs — confirm the DEPLOYED relay fleet publishes metrics.
 //
-// Publishes to a fresh OPEN useast topic T (the fleet hosts keyspace 0x89, so it
+// Publishes to a fresh OPEN eagle topic T (the fleet hosts keyspace 0x89, so it
 // roots T), then subscribes to metricTopic(T) and waits across a fleet cadence
 // for a snapshot. Asserts the snapshot is signed by one of the fleet's metrics
 // authors (passed as --signers), proving the live fleet — not this harness —
@@ -22,7 +22,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const signers = (opt('signers', '')).split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
 const forS = Number(opt('for', 285));
 const bridge = resolveBridgeUrl({ network: opt('network', 'testnet') });
-const rd = regionDescriptor('useast');
+const rd = regionDescriptor('eagle');
 const region = rd.name, center = rd.center;
 const tName = `metrics-fleet-verify/${Date.now()}`;
 const tDesc = { region, name: tName };

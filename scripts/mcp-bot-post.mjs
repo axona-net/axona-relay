@@ -26,7 +26,7 @@ import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
 const TOPIC_NAME = 'axona.bot';
-const REGION = 'useast';
+const REGION = 'eagle';
 const CONFIRM_MS = 150_000;
 const PROBE_EVERY_MS = 10_000;
 

@@ -19,7 +19,7 @@ const store = {
 };
 
 const author = await createAuthorIdentity({ persistAs: 'claude', store });
-const s = await connectPeer({ region: 'useast', author });
+const s = await connectPeer({ region: 'eagle', author });
 const descriptor = { region: s.regionName, name: 'axona.bot', owner: author.authorId, write: 'owner' };
 try { await s.peer.pull(null, { topic: descriptor }); } catch { /* route warming */ }
 await new Promise(r => setTimeout(r, 4000));

@@ -71,9 +71,9 @@ const USE_TUI = process.env.RELAY_TUI != null
 // Transport 'debug' events worth surfacing (skips ping/pong chatter).
 const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|error|signal/i;
 
-const DEFAULT_REGION = { lat: 37.77, lng: -122.42 };  // SF (us-west / uswest)
+const DEFAULT_REGION = { lat: 37.77, lng: -122.42 };  // SF (us-west / grizzly)
 
-// v0.3: a region token (e.g. "useast" / "0x89") → the structured-topic region
+// v0.3: a region token (e.g. "eagle" / "0x89") → the structured-topic region
 // NAME used in { region, name } descriptors. Replaces the old synthetic-
 // publisher anchor; the region→keyspace mapping is unchanged. null if unknown.
 function topicRegionFor(regionTok) {
@@ -83,7 +83,7 @@ function topicRegionFor(regionTok) {
 /**
  * Resolve the desired region from env, precedence:
  *   RELAY_REGION = "auto"          → IP-geo, then timezone, then default
- *   RELAY_REGION = name | code     → that region (e.g. "useast" / "0x89")
+ *   RELAY_REGION = name | code     → that region (e.g. "eagle" / "0x89")
  *   RELAY_LAT / RELAY_LNG          → by coordinate
  *   (none)                         → default SF
  * Returns { lat, lng, code, label, source, fileKey, notes[] }.
@@ -111,7 +111,7 @@ async function resolveRegionConfig() {
     const code = resolveRegion(tok);
     if (code == null) {
       console.error(`axona-relay: unknown RELAY_REGION "${tok}". ` +
-        `Use "auto", a region name (e.g. useast), or a code (e.g. 0x89).`);
+        `Use "auto", a region name (e.g. eagle), or a code (e.g. 0x89).`);
       process.exit(1);
     }
     const c = geoCellCenter(code);

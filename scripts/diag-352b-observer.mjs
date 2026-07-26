@@ -18,7 +18,7 @@ setLabel(label);
 await topicBig();          // resolve before instrument filters
 instrument();
 
-const s = await connectPeer({ region: 'useast' });
+const s = await connectPeer({ region: 'eagle' });
 log('connected', { nodeId: s.nodeId.slice(0, 12), fullNodeId: s.nodeId, since });
 managerOf(s.peer);         // force manager creation so snapshots work pre-sub
 
