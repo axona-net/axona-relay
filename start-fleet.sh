@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# start-fleet.sh — (re)launch the local useast relay fleet against testnet.
+# start-fleet.sh — (re)launch the local eagle relay fleet against testnet.
 # Hosts keyspace 0x89 + runs the metric-publish loop (RELAY_METRICS default on).
 # Kills any existing fleet first so you don't end up with TWO relays per slot
 # (that happened once: a second launch 10 min after the first → 6 procs, 2/slot).
 #
-#   bash start-fleet.sh           # 3 relays, region useast, bridge wss://testnet.axona.net
-#   N=3 REGION=useast BRIDGE=wss://testnet.axona.net bash start-fleet.sh
+#   bash start-fleet.sh           # 3 relays, region eagle, bridge wss://testnet.axona.net
+#   N=3 REGION=eagle BRIDGE=wss://testnet.axona.net bash start-fleet.sh
 #
 # Logs: relay-logs/relay-<n>.log  (one per slot). Survives the app closing
 # (caffeinate + nohup); launchd is TCC-blocked from ~/Documents.
 set -u
 cd "$(dirname "$0")"
 N="${N:-3}"
-REGION="${REGION:-useast}"
+REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 mkdir -p relay-logs
 

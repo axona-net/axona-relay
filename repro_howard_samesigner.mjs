@@ -8,8 +8,8 @@ import { AxonaPeer, AxonaDomain, NeuronNode, createNodeIdentity, createAuthorIde
 import { webTransport } from './vendor/axona-protocol/src/transport/web/index.js';
 
 const BRIDGE = 'wss://bridge.axona.net';
-const CENTER = { lat: 35.7721, lng: -78.6386 };       // useast, like the anchor
-const REGION = 'useast';                              // structured-topic region (v0.3)
+const CENTER = { lat: 35.7721, lng: -78.6386 };       // eagle, like the anchor
+const REGION = 'eagle';                              // structured-topic region (v0.3)
 const TOPIC  = { region: REGION, name: 'claude/howard-samesigner-' + Math.floor(Date.now() / 1000) };
 const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
 

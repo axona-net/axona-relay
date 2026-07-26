@@ -67,8 +67,8 @@ Quit the dashboard with **q** or **Ctrl-C**.
 |---|---|---|
 | `RELAY_NETWORK` | `prod` | Which network to bootstrap from: `prod` (`bridge.axona.net`) or `testnet` (`testnet.axona.net`) |
 | `BRIDGE_URL` | — | Explicit bridge URL; **overrides** `RELAY_NETWORK` |
-| `RELAY_REGION` | — | `auto` (detect), a region **name** (`useast`), or a code (`0x89`) — sets the nodeId's geo prefix |
-| `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`uswest`) |
+| `RELAY_REGION` | — | `auto` (detect), a region **name** (`eagle`), or a code (`0x89`) — sets the nodeId's geo prefix |
+| `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`grizzly`) |
 | `RELAY_TUI` | auto (`stdout.isTTY`) | `1` force dashboard, `0` force plain log |
 
 Bridge selection precedence: `BRIDGE_URL` › `RELAY_NETWORK` › default (`prod`).
@@ -77,12 +77,12 @@ Bridge selection precedence: `BRIDGE_URL` › `RELAY_NETWORK` › default (`prod
 npm start                                     # production network (default)
 RELAY_NETWORK=testnet npm start               # the SF staging line
 RELAY_REGION=auto   npm start                 # detect location (IP-geo → timezone)
-RELAY_REGION=useast npm start                 # nodeId anchored at us-east (0x89)
+RELAY_REGION=eagle npm start                 # nodeId anchored at us-east (0x89)
 BRIDGE_URL=wss://my-bridge:8080 RELAY_LAT=40.71 RELAY_LNG=-74.0 npm start   # explicit bridge
 ```
 
 Region precedence: `RELAY_REGION` › `RELAY_LAT`/`RELAY_LNG` › default SF. The
-region resolves to the cell **center** coordinate, so `RELAY_REGION=useast`
+region resolves to the cell **center** coordinate, so `RELAY_REGION=eagle`
 reliably mints a `0x89`-prefixed id. Region names are the protocol's 192
 canonical names (`regionName`/`resolveRegion`).
 
@@ -148,7 +148,7 @@ Also wired as npm scripts (`npm run pub -- "<topic>" "<msg>"`) and a `bin`
 **Topic + region.** The topic string is used verbatim and anchored at a
 **synthetic region publisher** (`<s2-prefix>‖0²⁵⁶`), exactly as `axona-peer`
 and the kernel demo do. Both sides must use the same `--region` (default
-`useast` / `0x89`) or they derive different topic IDs and never meet. Because
+`eagle` / `0x89`) or they derive different topic IDs and never meet. Because
 of this, the CLI **interoperates with the live apps**: publishing to
 `us-east/hello-world` shows up in the [axona.net](https://axona.net) /
 `demo.axona.net` feed (or `demo-testnet.axona.net` with `--network testnet`),
@@ -156,7 +156,7 @@ and vice-versa.
 
 | Option | Default | Meaning |
 |---|---|---|
-| `--region <name\|code>` | `useast` | synthetic-publisher region (e.g. `uknorth`, `0x44`) |
+| `--region <name\|code>` | `eagle` | synthetic-publisher region (e.g. `uknorth`, `0x44`) |
 | `--for <seconds>` | `25` | `sub`: how long to listen |
 | `--since <all\|new>` | `all` | `sub`: replay backlog, or live-only |
 | `--network <prod\|testnet>` | `prod` | which network to bootstrap from (or `RELAY_NETWORK`) |
@@ -251,7 +251,7 @@ Each inbox line: `{ at, topic, region, signer, msgId, handle, authorClass, text,
 
 The watched topics (name + region) are the `TOPICS` array at the top of the
 script — edit to taste. Cross-region subscribes work from a single peer (the
-node anchors in `useast`; eagle topics route in), mirroring the MCP session.
+node anchors in `eagle`; eagle topics route in), mirroring the MCP session.
 
 **The event-driven pattern.** Pair the watcher with a file watcher so an agent
 (or any consumer) is woken *only* on a real arrival — idle time then costs
