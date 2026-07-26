@@ -27,6 +27,11 @@ export const topicStoreMethods = {
     role.cache.push(entry);
     role.cacheIds.add(entry.msgId);
     role.cacheBytes += entry.bytes;
+    // ADVISORY throughput: one distinct message just entered the cache. Callers
+    // gate on cacheIds (dedup) before _cachePush, so this counts each message
+    // once per holder; monotonic (eviction below never decrements it). Surfaced
+    // as metrics().publishes, maxed across the cohort.
+    role.publishes = (role.publishes || 0) + 1;
     while (role.cache.length > this._cacheMax || role.cacheBytes > this._cacheBytes) {
       const old = role.cache.shift();
       if (!old) break;
