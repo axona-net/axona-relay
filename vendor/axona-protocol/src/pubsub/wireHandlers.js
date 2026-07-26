@@ -367,24 +367,48 @@ export const wireHandlersMethods = {
   // state=stale). Yielding every 16 messages lets liveness traffic interleave
   // with history adoption; correctness is untouched (ingest is idempotent and
   // order-independent under msgId dedup).
+  //
+  // Returns { sent, held, rejected } (#402). `held` is what the receiver can
+  // honestly claim to account for; `rejected` is what it dropped. Callers that
+  // confirm receipt (HANDOFF → HANDOFFACK) MUST report these rather than the
+  // bare fact that the loop finished.
   async _ingestStampedBatch(role, msgs) {
-    let n = 0;
-    for (const m of (Array.isArray(msgs) ? msgs : [])) {
-      if (m && typeof m.json === 'string' && Number.isFinite(m.publishTs)) await this._ingestStamped(role, m);
+    let n = 0, held = 0, rejected = 0;
+    const list = Array.isArray(msgs) ? msgs : [];
+    for (const m of list) {
+      if (m && typeof m.json === 'string' && Number.isFinite(m.publishTs)) {
+        if (await this._ingestStamped(role, m) === 'held') held++; else rejected++;
+      } else {
+        // Shape guard. Previously skipped with NO log at all — the most silent
+        // of the drop paths, and indistinguishable from success to the leaver.
+        rejected++;
+        this._log('warn', 'drop-unshaped-stamped', { have: m && typeof m === 'object' ? Object.keys(m).join(',') : typeof m });
+      }
       if ((++n & 15) === 0) {
         await new Promise(r => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
       }
     }
+    return { sent: list.length, held, rejected };
   },
 
+  // Returns an OUTCOME, consumed by _ingestStampedBatch's tally:
+  //   'held'     — the message is now accounted for in my state (newly cached,
+  //                already cached, or deliberately suppressed by a tombstone).
+  //   'rejected' — I do NOT hold it and never will: malformed, failed B-4
+  //                verification, or a bad-clock stamp.
+  // The distinction is load-bearing: a HANDOFFACK must only claim what is held
+  // (#402). Silent returns here were invisible to the leaver, so a heir that
+  // rejected half a batch acked identically to one that took all of it, and the
+  // leaver then exempted the topic from retry AND cohort spray — dropping the
+  // last copy of exactly the rejected messages.
   async _ingestStamped(role, m) {
     let env;
-    try { env = JSON.parse(m.json); } catch { return; }
+    try { env = JSON.parse(m.json); } catch { this._log('warn', 'drop-malformed-stamped', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
     const v = await verifyEnvelope(env);                                 // B-4 still applies
-    if (!v.ok || env.msgId !== m.msgId) { this._log('warn', 'drop-bad-replayup', { reason: v.reason }); return; }
-    if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return; } // §5 bad-clock
-    if (role.cacheIds.has(m.msgId)) return;                              // already have it
-    if (this._tombstoned(role, m.msgId, m.json)) return;                 // killed → don't resurrect via replay-up
+    if (!v.ok || env.msgId !== m.msgId) { this._log('warn', 'drop-bad-replayup', { reason: v.reason }); return 'rejected'; }
+    if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
+    if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
+    if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
     this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
     // Seeing our own msgId arrive via ANY stamped path (cohort replicate,
     // replay-up, handoff) is proof it landed on a durable holder — confirm the
@@ -397,6 +421,7 @@ export const wireHandlersMethods = {
     if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // recover dense counter → a new root continues it
     this._fanout(role, { json: m.json, publishTs: m.publishTs, msgId: m.msgId, seq: m.seq }, null);
     this._deliverToApp(role.topicId, m.json, m.msgId, m.publishTs, m.seq);
+    return 'held';
   },
 
   // ── graceful-leave cache handoff ─────────────────────────────────────
@@ -427,9 +452,22 @@ export const wireHandlersMethods = {
 
   // Leaver side of the confirmed handoff: mark the topic acked so the
   // pubsubLeaveHandoff retry loop stops and skips the cohort-spray fallback.
+  // A SHORT ack is not an ack (#402). The heir reports { held, sent }; if it
+  // held fewer than we sent, the topic stays unacked so the retry rounds and the
+  // Phase C cohort spray still run — those are the only things standing between
+  // a rejected message and permanent loss of its last copy.
+  // Compatibility: a pre-4.45.0 heir sends { topicId } only. Absent counters mean
+  // "cannot tell", and we accept as before rather than breaking a mixed fleet.
   _onHandoffAck(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
-    if (typeof payload.topicId === 'string') this._handoffAcked?.add(lc(payload.topicId));
+    if (typeof payload.topicId !== 'string') return 'consumed';
+    const { held, sent } = payload;
+    if (Number.isFinite(held) && Number.isFinite(sent) && held < sent) {
+      this._log('warn', 'handoff-ack-short',
+        { topic: payload.topicId.slice(0, 12), held, sent, missing: sent - held });
+      return 'consumed';                    // deliberately NOT added to _handoffAcked
+    }
+    this._handoffAcked?.add(lc(payload.topicId));
     return 'consumed';
   },
 
