@@ -110,7 +110,11 @@ export function makeDashboard({ version, kernelVersion, bridgeUrl, nodeId, regio
 
 // ── Plain log presenter (no TTY) ─────────────────────────────────────
 export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region, regionLabel, mode }) {
-  const ts = () => new Date().toISOString().slice(11, 19);
+  // FULL DATE + TIME, deliberately. relay-logs/*.log are APPEND-ONLY across
+  // sessions, so a bare HH:MM:SS repeats every 24h and any timestamp grep
+  // silently matches a previous day's run. That cost a wrong reading of role
+  // counts on 2026-07-26. Date first so the lines also sort lexically.
+  const ts = () => new Date().toISOString().slice(0, 19).replace('T', ' ');
   console.log(`[${ts()}] axona-relay v${version} [${(mode || 'primary').toUpperCase()}] (kernel v${kernelVersion})`);
   console.log(`[${ts()}] node ${nodeId}`);
   console.log(`[${ts()}] region ${regionLabel ?? '?'} (${region.lat},${region.lng})  bridge ${bridgeUrl}`);
