@@ -2593,6 +2593,14 @@ export class AxonaPeer extends DHT {
     if (am && typeof am.inspectHosting === 'function') {
       try { hosting = am.inspectHosting(); } catch { /* best-effort */ }
     }
+    // Axonic admission (v4.46.0). Surfaced because a node that is silently
+    // refusing — or silently floored past its own budget — is exactly the state
+    // we spent a diagnosis cycle unable to see on prod (roles=0 while rooting,
+    // then roles=720 with no way to know it had declared itself full).
+    let admission = null;
+    if (am && typeof am.inspectAdmission === 'function') {
+      try { admission = am.inspectAdmission(); } catch { /* best-effort */ }
+    }
     // ── transport / routing-truth observability ──────────────────────
     // Web transport exposes boundPeers() (authenticated nodeIds), .mesh
     // (DC-level peer snapshot), and .webrtc (mesh-only bind set).  Sim
@@ -2644,6 +2652,7 @@ export class AxonaPeer extends DHT {
       subscriptions: this._subscriptions.size,
       axonRoles,
       hosting,
+      admission,
       wireVersion:   this._transport?.wireVersion ?? null,
       started:       this._started === true,
       transport,

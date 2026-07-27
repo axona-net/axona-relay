@@ -220,6 +220,19 @@ export class RootClaim {
   // early self-verification (a fresh claim is checked at ROOT_VERIFY_FIRST_MS).
   become(topicBig, why = 'terminal') {
     const m = this.m;
+    // ADMISSION (v4.46.0) — S1: one transition site, so one gate.
+    //
+    // hasAlternative=false is DELIBERATE and load-bearing. Every caller of
+    // become() is a routing TERMINUS: routing has already decided that nobody is
+    // closer. Refusing here would leave the SUB/PUB/KILL with nowhere to go, so
+    // a SOFT reason (not-seated / saturated / paced) is FLOORED — admitted and
+    // logged 'admitted-despite'. The value at terminal sites is the honest log
+    // plus the HARD bridge fence, not refusal.
+    //
+    // Real refusal lives where the role is PUSHED and the pusher can re-pick:
+    // syncEngine HANDOFF (see there). That asymmetry is the design, not an
+    // oversight — a terminus that refuses drops data.
+    if (!m.admitRole(topicBig, false)) return null;    // HARD only (bridge)
     const role = makeRole(topicBig, true);
     role.formedAt = m._now(); role.lastVerify = 0;
     m.axonRoles.set(topicBig, role);

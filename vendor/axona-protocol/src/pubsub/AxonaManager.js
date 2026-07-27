@@ -55,7 +55,8 @@ import { isRegionLockEnforced as _regionLock,
          COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES,
          COLD_BURST_SLOW_INTERVAL_MS, COLD_PEER_THRESHOLD,
          FIRST_PUBLISH_RESEND_MS, METRICS_LEASE_MS, METRICS_PUB_MS,
-         METRICS_COALESCE_MS } from './constants.js';
+         METRICS_COALESCE_MS,
+         MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -94,6 +95,10 @@ export class AxonaManager {
     beaconFanout = BEACON_FANOUT,  // K XOR-closest neighbors per beacon layer (root-announce reach)
     beaconLayers = BEACON_LAYERS,  // recursive forward depth (reach ≈ K + K² + … + K^layers)
     rootReplicas = ROOT_REPLICAS,  // singleton-root durability: # of nearest backup roots holding the full cache
+    maxRoles = MAX_ROLES,          // axonic degree budget — the analogue of MAX_SYNAPTOME
+    roleGraceMs = ROLE_GRACE_MS,   // refuse role MANAGEMENT this long after join (still transports)
+    roleAdmitPerTick = ROLE_ADMIT_PER_TICK,  // paced admission: new roles per refresh tick
+    neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -103,6 +108,16 @@ export class AxonaManager {
     this.dht    = dht;
     this.nodeId = dht.getSelfId();          // bigint, 264-bit
     this._now   = now;
+
+    // ── Axonic admission control (v4.46.0) ───────────────────────────────
+    this._maxRoles         = maxRoles;
+    this._roleGraceMs      = roleGraceMs;
+    this._roleAdmitPerTick = roleAdmitPerTick;
+    this._neverRoot        = !!neverRoot;
+    this._joinedAt         = now();     // grace runs from construction
+    this._admitTickAt      = 0;         // window start for paced admission
+    this._admitTickCount   = 0;         // roles admitted in the current window
+    this._admitRefusals    = { bridge: 0, 'not-seated': 0, saturated: 0, paced: 0, floored: 0 };
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
@@ -185,6 +200,142 @@ export class AxonaManager {
   // it collapses to the strict same-region check.
   _regionOk(idBigVal) {
     return !_regionLock() || this._sameRegion(idBigVal);
+  }
+
+  // ── Axonic admission control (v4.46.0) ─────────────────────────────────
+  // ONE gate, THREE reasons, TWO tiers. The neuromorphic layer has had the
+  // equivalent for a long time (MAX_SYNAPTOME budget + a refusal in
+  // NeuronNode.addIncomingSynapse + breadth-before-depth fill in
+  // buildXorRoutingTable); the axonic layer had none of it.
+  //
+  // NOTE ON THE ADDRESS RULE: this is NOT an exception to it. Hosting is still
+  // decided by ADDRESS. Every reason below is a property of the node's OWN
+  // state, self-declared and self-limiting: it can only ever cause a node to
+  // hold LESS, never to acquire a role it is not closest to. Skipping a
+  // refusing node is the chooser respecting an honest "cannot", not a
+  // privilege granted to anybody.
+
+  /** Has this node been in the mesh long enough, and is it actually meshed? */
+  seated() {
+    if ((this._now() - this._joinedAt) < this._roleGraceMs) return false;
+    // Deliberately not a bare timer: a node whose clock ran out but which has
+    // no routable non-bridge neighbour is exactly the node that must not take
+    // roles. Generalises the existing meshBare() guard (wireHandlers.js:99)
+    // from "bare" to "seated".
+    return !this._rootClaim.meshBare();
+  }
+
+  /** Is this node already carrying as much as it declared it can? */
+  saturated() {
+    return this.axonRoles.size >= this._maxRoles;
+  }
+
+  /**
+   * May this node take a NEW role right now?
+   * @returns {{ok:boolean, why?:string, hard?:boolean}}
+   *   hard:true  — categorical; the floor must NEVER override it.
+   *   hard:false — situational; the floor may override to avoid a partition.
+   */
+  canAcceptRole() {
+    // HARD — a bridge is a bridge: transport and introduction, never a root.
+    // Deliberately not soft: the floor would otherwise seat a root on the one
+    // node whose failure is least tolerable, precisely under the load where it
+    // can least afford it. host() was removed 2026-07-25 for this reason and
+    // sub() kept rooting anyway; a soft tier reopens that door on a timer.
+    if (this._neverRoot) return { ok: false, why: 'bridge', hard: true };
+
+    // SOFT — situational, self-declared, floor-overridable.
+    if (!this.seated())   return { ok: false, why: 'not-seated', hard: false };
+    if (this.saturated()) return { ok: false, why: 'saturated',  hard: false };
+
+    // Paced admission — the axonic analogue of Phase-1-breadth. Absorb a
+    // backlog over ticks instead of one event-loop-blocking burst (#332).
+    const now = this._now();
+    if (now - this._admitTickAt >= this.refreshIntervalMs) {
+      this._admitTickAt = now; this._admitTickCount = 0;
+    }
+    if (this._admitTickCount >= this._roleAdmitPerTick) {
+      return { ok: false, why: 'paced', hard: false };
+    }
+    return { ok: true };
+  }
+
+  /**
+   * Admission decision for one role, with the mandatory floor.
+   *
+   * THE FLOOR IS NOT OPTIONAL. If every candidate refuses, nobody roots and the
+   * topic has no root — and both soft reasons can cause that fleet-wide (a
+   * simultaneous restart puts everyone in grace; a loaded backbone makes
+   * everyone saturated). Both happened on prod 2026-07-26. A grace period that
+   * can partition the network is worse than none, so a SOFT refusal with no
+   * alternative is overridden and logged loudly. A HARD refusal never is.
+   *
+   * @param {bigint} topicBig
+   * @param {boolean} hasAlternative  caller knows another node can take this
+   * @returns {boolean} true ⇒ proceed to _becomeRoot
+   */
+  admitRole(topicBig, hasAlternative = false) {
+    const v = this.canAcceptRole();
+    if (v.ok) { this._admitTickCount++; return true; }
+
+    this._admitRefusals[v.why] = (this._admitRefusals[v.why] || 0) + 1;
+    const topic = idHex(topicBig).slice(0, 12);
+
+    if (v.hard) {
+      this._log('info', 'role-refused', { topic, why: v.why, hard: true, roles: this.axonRoles.size });
+      return false;                      // never floored
+    }
+    if (hasAlternative) {
+      this._log('info', 'role-refused', { topic, why: v.why, roles: this.axonRoles.size });
+      return false;
+    }
+    // Floor: no alternative exists. Accept and say so.
+    this._admitRefusals.floored++;
+    this._log('warn', 'admitted-despite', { topic, why: v.why, roles: this.axonRoles.size });
+    this._admitTickCount++;
+    return true;
+  }
+
+  /**
+   * Admission for a PUSHED role (HANDOFF heir). Deliberately stricter about what
+   * may refuse than admitRole():
+   *
+   *   refuses on  — 'bridge' (hard), 'saturated' (a genuine "I cannot")
+   *   ACCEPTS on  — 'not-seated', 'paced'
+   *
+   * Why grace must NOT refuse a handoff: grace is 90s, the leaver's ack window is
+   * ≤5s (HANDOFF_ACK_MAX_MS). A refusal the leaver cannot outwait is not a
+   * deferral, it is data loss — and in a fleet-wide restart EVERY candidate is in
+   * grace at once, so every handoff would be refused and every last copy dropped.
+   * A departing node's history has to land somewhere; "I am new" is not a reason
+   * to drop it, "I am full" is.
+   */
+  admitPushedRole(topicBig) {
+    const topic = idHex(topicBig).slice(0, 12);
+    if (this._neverRoot) {
+      this._admitRefusals.bridge++;
+      this._log('info', 'role-refused', { topic, why: 'bridge', hard: true, pushed: true });
+      return false;
+    }
+    if (this.saturated()) {
+      this._admitRefusals.saturated++;
+      this._log('warn', 'role-refused', { topic, why: 'saturated', pushed: true, roles: this.axonRoles.size });
+      return false;                     // leaver's unacked path re-homes it (4.45.0 honest ack)
+    }
+    return true;
+  }
+
+  /** Admission counters for health()/observability. */
+  inspectAdmission() {
+    return {
+      roles: this.axonRoles.size,
+      maxRoles: this._maxRoles,
+      seated: this.seated(),
+      saturated: this.saturated(),
+      neverRoot: this._neverRoot,
+      graceRemainingMs: Math.max(0, this._roleGraceMs - (this._now() - this._joinedAt)),
+      refusals: { ...this._admitRefusals },
+    };
   }
 
   // I am the root for a topic iff I am the routing terminus for its bare id.

@@ -162,7 +162,19 @@ export const syncEngineMethods = {
     let topicBig; try { topicBig = idBig(payload.topicId); } catch { return; }
 
     if (policyName === 'HANDOFF') {
-      const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'handoff-heir');
+      // ADMISSION (v4.46.0). A handoff is PUSHED at us — we did not choose it,
+      // and an alternative demonstrably exists (the leaver picks its heir from a
+      // candidate list and retries). So this is where refusal has real teeth.
+      //
+      // Refusing here is only SAFE because 4.45.0 (#402) made the ack honest:
+      // before that, a refusal and a successful adoption were indistinguishable
+      // on the wire, so the leaver would mark the topic acked, skip retry and
+      // cohort spray, and depart — dropping the last copy. We now hold no role
+      // and send no ack, so the leaver's unacked path re-homes the topic.
+      let role = this.axonRoles.get(topicBig);
+      if (!role && !this.admitPushedRole(topicBig)) return;   // refuse: stay silent, leaver retries
+      if (!role) role = this._becomeRoot(topicBig, 'handoff-heir');
+      if (!role) return;                 // hard refusal (bridge) — no role, no ack, leaver re-homes
       this._applyDels(role, topicBig, payload.dels);
       const tally = await this._ingestStampedBatch(role, payload.msgs);
       // Departure rules — purge the leaver's ghost beacon, never defer back to

@@ -99,6 +99,7 @@ export const wireHandlersMethods = {
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'sub-terminal');
+    if (!role) return 'consumed';        // admission refused (bridge fence) — do not seat here
     this._maybePromoteRoot(role, payload, meta);
 
     const subHex = lc(payload.subscriberId);
@@ -263,6 +264,9 @@ export const wireHandlersMethods = {
       if (closer) { this._deferToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
+    // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
+    // swallowed. Dropping it here is silent message loss.
+    if (!role) { this._reroute(T.PUB, payload); return 'consumed'; }
     this._maybePromoteRoot(role, payload, meta);
     // Only the root (the topic terminus) stamps. A non-root relay can only reach
     // here for a via-routed publish (a security waypoint) — pop the via and
@@ -660,6 +664,7 @@ export const wireHandlersMethods = {
       if (closer) { this._deferToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
+    if (!role) { this._reroute(T.KILL, payload); return 'consumed'; }   // refused: forward, never lose a tombstone
     const kill = payload.kill;
     const target = kill?.msgId;
     if (!target) return 'consumed';
@@ -770,6 +775,7 @@ export const wireHandlersMethods = {
         if (closer) { this._deferToRoot(topicBig, T.METRICSON, payload, closer); return 'consumed'; }
       }
       const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'metricson-terminal');
+      if (!role) return 'consumed';   // refused: metrics are cosmetic, drop quietly
       this._maybePromoteRoot(role, payload, meta);
       role.metricsOn = now + METRICS_LEASE_MS;                 // arm/renew the publish lease
       // Answer the demand NOW (v4.16.1): the first snapshot rides back at routing

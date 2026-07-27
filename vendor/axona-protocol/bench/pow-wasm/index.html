@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Axona PoW benchmark</title>
+<style>
+  :root { font-family: system-ui, sans-serif; }
+  body { margin: 0; padding: 1rem; max-width: 720px; }
+  h1 { font-size: 1.25rem; margin: 0 0 .15rem; }
+  fieldset { border: 1px solid #ccc; border-radius: 8px; margin: 0 0 1rem; padding: .8rem 1rem; }
+  legend { font-weight: 600; }
+  button { cursor: pointer; font-size: 1.1rem; padding: .6rem 1.3rem; font-weight: 600; border-radius: 6px; }
+  input { font-size: 1.1rem; padding: .55rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+  td { border: 1px solid #ddd; padding: .35rem .5rem; }
+  td:first-child { width: 1.6rem; text-align: center; }
+  .muted { color: #777; font-size: .85rem; }
+  #status { color: #06c; min-height: 1.2rem; font-size: .9rem; margin-top: .4rem; }
+  tr.running { background: #fff6d5; font-weight: 600; }
+</style>
+</head>
+<body>
+  <h1>Axona PoW benchmark</h1>
+  <div id="buildinfo" class="muted" style="font-family:ui-monospace,monospace; font-size:.72em; margin-bottom:.7rem">loading…</div>
+
+  <fieldset>
+    <div style="display:flex; gap:1.3rem; align-items:center; flex-wrap:wrap">
+      <img id="qr" width="150" height="150" alt="QR code" crossorigin="anonymous" style="border:1px solid #ddd; background:#fff">
+      <div>
+        <button id="run">Run benchmark</button>
+        <button id="copyData" title="Copy this device's full results + connection diagnostics, to paste into an email" style="font-size:.9rem; padding:.45rem .8rem; font-weight:400">Copy data</button>
+        <div id="status"></div>
+        <div class="muted" style="margin-top:.3rem">Scan to run on a phone · <a id="shareUrl" href="#"></a></div>
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <label for="label" style="font-weight:600; display:block; margin-bottom:.35rem">Device name</label>
+    <input id="label" placeholder="e.g. David — iPhone 15 Pro" style="width:100%; box-sizing:border-box">
+    <div class="muted" style="margin-top:.35rem">Name this device so you can spot it in the results below.</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Test suite</legend>
+    <div id="suite" class="muted">—</div>
+  </fieldset>
+
+  <fieldset>
+    <legend>How you compare</legend>
+    <div id="compare" class="muted">press Run benchmark to see where your device stands.</div>
+  </fieldset>
+
+  <script type="module" src="./bench.js?v=0.19.0"></script>
+</body>
+</html>

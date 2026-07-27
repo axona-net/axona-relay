@@ -1,0 +1,991 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@axona/protocol — S2 region visualizer</title>
+
+  <script type="importmap">
+  {
+    "imports": {
+      "three":         "https://cdn.jsdelivr.net/npm/three@0.162.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.162.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/topojson-client@3.1.0/dist/topojson-client.min.js"></script>
+
+  <style>
+    :root {
+      --rust: #2d7373;
+      --ink: #1a1a1a;
+      --muted: #666;
+      --bg: #fffff8;
+      --card-bg: #fbfbf6;
+      --border: #d8d4ca;
+      --code-bg: #f0ecdf;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+    body {
+      font-family: 'EB Garamond', Georgia, serif;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+    code, .mono { font-family: 'Inconsolata', ui-monospace, Menlo, monospace; background: var(--code-bg); padding: 1px 4px; border-radius: 2px; font-size: 0.92em; }
+
+    #layout {
+      display: grid;
+      grid-template-columns: 1fr 360px;
+      gap: 1.2rem;
+      padding: 1.2rem 1.5rem;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    @media (max-width: 900px) {
+      #layout { grid-template-columns: 1fr; }
+    }
+
+    h1 { font-weight: 500; letter-spacing: -0.015em; margin: 0 0 0.2em 0; font-size: 1.6rem; }
+    .lede { color: var(--muted); margin: 0 0 1rem 0; font-size: 0.95rem; }
+
+    #globeContainer {
+      background: #f5efe0;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      aspect-ratio: 1 / 1;
+      min-height: 480px;
+    }
+    #globeCanvas { display: block; width: 100%; height: 100%; cursor: grab; }
+    #globeCanvas:active { cursor: grabbing; }
+
+    .sidepanel { display: flex; flex-direction: column; gap: 1rem; }
+    .card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.8rem 1rem;
+    }
+    .card h2 { font-size: 1rem; font-weight: 600; margin: 0 0 0.5em 0; }
+    .row { display: flex; justify-content: space-between; align-items: baseline; padding: 0.2rem 0; font-size: 0.92rem; }
+    .row .label { color: var(--muted); }
+    .row .value { font-family: 'Inconsolata', ui-monospace, monospace; }
+
+    button {
+      font-family: 'EB Garamond', serif;
+      font-size: 0.95rem;
+      padding: 0.4rem 0.8rem;
+      background: var(--rust);
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+    button:hover { background: #1d5959; }
+    button[disabled] { background: #999; cursor: not-allowed; }
+    label.toggle { display: flex; align-items: center; gap: 0.4rem; font-size: 0.92rem; cursor: pointer; }
+
+    #legend {
+      display: grid;
+      grid-template-columns: repeat(16, 1fr);
+      gap: 2px;
+      margin-top: 0.4rem;
+    }
+    .swatch { min-height: 14px; }
+    .swatch {
+      aspect-ratio: 1 / 1;
+      cursor: pointer;
+      background: #f4ecd6;
+      border: 1px solid #d0c3a0;
+      color: #555;
+      font-family: 'Inconsolata', ui-monospace, monospace;
+      font-size: 0.6rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.1s, color 0.1s;
+    }
+    .swatch:hover { background: #e8d98a; color: #1a1a1a; }
+    .swatch.selected {
+      background: #ffd700;
+      color: #1a1a1a;
+      border-color: #8a5a00;
+      font-weight: 700;
+    }
+
+    .pin {
+      position: absolute;
+      width: 14px; height: 14px;
+      border-radius: 50%;
+      background: #c0392b;
+      border: 2px solid white;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+      transform: translate(-50%, -50%);
+      pointer-events: none;
+    }
+
+    footer {
+      text-align: center;
+      padding: 0.8rem;
+      font-size: 0.82rem;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      margin-top: 1rem;
+    }
+    footer a { color: var(--rust); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<div id="layout">
+  <div>
+    <h1>S2 region visualizer</h1>
+    <p class="lede">
+      The 192 S2 cells that anchor every Axona pub/sub topic and nodeId — coloured by
+      <strong>fold basin</strong>. Only <strong>84</strong> cells are populated
+      <strong>major</strong> regions (named for a neutral in-range animal); the
+      ~108 ocean and sparse cells <strong>fold</strong> into the nearest major, so a
+      topic anchored in empty water lands in a real region instead of hotspotting a
+      boundary. Cells sharing a colour share a major. Hover the globe for the fold
+      relationship; click a legend swatch to highlight its cell.
+    </p>
+    <div id="globeContainer">
+      <canvas id="globeCanvas"></canvas>
+      <div id="pin" class="pin" style="display:none"></div>
+    </div>
+  </div>
+
+  <div class="sidepanel">
+
+    <div class="card">
+      <h2>Under cursor</h2>
+      <div class="row"><span class="label">Cell ID</span><span class="value" id="hoverCell">—</span></div>
+      <div class="row"><span class="label">Lat / Lng</span><span class="value" id="hoverLatLng">—</span></div>
+      <div class="row"><span class="label">Cell bounds</span><span class="value" id="hoverBounds">—</span></div>
+      <div class="row"><span class="label">Approx area</span><span class="value" id="hoverArea">—</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Your location</h2>
+      <div class="row"><span class="label">Lat / Lng</span><span class="value" id="myLatLng">—</span></div>
+      <div class="row"><span class="label">Your cell</span><span class="value" id="myCell">—</span></div>
+      <div style="margin-top:0.5rem;">
+        <button id="locateBtn">Detect my location</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Display</h2>
+      <label class="toggle">
+        <input type="checkbox" id="toggleCells" checked> Show S2 cell grid
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleBorders" checked> Show country borders
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleLabels"> Show region names
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleHilbert"> Show Hilbert path (0x00 → 0xFF)
+      </label>
+      <label class="toggle">
+        <input type="checkbox" id="toggleAutorotate" checked> Auto-rotate
+      </label>
+    </div>
+
+    <div class="card">
+      <h2>Cell index</h2>
+      <div style="font-size:0.85rem; color: var(--muted); margin-bottom: 0.4rem;">
+        Click a cell to highlight it on the globe.
+      </div>
+      <div style="display:flex; gap:0.6rem; font-size:0.85rem; margin-bottom: 0.5rem;">
+        <label class="toggle" style="font-size:0.85rem;">
+          <input type="radio" name="legendLayout" value="index" checked> Index order
+        </label>
+        <label class="toggle" style="font-size:0.85rem;">
+          <input type="radio" name="legendLayout" value="spatial"> Globe layout
+        </label>
+      </div>
+      <div id="legend"></div>
+      <div style="font-size:0.82rem; color: var(--muted); margin-top: 0.4rem;" id="legendCaption">
+        Cells are numbered by Hilbert-curve order 0x00 to 0xFF.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>What you are seeing</h2>
+      <p style="font-size:0.9rem; margin: 0.2rem 0;">
+        Every Axona nodeId starts with an 8-bit S2 prefix derived from
+        the peer's lat/lng via Google's S2 cube projection. The same
+        8-bit prefix anchors pub/sub topics: a topic descriptor's
+        `region` byte places the topic in the keyspace, so K-closest
+        routing for a region-keyed topic naturally finds peers in that
+        region.
+      </p>
+      <p style="font-size:0.9rem; margin: 0.6rem 0 0 0;">
+        S2 projects the globe onto the six faces of a cube and
+        partitions each face into 4×8 = 32 cells, giving <strong>192
+        cells total</strong>. The quadratic ST transform keeps cell
+        areas within ~1.4× of each other across the globe — no
+        polar shrinkage. Byte values 0xC0–0xFF are reserved (192–255)
+        for future system topics.
+      </p>
+      <p style="font-size:0.9rem; margin: 0.6rem 0 0 0;">
+        <strong>The fold.</strong> Roughly half the cells are open ocean or
+        near-empty land — no peers live there. Minting an id at such a cell would
+        make it a hotspot: every topic anchored in that ocean lands on the same few
+        boundary nodes. So <code>canonicalRegion()</code> folds each ocean/sparse
+        cell onto its nearest <strong>major</strong> at mint time (node ids and
+        topic ids alike), and the topic spreads across that major's whole
+        population. The fold is deterministic and carried in the id itself — no
+        coordinator — and wire-compatible: every populated region keeps its exact
+        byte. Regions are labelled with neutral animal names rather than country
+        names (the id carries only the numeric code, never the label).
+      </p>
+    </div>
+
+  </div>
+</div>
+
+<footer>
+  <code class="mono" id="kernelVer">@axona/protocol</code> ·
+  <a href="https://github.com/axona-net/axona-protocol">source</a> ·
+  <a href="https://github.com/axona-net/axona-docs/blob/main/architecture/">architecture note</a>
+</footer>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import {
+  geoCellId,
+  geoCellCenter,
+  geoCellSubCenters,
+  geoCellCorners,
+  geoCellFace,
+  S2_CELL_COUNT,
+} from '../../src/utils/s2.js';
+import { regionName, regionNames, canonicalRegion, MAJORS } from '../../src/utils/region-names.js';
+import { KERNEL_VERSION } from '../../src/transport/handshake.js';
+
+const hex = (cid) => '0x' + cid.toString(16).padStart(2, '0').toUpperCase();
+
+// A cell is a MAJOR (populated) region iff it names itself; the other ~108
+// ocean/sparse cells FOLD onto their nearest major, so a topic anchored in
+// empty water lands in a real region instead of hotspotting a boundary sliver.
+const isMajor = (cid) => MAJORS[cid] !== undefined;
+const canonOf = (cid) => canonicalRegion(cid);   // the major this cell folds to
+
+// Label: a major shows "osprey · 0x89 (major)"; a folded cell shows which major
+// it belongs to, "pac_68 0x68 ▸ puffin 0x56 (folds in)".
+const cellLabel = (cid) => {
+  const canon = canonOf(cid);
+  if (canon === cid) return `${regionName(cid) ?? '?'} · ${hex(cid)}  (major)`;
+  return `${hex(cid)} ▸ ${regionName(canon)} ${hex(canon)}  (folds in)`;
+};
+
+// Stable, well-spread colour per MAJOR region (golden-angle hue), shared by
+// every cell in that major's fold basin so basins read as one colour.
+const _hueCache = new Map();
+function majorColor(canonCid) {
+  if (_hueCache.has(canonCid)) return _hueCache.get(canonCid);
+  // index of this major among the sorted major codes → golden-angle hue
+  const majors = Object.keys(MAJORS).map(Number).sort((a, b) => a - b);
+  const i = majors.indexOf(canonCid);
+  const hue = (i * 137.508) % 360;
+  const col = hslToRgb(hue / 360, 0.55, 0.55);
+  _hueCache.set(canonCid, col);
+  return col;
+}
+function hslToRgb(h, s, l) {
+  const k = n => (n + h * 12) % 12;
+  const a = s * Math.min(l, 1 - l);
+  const f = n => l - a * Math.max(-1, Math.min(k(n) - 3, Math.min(9 - k(n), 1)));
+  return [Math.round(255 * f(0)), Math.round(255 * f(8)), Math.round(255 * f(4))];
+}
+
+document.getElementById('kernelVer').textContent =
+  `@axona/protocol kernel v${KERNEL_VERSION}`;
+
+// ─────────────────────────────────────────────────────────────────────
+// Geometry helpers
+// ─────────────────────────────────────────────────────────────────────
+
+const N_CELLS = S2_CELL_COUNT;   // 192 (6 faces × 32 cells/face)
+
+function latLngToXYZ(lat, lng, radius = 1) {
+  const phi = (90 - lat) * Math.PI / 180;
+  const theta = (lng + 180) * Math.PI / 180;
+  return {
+    x: -radius * Math.sin(phi) * Math.cos(theta),
+    y:  radius * Math.cos(phi),
+    z:  radius * Math.sin(phi) * Math.sin(theta),
+  };
+}
+function xyzToLatLng(x, y, z) {
+  const lat = 90 - Math.acos(Math.max(-1, Math.min(1, y))) * 180 / Math.PI;
+  let lng = Math.atan2(z, -x) * 180 / Math.PI - 180;
+  lng = ((lng + 540) % 360) - 180;
+  return { lat, lng };
+}
+
+/**
+ * Approximate lat/lng bounds + area for an S2 cell.  Computed from
+ * the four cell corners (face-local quadrilateral edges).  Since the
+ * boundaries are great-circle arcs, bounds-by-corners is approximate
+ * but close to correct for level-2.5 cells.  Area is by sampling
+ * (a few hundred pixels per cell on the equirectangular texture is
+ * already in cellGrid by the time we need this).
+ */
+function cellBoundsApprox(cid) {
+  const corners = geoCellCorners(cid);
+  if (!corners) return null;
+  let latLo = +Infinity, latHi = -Infinity;
+  for (const c of corners) {
+    if (c.lat < latLo) latLo = c.lat;
+    if (c.lat > latHi) latHi = c.lat;
+  }
+  // Longitude is tricky across antimeridian — compute span the short way.
+  const lngs = corners.map(c => c.lng).sort((a, b) => a - b);
+  // Find the largest gap; the cell occupies the complement.
+  let bestGap = 0, bestIdx = 0;
+  for (let i = 0; i < lngs.length; i++) {
+    const nxt = i === lngs.length - 1 ? lngs[0] + 360 : lngs[i + 1];
+    const gap = nxt - lngs[i];
+    if (gap > bestGap) { bestGap = gap; bestIdx = i; }
+  }
+  const lngHi = lngs[bestIdx];
+  const lngLo = lngs[(bestIdx + 1) % lngs.length];
+  return { latLo, latHi, lngLo, lngHi };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Build textures
+// ─────────────────────────────────────────────────────────────────────
+
+const TEX_W = 2048, TEX_H = 1024;
+
+const GRID_R = 30,  GRID_G = 130, GRID_B = 60;  // deep green for cell edges
+const HI_R = 255,   HI_G = 215,   HI_B = 0;     // highlighted-cell fill (yellow)
+
+/**
+ * Per-pixel cellId grid for the equirectangular texture.  Built once
+ * (~3M geoCellId evaluations, ~80–150ms) and cached.  Used both to
+ * detect cell-boundary pixels (yellow lines) and to paint the
+ * highlighted cell.  Also approximates cell area-in-km² by counting
+ * pixels per cell with a cos(lat) weighting.
+ */
+let _cellGrid = null;
+let _cellAreaKm2 = null;
+
+function buildCellGrid() {
+  if (_cellGrid) return _cellGrid;
+  const g = new Uint8Array(TEX_W * TEX_H);
+  const areas = new Float64Array(N_CELLS);
+  const EARTH_KM2_PER_PIXEL_AT_EQ = (510_000_000 / (TEX_W * TEX_H)) * Math.PI / 2;
+  // ^ ~510M km² globe / pixels, with cos-weighting integrating to π/2
+  for (let py = 0; py < TEX_H; py++) {
+    const lat = 90 - (py + 0.5) / TEX_H * 180;
+    const cosLat = Math.cos(lat * Math.PI / 180);
+    for (let px = 0; px < TEX_W; px++) {
+      const lng = (px + 0.5) / TEX_W * 360 - 180;
+      const cid = geoCellId(lat, lng, 8);
+      g[py * TEX_W + px] = cid;
+      areas[cid] += cosLat;
+    }
+  }
+  // Normalize: total cos-weighted pixels = TEX_W * (sum of cosLat over rows)
+  let totalWeight = 0;
+  for (let py = 0; py < TEX_H; py++) {
+    const lat = 90 - (py + 0.5) / TEX_H * 180;
+    totalWeight += TEX_W * Math.cos(lat * Math.PI / 180);
+  }
+  const km2PerWeight = 510_000_000 / totalWeight;
+  for (let i = 0; i < N_CELLS; i++) areas[i] *= km2PerWeight;
+  _cellGrid = g;
+  _cellAreaKm2 = areas;
+  return g;
+}
+
+function cellArea(cid) {
+  if (!_cellAreaKm2) buildCellGrid();
+  return _cellAreaKm2[cid] || 0;
+}
+
+/**
+ * Cell-overlay texture: pixel-edge yellow lines wherever two
+ * neighbouring pixels carry different cell IDs (curved S2 cell
+ * boundaries fall out automatically).  Optionally fills the
+ * highlighted cell with a translucent yellow.
+ */
+function buildCellTexture(highlightCellId = null) {
+  const grid = buildCellGrid();
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  const img = ctx.createImageData(TEX_W, TEX_H);
+  const data = img.data;
+
+  // Detect cell boundaries by per-pixel cellId comparison against the
+  // 4 cardinal neighbours.  Antimeridian wrap: left of px=0 is the
+  // pixel at px=TEX_W-1 and vice versa, so cell boundaries running
+  // along ±180° lng are still detected.  Poles: no wrap needed.
+  const wrap = (px) => (px < 0) ? px + TEX_W : (px >= TEX_W) ? px - TEX_W : px;
+
+  for (let py = 0; py < TEX_H; py++) {
+    for (let px = 0; px < TEX_W; px++) {
+      const idx = py * TEX_W + px;
+      const cid = grid[idx];
+      const cidL = grid[py * TEX_W + wrap(px - 1)];
+      const cidR = grid[py * TEX_W + wrap(px + 1)];
+      const cidU = (py > 0)         ? grid[idx - TEX_W] : cid;
+      const cidD = (py < TEX_H - 1) ? grid[idx + TEX_W] : cid;
+      const isEdge =
+        (cidL !== cid) || (cidR !== cid) ||
+        (cidU !== cid) || (cidD !== cid);
+      const off = idx * 4;
+      if (highlightCellId !== null && cid === highlightCellId) {
+        data[off]   = HI_R;
+        data[off+1] = HI_G;
+        data[off+2] = HI_B;
+        data[off+3] = isEdge ? 255 : 110;   // stronger on the outline
+      } else if (isEdge) {
+        data[off]   = GRID_R;
+        data[off+1] = GRID_G;
+        data[off+2] = GRID_B;
+        data[off+3] = 200;
+      } else {
+        // Fill the cell interior with its fold-basin colour: every ocean/sparse
+        // cell shares the hue of the major it folds to, so basins read as one
+        // region. Majors are painted a touch more opaque than the water that
+        // folds into them, so the populated core stands out from its basin.
+        const [r, g, b] = majorColor(canonOf(cid));
+        data[off]   = r;
+        data[off+1] = g;
+        data[off+2] = b;
+        data[off+3] = isMajor(cid) ? 78 : 42;
+      }
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
+}
+
+/**
+ * Hilbert-path texture: draws a single continuous polyline visiting
+ * each cell center in numerical order 0x00 → 0xFF.  Demonstrates that
+ * consecutive cell IDs are also geographically adjacent — the locality
+ * property that motivates using a space-filling curve in the first
+ * place.
+ */
+/**
+ * Numbering-path texture: continuous polyline visiting cell centers
+ * 0x00 → 0xBF in order.  Within each face (32 cells), consecutive
+ * IDs are geographically adjacent (row-major).  Across face
+ * boundaries, the path jumps to the next face.  Useful for showing
+ * the locality property: most consecutive cells are neighbours.
+ *
+ * Each line segment between consecutive centers is drawn as a series
+ * of short steps interpolated through XYZ so that long diagonals
+ * wrap correctly around the sphere instead of cutting through it.
+ */
+function buildHilbertTexture() {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, TEX_W, TEX_H);
+
+  // For each cell, compute its center in lat/lng → equirectangular px.
+  const pts = [];
+  for (let i = 0; i < N_CELLS; i++) {
+    const ll = geoCellCenter(i);
+    if (!ll) continue;
+    pts.push({
+      lat: ll.lat,
+      lng: ll.lng,
+      cid: i,
+    });
+  }
+
+  // Convert each segment to a series of antimeridian-aware sub-strokes.
+  const drawPath = (style, width) => {
+    ctx.strokeStyle = style;
+    ctx.lineWidth   = width;
+    for (let i = 0; i < pts.length - 1; i++) {
+      const a = pts[i], b = pts[i + 1];
+      // Interpolate along great circle in small steps; wrap longitude.
+      const STEPS = 24;
+      ctx.beginPath();
+      for (let s = 0; s <= STEPS; s++) {
+        const t = s / STEPS;
+        // Linear blend on lat is fine for these distances (~5000km/segment);
+        // for lng, take the short way.
+        let dLng = b.lng - a.lng;
+        if (dLng >  180) dLng -= 360;
+        if (dLng < -180) dLng += 360;
+        const lat = a.lat + t * (b.lat - a.lat);
+        const lng = ((a.lng + t * dLng + 540) % 360) - 180;
+        const px = (lng + 180) / 360 * TEX_W;
+        const py = (90  - lat) / 180 * TEX_H;
+        if (s === 0) {
+          ctx.moveTo(px, py);
+        } else {
+          // Break the path if a segment-step crosses the antimeridian
+          // (longitudinal wrap > half-canvas-width).
+          const prevPx = ctx._lastX !== undefined ? ctx._lastX : px;
+          if (Math.abs(px - prevPx) > TEX_W * 0.5) {
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(px, py);
+          } else {
+            ctx.lineTo(px, py);
+          }
+        }
+        ctx._lastX = px;
+      }
+      ctx.stroke();
+      ctx._lastX = undefined;
+    }
+  };
+
+  // Halo behind, then the curve itself.
+  drawPath('rgba(255, 255, 255, 0.7)', 6);
+  drawPath('rgba(180, 60, 30, 0.95)',  2.4);
+
+  // Endpoints
+  const drawDot = (lat, lng, fill) => {
+    const px = (lng + 180) / 360 * TEX_W;
+    const py = (90  - lat) / 180 * TEX_H;
+    ctx.fillStyle = fill;
+    ctx.beginPath(); ctx.arc(px, py, 8, 0, Math.PI * 2); ctx.fill();
+  };
+  drawDot(pts[0].lat,            pts[0].lng,            'rgba(20, 90, 30, 1)');     // start (0x00)
+  drawDot(pts[pts.length-1].lat, pts[pts.length-1].lng, 'rgba(120, 20, 20, 1)');    // end (0xBF)
+
+  return c;
+}
+
+function buildLandTexture(geoJSON, withBorders) {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  ctx.fillStyle = '#9cc3df';   // ocean — soft blue
+  ctx.fillRect(0, 0, TEX_W, TEX_H);
+  ctx.fillStyle = '#dccba0';   // land — warm cream
+  for (const f of geoJSON.features) {
+    const g = f.geometry; if (!g) continue;
+    const polys = g.type === 'Polygon' ? [g.coordinates]
+      : g.type === 'MultiPolygon' ? g.coordinates : [];
+    for (const poly of polys) for (const ring of poly) fillRing(ctx, ring);
+  }
+  if (withBorders) {
+    ctx.strokeStyle = '#3a2e1c';   // dark cocoa for legible borders
+    ctx.lineWidth = 0.9;
+    for (const f of geoJSON.features) {
+      const g = f.geometry; if (!g) continue;
+      const polys = g.type === 'Polygon' ? [g.coordinates]
+        : g.type === 'MultiPolygon' ? g.coordinates : [];
+      for (const poly of polys) for (const ring of poly) strokeRing(ctx, ring);
+    }
+  }
+  return c;
+}
+// Antimeridian-aware polygon fill / stroke.  Ported from dht-sim's
+// Globe.js — fixes Russia, Fiji, Aleutians, Antarctic rings that
+// would otherwise spill straight across the canvas.
+function fillRing(ctx, ring) {
+  if (ring.length < 3) return;
+  // Unwrap longitudes so consecutive points are within 180° of each other.
+  const pts = [];
+  for (let i = 0; i < ring.length; i++) {
+    let lng = ring[i][0], lat = ring[i][1];
+    if (i > 0) {
+      const pLng = pts[i - 1][0];
+      while (lng - pLng >  180) lng -= 360;
+      while (lng - pLng < -180) lng += 360;
+    }
+    pts.push([lng, lat]);
+  }
+  let minLng = pts[0][0], maxLng = pts[0][0];
+  for (const [lng] of pts) {
+    if (lng < minLng) minLng = lng;
+    if (lng > maxLng) maxLng = lng;
+  }
+  const drawFill = (shift) => {
+    ctx.beginPath();
+    for (let i = 0; i < pts.length; i++) {
+      const x = ((pts[i][0] + shift + 180) / 360) * TEX_W;
+      const y = ((90 - pts[i][1]) / 180) * TEX_H;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.fill();
+  };
+  drawFill(0);
+  if (maxLng >  180) drawFill(-360);
+  if (minLng < -180) drawFill( 360);
+}
+function strokeRing(ctx, ring) {
+  if (ring.length < 3) return;
+  ctx.beginPath();
+  let started = false, pLng = null, pLat = null;
+  for (const [lng, lat] of ring) {
+    const x = ((lng + 180) / 360) * TEX_W;
+    const y = ((90  - lat) / 180) * TEX_H;
+    if (started && pLng !== null && Math.abs(lng - pLng) > 180) {
+      const adjLng = lng + (lng - pLng > 180 ? -360 : 360);
+      const bndLng = adjLng < pLng ? -180 : 180;
+      const tCross = (bndLng - pLng) / (adjLng - pLng);
+      const bndLat = pLat + tCross * (lat - pLat);
+      ctx.lineTo(((bndLng + 180) / 360) * TEX_W, ((90 - bndLat) / 180) * TEX_H);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(((-bndLng + 180) / 360) * TEX_W, ((90 - bndLat) / 180) * TEX_H);
+    }
+    if (!started) { ctx.moveTo(x, y); started = true; }
+    else ctx.lineTo(x, y);
+    pLng = lng; pLat = lat;
+  }
+  ctx.stroke();
+}
+
+function buildLabelTexture() {
+  const c = document.createElement('canvas');
+  c.width = TEX_W; c.height = TEX_H;
+  const ctx = c.getContext('2d');
+  ctx.font = 'bold 15px Inconsolata, monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 2;
+  const NAME_FONT = 'bold 9px Inconsolata, monospace';
+  const CODE_FONT = '7px Inconsolata, monospace';
+  const xy = (ll) => [ (ll.lng + 180) / 360 * TEX_W, (90 - ll.lat) / 180 * TEX_H ];
+  const FOLD_FONT = '7px Inconsolata, monospace';
+  // MAJOR label: bold animal name (line 1) + its own code beneath (line 2).
+  const drawMajor = (px, py, name, code) => {
+    ctx.font = NAME_FONT;
+    ctx.fillStyle = '#1a1a1a';
+    ctx.strokeText(name, px, py - 5);
+    ctx.fillText(name, px, py - 5);
+    ctx.font = CODE_FONT;
+    ctx.fillStyle = '#7a5a2a';
+    ctx.strokeText(hex(code), px, py + 5);
+    ctx.fillText(hex(code), px, py + 5);
+  };
+  // FOLDED cell: the canonical major's name in small faint text, so no cell is
+  // blank and each ocean/sparse cell visibly reads as part of its basin.
+  const drawFolded = (px, py, name) => {
+    ctx.font = FOLD_FONT;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+    ctx.fillStyle = 'rgba(60,60,60,0.62)';
+    ctx.strokeText(name, px, py);
+    ctx.fillText(name, px, py);
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 2;
+  };
+  // Every cell gets a name. Majors are bold + carry their code; the ~108
+  // ocean/sparse cells show — faintly — the major they fold into.
+  for (let cid = 0; cid < N_CELLS; cid++) {
+    const [px, py] = xy(geoCellCenter(cid));
+    if (isMajor(cid)) drawMajor(px, py, MAJORS[cid], cid);
+    else              drawFolded(px, py, regionName(cid));   // regionName = canonical major
+  }
+  return c;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Three.js scene
+// ─────────────────────────────────────────────────────────────────────
+
+const container = document.getElementById('globeContainer');
+const canvas    = document.getElementById('globeCanvas');
+
+const scene  = new THREE.Scene();
+scene.background = new THREE.Color(0xf5efe0);
+const camera = new THREE.PerspectiveCamera(40, 1, 0.1, 100);
+camera.position.set(0, 0, 3.4);
+
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+function resize() {
+  const w = container.clientWidth, h = container.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  camera.updateProjectionMatrix();
+}
+window.addEventListener('resize', resize);
+resize();
+
+const controls = new OrbitControls(camera, canvas);
+controls.enablePan = false;
+controls.minDistance = 1.4;
+controls.maxDistance = 6;
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+controls.autoRotate = true;
+controls.autoRotateSpeed = 0.4;
+
+scene.add(new THREE.AmbientLight(0xffffff, 1.0));
+
+const geom = new THREE.SphereGeometry(1, 96, 96);
+
+// Three layers, slightly offset radially so they composite properly:
+//   base land  (radius 1.000)
+//   cell tints (radius 1.002, transparent)
+//   borders    (radius 1.004, transparent)  — built into land tex for now
+//   labels     (radius 1.006, transparent)
+
+let landMesh, cellMesh, labelMesh, hilbertMesh;
+let cellHighlightId = null;
+let geoJSON = null;
+
+function makeMesh(texCanvas, radius, transparent) {
+  const tex = new THREE.CanvasTexture(texCanvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.anisotropy = 4;
+  const g = new THREE.SphereGeometry(radius, 96, 96);
+  const m = new THREE.MeshBasicMaterial({
+    map: tex,
+    transparent,
+    depthWrite: !transparent,
+  });
+  return new THREE.Mesh(g, m);
+}
+
+function rebuild() {
+  // Remove existing
+  for (const m of [landMesh, cellMesh, hilbertMesh, labelMesh]) {
+    if (m) { scene.remove(m); m.geometry.dispose(); m.material.map.dispose(); m.material.dispose(); }
+  }
+  landMesh = cellMesh = hilbertMesh = labelMesh = null;
+
+  if (geoJSON) {
+    const showBorders = document.getElementById('toggleBorders').checked;
+    landMesh = makeMesh(buildLandTexture(geoJSON, showBorders), 1.000, false);
+    scene.add(landMesh);
+  }
+  if (document.getElementById('toggleCells').checked) {
+    cellMesh = makeMesh(buildCellTexture(cellHighlightId), 1.002, true);
+    scene.add(cellMesh);
+  }
+  if (document.getElementById('toggleHilbert').checked) {
+    hilbertMesh = makeMesh(buildHilbertTexture(), 1.004, true);
+    scene.add(hilbertMesh);
+  }
+  if (document.getElementById('toggleLabels').checked) {
+    labelMesh = makeMesh(buildLabelTexture(), 1.006, true);
+    scene.add(labelMesh);
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Raycast → hover info
+// ─────────────────────────────────────────────────────────────────────
+
+const raycaster = new THREE.Raycaster();
+const ndc = new THREE.Vector2();
+
+function updateHover(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  ndc.x = ((clientX - rect.left) / rect.width)  *  2 - 1;
+  ndc.y = ((clientY - rect.top)  / rect.height) * -2 + 1;
+  raycaster.setFromCamera(ndc, camera);
+  const targets = [landMesh, cellMesh].filter(Boolean);
+  const hits = raycaster.intersectObjects(targets, false);
+  if (hits.length === 0) {
+    document.getElementById('hoverCell').textContent = '—';
+    document.getElementById('hoverLatLng').textContent = '—';
+    document.getElementById('hoverBounds').textContent = '—';
+    document.getElementById('hoverArea').textContent = '—';
+    return;
+  }
+  const p = hits[0].point;
+  const { lat, lng } = xyzToLatLng(p.x, p.y, p.z);
+  const cid = geoCellId(lat, lng, 8);
+  const face = geoCellFace(cid);
+  const b = cellBoundsApprox(cid);
+  const area = cellArea(cid);
+  document.getElementById('hoverCell').textContent =
+    cellLabel(cid) + '  (' + cid + ')  face ' + face;
+  document.getElementById('hoverLatLng').textContent =
+    lat.toFixed(2) + '°, ' + lng.toFixed(2) + '°';
+  if (b) {
+    document.getElementById('hoverBounds').textContent =
+      `${b.latLo.toFixed(1)}…${b.latHi.toFixed(1)}°  ${b.lngLo.toFixed(1)}…${b.lngHi.toFixed(1)}°`;
+    document.getElementById('hoverArea').textContent =
+      Math.round(area / 1000).toLocaleString() + ' × 1000 km²';
+  }
+}
+canvas.addEventListener('pointermove', e => updateHover(e.clientX, e.clientY));
+
+// ─────────────────────────────────────────────────────────────────────
+// Legend (192 cell swatches)
+// ─────────────────────────────────────────────────────────────────────
+
+const legend       = document.getElementById('legend');
+const legendCaption = document.getElementById('legendCaption');
+
+const FACE_NAMES = ['+X (lng 0°)', '+Y (lng +90°)', '+Z (north)',
+                    '-X (lng ±180°)', '-Y (lng -90°)', '-Z (south)'];
+
+/**
+ * Render the 192-cell legend in one of two layouts:
+ *
+ *   "index"   — 12 rows × 16 cols, swatches in numerical reading
+ *               order 0x00..0xBF.  Position has no geographic meaning.
+ *
+ *   "spatial" — six 4×8 mini-grids, one per cube face, labelled by
+ *               face axis.  Within each mini-grid, the swatch at
+ *               (sBin, tBin) is the cell at that face-local position.
+ *               This is the "unfolded cube" view of the address space.
+ */
+function renderLegend(mode) {
+  legend.innerHTML = '';
+
+  if (mode === 'index') {
+    // Single flat grid, 16 columns × 12 rows = 192.
+    legend.style.gridTemplateColumns = 'repeat(16, 1fr)';
+    legend.style.gap = '2px';
+    for (let cid = 0; cid < N_CELLS; cid++) {
+      legend.appendChild(makeSwatch(cid, mode));
+    }
+  } else {
+    // Spatial: 6 face mini-grids, each 8 cols × 4 rows.  Stack in 3 cols × 2 rows of mini-grids.
+    legend.style.gridTemplateColumns = 'repeat(3, 1fr)';
+    legend.style.gap = '10px';
+    for (let face = 0; face < 6; face++) {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'display:flex; flex-direction:column; gap:2px;';
+      const label = document.createElement('div');
+      label.style.cssText = 'font-size:0.72rem; color:#888; font-family:Inconsolata,monospace;';
+      label.textContent = `face ${face} · ${FACE_NAMES[face]}`;
+      wrap.appendChild(label);
+      const grid = document.createElement('div');
+      grid.style.cssText = 'display:grid; grid-template-columns:repeat(8,1fr); gap:2px;';
+      for (let sBin = 0; sBin < 4; sBin++) {
+        for (let tBin = 0; tBin < 8; tBin++) {
+          const cid = face * 32 + sBin * 8 + tBin;
+          grid.appendChild(makeSwatch(cid, mode));
+        }
+      }
+      wrap.appendChild(grid);
+      legend.appendChild(wrap);
+    }
+  }
+
+  legendCaption.textContent = (mode === 'spatial'
+    ? 'Six 4×8 mini-grids, one per cube face. Each cell sits at its face-local (s, t) position. Cell IDs are face×32 + s×8 + t.'
+    : 'Cells laid out in numerical reading order 0x00 to 0xBF (192 valid IDs). Reserved range 0xC0–0xFF is held for future system messages.')
+    + ' Hover a swatch for its region name.';
+}
+
+function makeSwatch(cid, mode) {
+  const s = document.createElement('div');
+  s.className = 'swatch';
+  if (cid === cellHighlightId) s.classList.add('selected');
+  s.textContent = cid.toString(16).padStart(2, '0').toUpperCase();
+  const face = Math.floor(cid / 32);
+  // Tint by fold-basin colour; MAJORS are solid, folded cells are faded and
+  // dashed so the populated 84 stand out from the ~108 that fold into them.
+  const [r, g, b] = majorColor(canonOf(cid));
+  const major = isMajor(cid);
+  s.style.background = `rgba(${r},${g},${b},${major ? 0.85 : 0.30})`;
+  s.style.color = major ? '#111' : '#555';
+  if (!major) s.style.borderStyle = 'dashed';
+  s.title = cellLabel(cid) + '  (' + cid + ')   face ' + face;
+  s.addEventListener('click', () => {
+    cellHighlightId = (cellHighlightId === cid) ? null : cid;
+    renderLegend(mode);
+    rebuild();
+  });
+  return s;
+}
+
+renderLegend('index');
+
+// Legend layout toggle
+for (const radio of document.querySelectorAll('input[name="legendLayout"]')) {
+  radio.addEventListener('change', e => renderLegend(e.target.value));
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Geolocation pin
+// ─────────────────────────────────────────────────────────────────────
+
+let myPin = null;
+document.getElementById('locateBtn').addEventListener('click', () => {
+  if (!navigator.geolocation) {
+    alert('Geolocation not available.');
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      const lat = pos.coords.latitude;
+      const lng = pos.coords.longitude;
+      const cid = geoCellId(lat, lng, 8);
+      document.getElementById('myLatLng').textContent =
+        lat.toFixed(3) + '°, ' + lng.toFixed(3) + '°';
+      document.getElementById('myCell').textContent =
+        cellLabel(cid) + '  (' + cid + ')';
+      addOrUpdatePin(lat, lng);
+    },
+    err => alert('Geolocation failed: ' + err.message),
+    { enableHighAccuracy: false, timeout: 8000, maximumAge: 600_000 },
+  );
+});
+
+function addOrUpdatePin(lat, lng) {
+  if (myPin) scene.remove(myPin);
+  const { x, y, z } = latLngToXYZ(lat, lng, 1.01);
+  const g = new THREE.SphereGeometry(0.015, 16, 16);
+  const m = new THREE.MeshBasicMaterial({ color: 0xc0392b });
+  myPin = new THREE.Mesh(g, m);
+  myPin.position.set(x, y, z);
+  scene.add(myPin);
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Toggles
+// ─────────────────────────────────────────────────────────────────────
+
+for (const id of ['toggleCells', 'toggleBorders', 'toggleLabels', 'toggleHilbert']) {
+  document.getElementById(id).addEventListener('change', rebuild);
+}
+document.getElementById('toggleAutorotate').addEventListener('change', e => {
+  controls.autoRotate = e.target.checked;
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Load world atlas, then build scene
+// ─────────────────────────────────────────────────────────────────────
+
+(async () => {
+  try {
+    const topoData = await fetch(
+      'https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-110m.json'
+    ).then(r => r.json());
+    geoJSON = topojson.feature(topoData, topoData.objects.countries);
+  } catch (err) {
+    console.warn('World atlas load failed:', err);
+  }
+  rebuild();
+})();
+
+// ─────────────────────────────────────────────────────────────────────
+// Render loop
+// ─────────────────────────────────────────────────────────────────────
+
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+}
+animate();
+</script>
+
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>@axona/protocol — live demos</title>
+  <link rel="canonical" href="https://demo.axona.net/">
+  <style>
+    :root {
+      --rust: #2d7373;
+      --ink: #1a1a1a;
+      --muted: #666;
+      --bg: #fffff8;
+      --card-bg: #fbfbf6;
+      --border: #d8d4ca;
+      --code-bg: #f0ecdf;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+    body {
+      font-family: 'EB Garamond', Georgia, serif;
+      line-height: 1.55;
+      max-width: 780px;
+      margin: 0 auto;
+      padding: 3rem 1.5rem;
+    }
+    h1 {
+      font-weight: 500;
+      letter-spacing: -0.015em;
+      margin: 0 0 0.2em 0;
+      font-size: 2.4rem;
+    }
+    .lede {
+      color: var(--muted);
+      margin: 0 0 2.5rem 0;
+      font-size: 1.05rem;
+    }
+    h2 { font-size: 1.4rem; font-weight: 500; margin: 0 0 0.6rem 0; }
+    code, .mono { font-family: 'Inconsolata', ui-monospace, Menlo, monospace; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; font-size: 0.92em; }
+    a { color: var(--rust); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .demo {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 1.4rem 1.6rem;
+      margin-bottom: 1.4rem;
+      display: block;
+      color: inherit;
+    }
+    .demo:hover {
+      text-decoration: none;
+      border-color: var(--rust);
+      background: #fdfbf2;
+    }
+    .demo h2 { color: var(--rust); }
+    .demo p { margin: 0.5em 0 0 0; color: var(--ink); }
+    .demo .href {
+      display: inline-block;
+      margin-top: 0.6rem;
+      font-family: 'Inconsolata', monospace;
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1rem;
+      border-top: 1px solid var(--border);
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+  </style>
+</head>
+<body>
+  <h1>@axona/protocol</h1>
+  <p class="lede">
+    Pure-JS protocol kernel for the Axona peer-to-peer mesh. Three live
+    demonstrations of what the kernel does.
+  </p>
+
+  <a class="demo" href="/examples/minimal-pubsub-browser/">
+    <h2>Axona Demo</h2>
+    <p>
+      Publish and subscribe to a shared <code>hello-world</code> topic
+      anchored at Virginia, over the live Axona mesh. Open the page in
+      multiple tabs (or on a phone) and every connected peer's
+      messages appear in the subscribe pane. Connects to
+      <code>bridge.axona.net</code> via WebRTC + WebSocket. Mobile-ready,
+      no build step.
+    </p>
+    <span class="href">/examples/minimal-pubsub-browser/</span>
+  </a>
+
+  <a class="demo" href="/examples/s2-region-visualizer/">
+    <h2>S2 region visualizer</h2>
+    <p>
+      Interactive 3D globe showing the 192 S2 cells that anchor every
+      Axona nodeId and pub/sub topic. Hover any point to see which cell
+      it falls in; toggle the Hilbert path to trace the cell numbering
+      order along the real Google S2 level-3 curve. Cell IDs match
+      <code>topBits8(S2.level3.cellId(lat, lng))</code> — full interop
+      with any standard S2 library.
+    </p>
+    <span class="href">/examples/s2-region-visualizer/</span>
+  </a>
+
+  <a class="demo" href="/apps/axona-minimal/">
+    <h2>Axona Minimal</h2>
+    <p>
+      The smallest useful Axona app, in ~60 lines: a topic field, a message
+      field, and a received-messages pane. Publish to a topic, subscribe to a
+      topic, watch what arrives over the live mesh. Open it in two tabs (or on a
+      phone) and each peer's messages show up in the other. The worked example
+      from the programmer-intro talk.
+    </p>
+    <span class="href">/apps/axona-minimal/</span>
+  </a>
+
+  <footer>
+    Source &middot;
+    <a href="https://github.com/axona-net/axona-protocol">github.com/axona-net/axona-protocol</a>
+    &middot;
+    Architecture note &middot;
+    <a href="https://github.com/axona-net/axona-docs/blob/main/architecture/">axona-docs</a>
+  </footer>
+</body>
+</html>
