@@ -189,9 +189,52 @@ export class AxonaManager {
   _route(targetBig, type, payload) {
     this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET });
   }
+  // Pop a dead waypoint and keep routing. When the via chain empties, _send
+  // falls through to the TOPIC ID — that is deliberate and load-bearing: it is
+  // how a subscriber pinned to a dead root re-homes onto a fresh one
+  // (smoke_pubsub_core "via dead-waypoint fall-through"). Do NOT add a
+  // terminal guard here; the decline path needs one, this path must not have
+  // one. See _rerouteDeclined.
   _reroute(type, payload) {
     payload.via = (Array.isArray(payload.via) ? payload.via : []).slice(1);
     this._send(type, payload);
+  }
+
+  /**
+   * Forward a message this node REFUSED to seat, one via-hop onward.
+   * Returns TRUE only if it was actually handed to a DIFFERENT node.
+   *
+   * Why this cannot just call _reroute: a decline site is only reached when
+   * this node is TERMINAL for the topic — nobody is closer. So the topic-id
+   * fall-through that makes _reroute correct for a dead waypoint is exactly
+   * wrong here: the DHT hands the message straight back to us, and
+   *   _onPub -> _becomeRoot -> admitRole -> refuse -> reroute -> _onPub -> ...
+   * spins synchronously and unbounded. No timers, no sockets, no health check,
+   * no logs — a hard process wedge. It took the east production bridge down for
+   * ~50 min on 2026-07-27 (bridge fence + directory publish, empty synaptome).
+   *
+   * So: an explicit surviving via hop is a real forward. Anything else is the
+   * end of the line, and the caller must say so rather than retry.
+   *
+   * Today only the bridge fence refuses at the HARD tier, so only a bridge can
+   * reach this. The moment a second HARD reason exists, every node can.
+   */
+  _rerouteDeclined(type, payload) {
+    const via = (Array.isArray(payload.via) ? payload.via : []).slice(1);
+    payload.via = via;
+    if (!via.length) return false;                     // topic-id fall-through returns here
+    if (idBig(via[0]) === this.nodeId) return false;   // via points at us: same trap
+    this._send(type, payload);
+    return true;
+  }
+
+  /**
+   * A refused message with nowhere left to go. Terminal and undeliverable.
+   * Silent loss is what the reroute was added to prevent, so this is LOUD:
+   * a real failure of placement, not routine.
+   */
+  _undeliverable(type, topicBig, why) {
+    this._log('warn', 'undeliverable', { topic: idHex(topicBig).slice(0, 12), type, why });
   }
 
   // True iff a topic (or any id) shares this node's region byte (S2 prefix). The

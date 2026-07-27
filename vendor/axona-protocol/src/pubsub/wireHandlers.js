@@ -99,7 +99,14 @@ export const wireHandlersMethods = {
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'sub-terminal');
-    if (!role) return 'consumed';        // admission refused (bridge fence) — do not seat here
+    if (!role) {
+      // Admission refused (bridge fence) — do not seat here. This used to return
+      // silently, which is the SAME missing concept as the PUB loop wearing the
+      // opposite face: the subscriber never attaches and nobody is told. Forward
+      // it to a node that can seat it, or record that there is no such node.
+      if (!this._rerouteDeclined(T.SUB, payload)) this._undeliverable(T.SUB, topicBig, 'refused-no-forward');
+      return 'consumed';
+    }
     this._maybePromoteRoot(role, payload, meta);
 
     const subHex = lc(payload.subscriberId);
@@ -266,7 +273,13 @@ export const wireHandlersMethods = {
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
     // swallowed. Dropping it here is silent message loss.
-    if (!role) { this._reroute(T.PUB, payload); return 'consumed'; }
+    if (!role) {
+      // Declined (bridge fence). Forward if there is a real next hop; if there
+      // is not, STOP. The decline path used to call _reroute, which fell through
+      // and wedged the process — see its doc comment.
+      if (!this._rerouteDeclined(T.PUB, payload)) this._undeliverable(T.PUB, topicBig, 'refused-no-forward');
+      return 'consumed';
+    }
     this._maybePromoteRoot(role, payload, meta);
     // Only the root (the topic terminus) stamps. A non-root relay can only reach
     // here for a via-routed publish (a security waypoint) — pop the via and
@@ -664,7 +677,12 @@ export const wireHandlersMethods = {
       if (closer) { this._deferToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
-    if (!role) { this._reroute(T.KILL, payload); return 'consumed'; }   // refused: forward, never lose a tombstone
+    if (!role) {
+      // A tombstone is the one thing we least want to lose, but forwarding it
+      // to ourselves loses it AND wedges the node. Forward or stop, loudly.
+      if (!this._rerouteDeclined(T.KILL, payload)) this._undeliverable(T.KILL, topicBig, 'refused-no-forward');
+      return 'consumed';
+    }
     const kill = payload.kill;
     const target = kill?.msgId;
     if (!target) return 'consumed';
