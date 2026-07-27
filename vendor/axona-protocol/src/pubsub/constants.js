@@ -146,6 +146,35 @@ export const ROLE_GRACE_MS = 90_000;   // refuse root/sub MANAGEMENT this long a
 // grace, a node accepts at most this many NEW roles per refresh tick, so a
 // backlog is absorbed over seconds instead of in one event-loop-blocking burst.
 export const ROLE_ADMIT_PER_TICK = 4;
+
+// ── Capacity as a MEASUREMENT, not an inventory (v4.47.0) ──────────────────
+// MAX_ROLES (above) counts roles. A count is the wrong instrument: 96 idle
+// roles is nothing, 96 hot ones may be fatal, and the same count means
+// different things on different hardware. What matters is whether a node can
+// SERVICE what it holds inside the deadlines the protocol already imposes.
+//
+// Two deadlines already exist and are the honest denominators:
+//
+//   DROP_MS (180s) — a role/subscriber unserviced this long is treated as DEAD
+//     by its cohort. So (age of my least-recently-serviced role) / DROP_MS is
+//     literally "fraction of the way to silently rotting a role". At 1.0 a role
+//     HAS rotted and nobody was told.
+//
+//   HELLO_DEADLINE_MS (5s) — the bridge closes a client that fails to complete
+//     its hello in this window (the misleadingly-named state=upgrade-required).
+//     Event-loop lag / HELLO_DEADLINE_MS is "fraction of the way to being
+//     kicked off the network". This is the #332 spiral, made observable.
+//
+// Both are OBSERVED (wall-clock deltas over real state), not derived from the
+// role count. That distinction is the whole point: ceil(roles/BUDGET)*tick is
+// a linear function of the count — MAX_ROLES in different units — and would
+// have dressed arithmetic up as telemetry.
+export const HELLO_DEADLINE_MS = 5_000;   // bridge client-hello budget (mirror of the bridge's own)
+
+// Declare saturated at this fraction of a deadline. 0.6 leaves room to shed
+// pressure before anything is actually lost — a node that waits until 1.0 has
+// already dropped history.
+export const SATURATION_PRESSURE = 0.6;
 export const DELEGATE_BATCH  = 8;               // subscribers handed off when promoting a child
 export const MAX_VIA         = 8;               // ordered-waypoint list length cap (wire sanity)
 export const VIA_HOP_BUDGET  = 8;               // hops per via leg (enforced kernel-side, Phase 2+)

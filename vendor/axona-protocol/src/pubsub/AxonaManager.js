@@ -56,7 +56,8 @@ import { isRegionLockEnforced as _regionLock,
          COLD_BURST_SLOW_INTERVAL_MS, COLD_PEER_THRESHOLD,
          FIRST_PUBLISH_RESEND_MS, METRICS_LEASE_MS, METRICS_PUB_MS,
          METRICS_COALESCE_MS,
-         MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK } from './constants.js';
+         MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
+         HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -118,6 +119,13 @@ export class AxonaManager {
     this._admitTickAt      = 0;         // window start for paced admission
     this._admitTickCount   = 0;         // roles admitted in the current window
     this._admitRefusals    = { bridge: 0, 'not-seated': 0, saturated: 0, paced: 0, floored: 0 };
+
+    // ── Capacity telemetry (v4.47.0) — OBSERVED, never derived from the count ──
+    this._tickAt      = 0;   // _now() at the START of the last refresh tick
+    this._tickLagMs   = 0;   // observed: (gap between tick starts) - refreshIntervalMs, floored at 0
+    this._tickDurMs   = 0;   // observed: how long the last tick body took to run
+    this._tickLagMax  = 0;   // high-water lag since start (a single stall is the #332 signature)
+    this._tickStalls  = 0;   // ticks whose lag exceeded HELLO_DEADLINE_MS — i.e. long enough to be kicked
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
@@ -225,9 +233,68 @@ export class AxonaManager {
     return !this._rootClaim.meshBare();
   }
 
-  /** Is this node already carrying as much as it declared it can? */
+  /**
+   * CAPACITY AS A MEASUREMENT (v4.47.0).
+   *
+   * Every number here is observed — a wall-clock delta over real state — and
+   * every pressure has a denominator that is an actual protocol deadline, so
+   * "how close am I to failing" has a literal answer rather than a vibe.
+   *
+   *   servicePressure = age of my least-recently-serviced role / DROP_MS
+   *     DROP_MS is when a cohort gives up on an unserviced role. At 1.0 a role
+   *     HAS silently rotted. This catches every cause at once — skipped ticks,
+   *     event-loop stalls, budget starvation, GC pauses — because it measures
+   *     the outcome (staleness) rather than any single mechanism.
+   *
+   *   helloPressure = observed tick lag / HELLO_DEADLINE_MS
+   *     The bridge closes a client that misses its hello window. At 1.0 this
+   *     node is being kicked off the network. This is the #332 join-storm
+   *     spiral expressed as a number the node can read about itself.
+   *
+   * NOT included: ceil(roles / BUDGET) * tick. That is a linear function of the
+   * role count — MAX_ROLES in different units — and would be arithmetic wearing
+   * a telemetry costume.
+   */
+  inspectCapacity() {
+    const now = this._now();
+    let worstAgeMs = 0, overdue = 0, unserviced = 0;
+    for (const role of this.axonRoles.values()) {
+      const at = role.sync?.lastServicedAt || 0;
+      if (!at) { unserviced++; continue; }          // never serviced yet (just born) — not yet debt
+      const age = now - at;
+      if (age > worstAgeMs) worstAgeMs = age;
+      if (age > ROOT_REPLICATE_FULL_MS) overdue++;  // past its own service interval
+    }
+    const roles = this.axonRoles.size;
+    return {
+      roles,
+      overdue,                                       // roles I am demonstrably failing to keep up with
+      overdueFrac: roles ? +(overdue / roles).toFixed(3) : 0,
+      unserviced,                                    // born but not yet reached by a tick
+      worstAgeMs,
+      servicePressure: +(worstAgeMs / this.dropMs).toFixed(3),
+      tickLagMs: this._tickLagMs,
+      tickLagMaxMs: this._tickLagMax,
+      tickDurMs: this._tickDurMs,
+      tickStalls: this._tickStalls,
+      helloPressure: +(this._tickLagMax / HELLO_DEADLINE_MS).toFixed(3),
+    };
+  }
+
+  /**
+   * Is this node failing to service what it holds?
+   *
+   * Replaces the old `axonRoles.size >= MAX_ROLES`. That asked about inventory;
+   * this asks about capability, which is the question that actually predicts
+   * failure. MAX_ROLES survives only as a far-off absolute backstop for the
+   * pathological case where telemetry itself is broken (no tick has ever run,
+   * so every pressure reads 0) — it must never be the primary signal again.
+   */
   saturated() {
-    return this.axonRoles.size >= this._maxRoles;
+    const c = this.inspectCapacity();
+    if (c.servicePressure >= SATURATION_PRESSURE) return true;   // rotting roles
+    if (c.helloPressure   >= SATURATION_PRESSURE) return true;   // about to be kicked
+    return c.roles >= this._maxRoles * 8;                        // telemetry-dead backstop
   }
 
   /**
@@ -335,6 +402,7 @@ export class AxonaManager {
       neverRoot: this._neverRoot,
       graceRemainingMs: Math.max(0, this._roleGraceMs - (this._now() - this._joinedAt)),
       refusals: { ...this._admitRefusals },
+      capacity: this.inspectCapacity(),
     };
   }
 

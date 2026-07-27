@@ -21,6 +21,7 @@ import {
   EMPTY_ROOT_PROBE_FANOUT, HANDOFF_ACK_MS, HANDOFF_TRIES,
   HANDOFF_ACK_PER_TOPIC_MS, HANDOFF_ACK_MAX_MS,
   ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
+  HELLO_DEADLINE_MS,
   INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
@@ -29,6 +30,26 @@ import { makeRole } from './rootClaim.js';
 export const repairPlaneMethods = {
   async refreshTick() {
     const now = this._now();
+
+    // ── Observed tick timing (v4.47.0) ────────────────────────────────────
+    // The gap between tick STARTS, minus the interval we asked for, is the
+    // event-loop lag: the wall-clock time this node was unable to run its own
+    // scheduled work. That is the #332 mechanism measured directly rather than
+    // inferred — a node whose lag approaches the bridge's 5s hello window is
+    // about to be closed, and can now know it before it happens.
+    if (this._tickAt) {
+      const gap = now - this._tickAt;
+      this._tickLagMs = Math.max(0, gap - this.refreshIntervalMs);
+      if (this._tickLagMs > this._tickLagMax) this._tickLagMax = this._tickLagMs;
+      if (this._tickLagMs >= HELLO_DEADLINE_MS) this._tickStalls++;
+    }
+    this._tickAt = now;
+
+    // Stamp every role this tick is about to service. Done up-front and for
+    // ALL natures: the measurement must reflect "a tick reached this role",
+    // and a stamp buried behind a per-nature branch would read as debt on
+    // roles that are simply cheap to service.
+    for (const role of this.axonRoles.values()) if (role.sync) role.sync.lastServicedAt = now;
 
     // 1. Renew toward our upstream: app subscriptions + non-root relay roles
     //    (a root has no parent — its self-loop is a no-op, so we skip it).
@@ -939,7 +960,18 @@ export const repairPlaneMethods = {
   // ── lifecycle: renewal + eviction + TTL sweep ────────────────────────
   start() {
     if (this._timer) return;
-    this._timer = setInterval(() => { this.refreshTick().catch(() => {}); }, this.refreshIntervalMs);
+    // Duration is measured HERE, not inside refreshTick: the tick is async with
+    // several awaits, so a tail assignment inside the body would stop the clock
+    // before the awaited work finished and under-report every slow tick.
+    // Duration = work this node DID; lag (measured at tick start) = time it was
+    // DENIED. A long duration with low lag is busy-but-healthy; high lag is a
+    // node losing the event loop, which is the failure that gets it kicked.
+    this._timer = setInterval(() => {
+      const t0 = this._now();
+      this.refreshTick()
+        .catch(() => {})
+        .finally(() => { this._tickDurMs = Math.max(0, this._now() - t0); });
+    }, this.refreshIntervalMs);
     if (typeof this._timer.unref === 'function') this._timer.unref();
   },
 

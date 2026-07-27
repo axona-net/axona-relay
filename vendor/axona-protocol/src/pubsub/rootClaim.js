@@ -81,6 +81,10 @@ export function makeRole(topicId, isRoot) {
     sync: {
       sig: '',                       // (when ROOT) state signature at the last FULL replica push (4.24.1 delta gate)
       lastFullAt: 0,                 // (when ROOT) _now() of the last FULL push (backstop re-arms at ROOT_REPLICATE_FULL_MS)
+      lastServicedAt: 0,             // _now() of the last time the refresh tick SERVICED this role (any nature).
+                                     // lastFullAt above is roots-only; this one is universal, because capacity
+                                     // is measured as "age of my least-recently-serviced role / DROP_MS" and a
+                                     // partial field would under-report a node drowning in non-root work.
       probeTries: 0,                 // empty-self-root cohort pulls fired (4.24.0; quenches at EMPTY_ROOT_PROBE_MAX)
       probeAt: 0,                    // _now() of the last cohort pull (rate-limits the refreshTick re-probe)
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
