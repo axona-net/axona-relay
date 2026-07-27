@@ -37,6 +37,23 @@ rm -rf "${VENDOR_DST}"
 mkdir -p "$(dirname "${VENDOR_DST}")"
 cp -R "${PROTOCOL_SRC}" "${VENDOR_DST}"
 
+# Sync the PROVENANCE files too, not just the code.
+#
+# This script used to copy src/ alone. The vendored package.json and README.md
+# were therefore hand-written once and never updated again — so the tree carried
+# code from 4.48.0 under a package.json declaring 4.46.0, and a README whose
+# documentation links had 404'd for four kernel releases. A vendored copy that
+# misstates its own version is worse than no version at all: it answers the
+# question "what is in here?" confidently and wrongly.
+PROTOCOL_ROOT="$(cd "$(dirname "${PROTOCOL_SRC}")" && pwd)"
+VENDOR_ROOT="$(dirname "${VENDOR_DST}")"
+for f in package.json README.md LICENSE; do
+  if [ -f "${PROTOCOL_ROOT}/${f}" ]; then
+    cp "${PROTOCOL_ROOT}/${f}" "${VENDOR_ROOT}/${f}"
+    echo "  ✓ synced ${f}"
+  fi
+done
+
 echo "→ Completeness check (vendored tree must mirror the kernel src/ exactly)"
 if ! diff -rq "${PROTOCOL_SRC}" "${VENDOR_DST}" > /dev/null; then
   echo "✗ vendored tree differs from the kernel source after copy:"

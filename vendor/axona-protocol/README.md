@@ -27,7 +27,7 @@ Two design commitments shape everything here:
 ## Install
 
 ```bash
-npm install github:axona-net/axona-protocol#v4.38.0
+npm install github:axona-net/axona-protocol#v4.48.0
 ```
 
 Pure JS, ESM only, no native dependencies in the browser. Node ≥ 20 or any
@@ -60,10 +60,10 @@ Everything lives in [axona-docs](https://github.com/axona-net/axona-docs):
 | You are… | Read |
 |---|---|
 | Deciding whether to care | [The Axona Whitepaper](https://github.com/axona-net/axona-docs/tree/main/whitepaper) — the manifesto and the machinery, one document |
-| A programmer starting out | [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v4.27.1.md) → [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v4.27.1.md) |
-| Looking up a call | [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v4.27.1.md) |
-| Running infrastructure | [Services Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Services-Guide-v4.27.1.md) — bridges, relays, CLI, MCP |
-| **An AI coding agent** | [AI Grounding](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-AI-Grounding-v4.30.0.md) (keep in context) + [AI Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-AI-Reference-v4.30.0.md) — also discoverable as [`llms.txt`](https://github.com/axona-net/axona-docs/blob/main/llms.txt) |
+| A programmer starting out | [Quick Start](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Quick-Start-v4.48.0.md) → [Programmer Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Programmer-Guide-v4.48.0.md) |
+| Looking up a call | [API Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-API-Reference-v4.48.0.md) |
+| Running infrastructure | [Services Guide](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-Services-Guide-v4.48.0.md) — bridges, relays, CLI, MCP |
+| **An AI coding agent** | [AI Grounding](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-AI-Grounding-v4.48.0.md) (keep in context) + [AI Reference](https://github.com/axona-net/axona-docs/blob/main/programmer-guide/Axona-AI-Reference-v4.48.0.md) — also discoverable as [`llms.txt`](https://github.com/axona-net/axona-docs/blob/main/llms.txt) |
 
 Axona was designed with AI in mind — agents are first-class network
 participants — and built with significant help from an AI. The AI-facing
