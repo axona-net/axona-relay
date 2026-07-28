@@ -171,6 +171,32 @@ export const ROLE_ADMIT_PER_TICK = 4;
 // have dressed arithmetic up as telemetry.
 export const HELLO_DEADLINE_MS = 5_000;   // bridge client-hello budget (mirror of the bridge's own)
 
+// ── The tick-lag observation WINDOW (v4.49.0) ──────────────────────────────
+// 4.47.0 recorded tick lag as an ALL-TIME high-water mark, which made
+// helloPressure a ratchet: it could rise and could never fall. One 60s browser
+// tab suspension — what every phone does on screen lock — put helloPressure at
+// 11.0 (18x the 0.6 threshold) and left it there. Measured: still saturated
+// after 2,050 healthy ticks (~2.8h). A saturated node refuses HANDOFF, so every
+// backgrounded browser peer silently stopped being somewhere a departing node's
+// last copy of a topic's history could land.
+//
+// The replacement is a rolling maximum over the last N ticks. A WINDOW, not a
+// decay constant, deliberately: a decay factor has no natural unit here (why
+// 0.95 and not 0.9?) and its recovery time is an emergent property you have to
+// derive. A tick count states the recovery bound directly — "a stall stops
+// counting against you N ticks after it stops happening" — which is the
+// property the fence asserts and the property an operator needs to reason about.
+//
+// 12 ticks x the 5s refresh interval = ~60s of wall clock. (The window is in
+// TICKS, so its wall-clock length follows refreshIntervalMs; every consumer in
+// the fleet uses the 5s default — verified, no overrides in kernel, relay or
+// bridge.) Long enough that a genuinely struggling node stays
+// saturated across its bad patch; short enough that a recovered one is trusted
+// again within a minute. The window only advances when a tick RUNS: a frozen
+// node writes no samples and keeps its old reading, which is correct — we have
+// no evidence of health from a node that isn't running.
+export const TICK_LAG_WINDOW = 12;        // ticks retained for the rolling lag maximum
+
 // Declare saturated at this fraction of a deadline. 0.6 leaves room to shed
 // pressure before anything is actually lost — a node that waits until 1.0 has
 // already dropped history.

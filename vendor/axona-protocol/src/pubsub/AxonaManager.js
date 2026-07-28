@@ -57,7 +57,8 @@ import { isRegionLockEnforced as _regionLock,
          FIRST_PUBLISH_RESEND_MS, METRICS_LEASE_MS, METRICS_PUB_MS,
          METRICS_COALESCE_MS,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
-         HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS } from './constants.js';
+         HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
+         TICK_LAG_WINDOW } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -124,8 +125,18 @@ export class AxonaManager {
     this._tickAt      = 0;   // _now() at the START of the last refresh tick
     this._tickLagMs   = 0;   // observed: (gap between tick starts) - refreshIntervalMs, floored at 0
     this._tickDurMs   = 0;   // observed: how long the last tick body took to run
-    this._tickLagMax  = 0;   // high-water lag since start (a single stall is the #332 signature)
     this._tickStalls  = 0;   // ticks whose lag exceeded HELLO_DEADLINE_MS — i.e. long enough to be kicked
+    // ROLLING lag window (v4.49.0). _tickLagMax is the max over the last
+    // TICK_LAG_WINDOW ticks — the value helloPressure and therefore admission
+    // read. It must be able to FALL; as an all-time mark it was a ratchet that
+    // permanently saturated any node after one browser-tab suspension.
+    this._tickLagRing = new Array(TICK_LAG_WINDOW).fill(0);
+    this._tickLagIdx  = 0;
+    this._tickLagMax  = 0;   // DERIVED: max(_tickLagRing) — recomputed each tick
+    // Kept for diagnosis only, never for control: the worst lag ever observed.
+    // Losing this on the window would have thrown away the evidence that made
+    // the latch findable in the first place.
+    this._tickLagPeak = 0;
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
@@ -317,7 +328,9 @@ export class AxonaManager {
       worstAgeMs,
       servicePressure: +(worstAgeMs / this.dropMs).toFixed(3),
       tickLagMs: this._tickLagMs,
-      tickLagMaxMs: this._tickLagMax,
+      tickLagMaxMs: this._tickLagMax,      // ROLLING max over the last TICK_LAG_WINDOW ticks (v4.49.0)
+      tickLagWindow: this._tickLagRing.length,
+      tickLagPeakMs: this._tickLagPeak,    // all-time worst — DIAGNOSIS ONLY, drives nothing
       tickDurMs: this._tickDurMs,
       tickStalls: this._tickStalls,
       helloPressure: +(this._tickLagMax / HELLO_DEADLINE_MS).toFixed(3),

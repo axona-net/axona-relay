@@ -40,7 +40,16 @@ export const repairPlaneMethods = {
     if (this._tickAt) {
       const gap = now - this._tickAt;
       this._tickLagMs = Math.max(0, gap - this.refreshIntervalMs);
-      if (this._tickLagMs > this._tickLagMax) this._tickLagMax = this._tickLagMs;
+      // ROLLING window (v4.49.0), not an all-time mark. Record this tick's lag
+      // and take the maximum over the last TICK_LAG_WINDOW ticks: a stall stops
+      // counting against this node one window after it stops happening. The
+      // all-time peak is kept separately for diagnosis and drives nothing.
+      this._tickLagRing[this._tickLagIdx] = this._tickLagMs;
+      this._tickLagIdx = (this._tickLagIdx + 1) % this._tickLagRing.length;
+      let windowed = 0;
+      for (const v of this._tickLagRing) if (v > windowed) windowed = v;
+      this._tickLagMax = windowed;
+      if (this._tickLagMs > this._tickLagPeak) this._tickLagPeak = this._tickLagMs;
       if (this._tickLagMs >= HELLO_DEADLINE_MS) this._tickStalls++;
     }
     this._tickAt = now;
@@ -80,20 +89,26 @@ export const repairPlaneMethods = {
           if (!this._unattachedSince.has(t)) this._unattachedSince.set(t, now);
           if (now - this._unattachedSince.get(t) >= ROOT_CLAIM_MS && this._regionOk(t)) {
             if (this._rootClaim.selfClosestReachable(t)) {
-              this._rootClaim.claimReachable(t);
-              continue;                        // we are root now — no upstream to renew toward
+              // claimReachable returns null when admission REFUSES the claim
+              // (v4.49.0 — today only the HARD bridge fence). `continue` is
+              // justified solely by "we are root now"; if the claim was refused
+              // that justification is void, so fall through and keep renewing
+              // the subscribe like any other unattached subscriber. Skipping the
+              // renew instead would strand the topic on this node forever.
+              if (this._rootClaim.claimReachable(t)) continue;   // we are root now — no upstream to renew toward
+            } else {
+              // Read-repair (#364 part 2): still unattached past the window but we
+              // are NOT the closest reachable node → the topic-closest node is
+              // reachable but not serving us (degraded / overloaded / ingest-
+              // stalled — the alive-but-black-hole class the empty-root probe can't
+              // reach, since that only fires for a node that IS a root). Routing
+              // keeps pinning every SUB to it, so waiting is futile: recover the
+              // history straight from the cohort backups into a non-root read-
+              // holder. Fire-and-forget — never await a lookup in the tick (the
+              // 4.18.1 lesson). The normal renew below still runs, so the instant
+              // the primary recovers we re-home to it and the holder quiesces.
+              this._readRepair(t).catch(() => {});
             }
-            // Read-repair (#364 part 2): still unattached past the window but we
-            // are NOT the closest reachable node → the topic-closest node is
-            // reachable but not serving us (degraded / overloaded / ingest-
-            // stalled — the alive-but-black-hole class the empty-root probe can't
-            // reach, since that only fires for a node that IS a root). Routing
-            // keeps pinning every SUB to it, so waiting is futile: recover the
-            // history straight from the cohort backups into a non-root read-
-            // holder. Fire-and-forget — never await a lookup in the tick (the
-            // 4.18.1 lesson). The normal renew below still runs, so the instant
-            // the primary recovers we re-home to it and the holder quiesces.
-            this._readRepair(t).catch(() => {});
           }
         }
         const iv = attached ? (s.interval || this.renewFastMs) : this.renewFastMs;

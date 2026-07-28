@@ -293,9 +293,23 @@ export class RootClaim {
   // is closer → claim root locally rather than defer forever to an unreachable
   // node. A wrongly-claimed farther root self-corrects via the strictly-closer
   // beacon demotion.
+  //
+  // RETURNS NULL WHEN THE CLAIM IS REFUSED (v4.49.0). become() gained a nullable
+  // return in 4.46.0 — the HARD bridge fence. Four of its five callers were
+  // taught about it; this one was not, so `_set(null, …)` threw a TypeError.
+  // refreshTick is driven by `this.refreshTick().catch(() => {})`, so the throw
+  // was swallowed and every tick died at step 1 — no beacons, no replication,
+  // no retries, no eviction sweep — silently, for the life of the process. Both
+  // production bridges satisfied every precondition (neverRoot on by default,
+  // directory topics subscribed in every bridge region). See F1 / N2.
   claimReachable(topicBig) {
     const m = this.m;
     const role = m.axonRoles.get(topicBig) || this.become(topicBig, 'reachable-fallback');
+    // Refused (today: only the bridge fence). Change NOTHING: leaving _upstream,
+    // _rootHint and _unattachedSince intact keeps this node an ordinary
+    // unattached subscriber, which is exactly what it is. The caller must not
+    // read a null as "I am root now".
+    if (!role) return null;
     this._set(role, true, 'reachable-fallback');
     m._upstream.delete(topicBig);
     m._rootHint.delete(topicBig);          // stop deferring to the unreachable hint

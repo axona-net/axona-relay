@@ -209,6 +209,12 @@ export const ErrorCodes = Object.freeze({
 
   // Upgrade
   UPGRADE_REQUIRED:          'UPGRADE_REQUIRED',
+
+  // Persistence. PERSIST_UNSUPPORTED_NAMESPACE is a PROGRAMMING error, not a
+  // runtime one: a namespace was marked durable but no writer exists for it.
+  // It is deliberately NOT retryable — retrying cannot conjure a writer — and
+  // that distinction is what the flush loop switches on (v4.49.0).
+  PERSIST_UNSUPPORTED_NAMESPACE: 'PERSIST_UNSUPPORTED_NAMESPACE',
 });
 
 // ── Wire round-trip helpers ──────────────────────────────────────────

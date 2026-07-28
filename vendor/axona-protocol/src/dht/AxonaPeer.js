@@ -56,7 +56,7 @@ import { buildTouch }     from '../pubsub/touch.js';
 import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES, isRegionLockEnforced } from '../pubsub/AxonaManager.js';
 import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
-import { PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
+import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -1266,6 +1266,21 @@ export class AxonaPeer extends DHT {
     for (const ns of namespaces) {
       try { await this._writeNamespace(ns); }
       catch (err) {
+        // TWO KINDS OF FAILURE, and conflating them is how F13.1 hid (v4.49.0).
+        //
+        // A namespace with NO WRITER is a programming error: `hosting` was
+        // marked dirty at four sites and _writeNamespace had no case for it, so
+        // every flush "succeeded" without writing a byte and the dirty bit was
+        // consumed. Retrying cannot conjure a writer, so re-queueing would just
+        // spin the debounce forever — say it once, loudly, at error level, and
+        // drop it. The bug is in the code, not in the storage.
+        //
+        // Anything else is a real (possibly transient) adapter failure: warn
+        // and re-queue, as before.
+        if (err?.code === ErrorCodes.PERSIST_UNSUPPORTED_NAMESPACE) {
+          this._emitLog?.('error', 'persist-namespace-unsupported', { ns, err: err.message });
+          continue;                       // NOT retryable — do not re-queue
+        }
         this._emitLog?.('warn', `persist-write-${ns}-failed`, { err: err.message });
         // Re-queue on failure so the next debounce retries.
         this._persistDirty.add(ns);
@@ -1295,6 +1310,21 @@ export class AxonaPeer extends DHT {
       await p.save('wireVersion', WIRE_VERSION);
       return;
     }
+    // SILENCE IS NOT SUCCESS (v4.49.0, rule 13). This used to be a chain of
+    // `if`s with no `else`: an unknown namespace fell straight through, returned
+    // undefined, and was indistinguishable from a completed write. `hosting` is
+    // marked dirty at four sites and has never had a writer — so host()/unhost()
+    // intent was silently discarded on every flush since the feature shipped,
+    // and the adapter reported nothing because it was never called.
+    //
+    // Whether hosting SHOULD be persisted is a separate decision (M7, the one
+    // versioned state codec). This only guarantees that the answer can no longer
+    // be "we quietly didn't".
+    throw new AxonaError(
+      ErrorCodes.PERSIST_UNSUPPORTED_NAMESPACE,
+      `persist: no writer for namespace '${ns}' — it is marked durable but nothing serializes it`,
+      { context: { ns } },
+    );
   }
 
   /** Force-flush every dirty namespace immediately. Called on leave. */
