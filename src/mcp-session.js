@@ -80,6 +80,9 @@ const ARRIVAL_LISTENERS = new Set();   // fn({topic,region,message,signer,msgId}
 // owner + write FOLD INTO THE TOPIC ID — an owned topic is a different topic
 // from the open one of the same name, so both the descriptor and the watch
 // key must carry them (else a watch on "axona.bot" listens to the wrong topic).
+import { sendFileBytes, listPointers, fetchFileToDisk, readLocalFile, namespaced, FILES_DIR }
+  from './file-transfer.js';
+
 const keyOf = (region, topic, owner, write) => `${region}|${topic}|${owner || ''}|${write || 'open'}`;
 const now = () => Date.now();
 function descriptorFor(topic, region, owner, write) {
@@ -302,3 +305,56 @@ export async function shutdown() {
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { shutdown().finally(() => process.exit(0)); });
 process.on('exit', () => { try { cleanupWebRTC(); } catch { /* */ } });
+
+// ── files ───────────────────────────────────────────────────────────────
+// Content-addressed file transfer, PULL-ONLY. See src/file-transfer.js for
+// why: a shared topic is public, so auto-saving arrivals would let any
+// stranger put bytes on this host. Listing is free; disk is touched only by an
+// explicit axona_get_file naming a hash.
+
+export async function sendFile({ path, topic, region, filename }) {
+  const s = await ensureSession();
+  const { bytes, filename: base } = await readLocalFile(path);
+  const shareName = namespaced(topic);
+  const r = await sendFileBytes(s.peer, {
+    bytes, filename: filename || base, mime: 'application/octet-stream',
+    shareTopic: descriptorFor(shareName, region, undefined, undefined),
+    region: regionToDescriptor(region || REGION).name,
+    signWith: s.author,
+  });
+  return {
+    ok: true, topic: shareName, region: region || REGION,
+    sha256: r.sha256, filename: r.pointer.filename, bytes: r.pointer.bytes,
+    chunks: r.chunks, repaired: r.repaired, pointerMsgId: r.pointerMsgId,
+    note: 'Recipients fetch with axona_get_file using this sha256.',
+  };
+}
+
+export async function listFiles({ topic, region, seconds = 15 }) {
+  const s = await ensureSession();
+  const shareName = namespaced(topic);
+  const files = await listPointers(s.peer, descriptorFor(shareName, region, undefined, undefined), { seconds });
+  return {
+    ok: true, topic: shareName, region: region || REGION, count: files.length,
+    files: files.map((f) => ({
+      sha256: f.sha256, filename: f.filename, bytes: f.bytes, mime: f.mime,
+      signer: f.signer, ts: f.ts,
+    })),
+    note: 'Nothing has been written to disk. Call axona_get_file with a sha256 to fetch one.',
+  };
+}
+
+export async function getFile({ sha256, region, filename, timeoutSec = 90 }) {
+  const s = await ensureSession();
+  const r = await fetchFileToDisk(s.peer, {
+    sha256, region: regionToDescriptor(region || REGION).name, filename,
+    timeoutMs: Math.max(5, Math.min(300, timeoutSec)) * 1000,
+  });
+  return {
+    ok: true, path: r.path, filename: r.filename, bytes: r.bytes, sha256: r.sha256, mime: r.mime,
+    verified: true,
+    warning: r.executable
+      ? 'This file has an executable extension. It was written WITHOUT the execute bit and was not opened. Do not run it unless you know its provenance.'
+      : undefined,
+  };
+}

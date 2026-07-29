@@ -21,7 +21,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass } from './mcp-session.js';
+import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile,
+} from './mcp-session.js';
 
 const VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -120,7 +121,43 @@ server.tool(
   run(subscribeWindow),
 );
 
+// ── files ───────────────────────────────────────────────────────────────
+// PULL-ONLY, and that is a security property rather than a limitation. A topic
+// is public: anyone who knows it can publish to it. If arrivals auto-saved,
+// any stranger could put bytes on this host by publishing to a topic the agent
+// happens to read. So listing is free and nothing touches disk until a call
+// names a specific hash.
+
+server.tool(
+  'axona_send_file',
+  'Share a local file over Axona so a person (or another agent) can fetch it. The bytes go to a topic derived from their own sha256; a small pointer is announced on the shared topic you name. Returns the sha256 — that hash IS the address, and anyone who has it can fetch the file. Interoperates with the axona.portal desktop app: a topic name is namespaced under "portal." on both sides, so send to "axona.bot" here and it appears in a portal watching "axona.bot". Max 10 MB (above that a later subscriber cannot reassemble it).',
+  { path: z.string().describe('Absolute path of the local file to share'),
+    topic: z.string().describe('Shared topic to announce on, e.g. "axona.bot" (auto-namespaced to "portal.axona.bot")'),
+    ...REGION,
+    filename: z.string().optional().describe('Override the announced filename (defaults to the file\'s own basename)') },
+  run(sendFile),
+);
+
+server.tool(
+  'axona_list_files',
+  'List files announced on a shared topic. READ-ONLY — returns metadata (filename, size, sha256, sender) and writes NOTHING to disk. Opens a bounded listening window (default 15s) to collect the topic\'s replay, then stops; no standing subscription is left behind. Use the returned sha256 with axona_get_file to actually fetch one.',
+  { topic: z.string().describe('Shared topic to list, e.g. "axona.bot"'), ...REGION,
+    seconds: z.number().optional().describe('How long to collect announcements, 1-60 (default 15)') },
+  run(listFiles),
+);
+
+server.tool(
+  'axona_get_file',
+  'Fetch a file by its sha256 and write it to the Axona files directory (~/Axona Files, or $AXONA_FILES_DIR). The hash is both the address and the integrity check: the content is re-hashed after reassembly and a mismatch is REFUSED before anything is written, so you are trusting arithmetic rather than the sender. Files are written 0600 with no execute bit and are never opened; a warning is returned for executable extensions. The filename is sanitised — it cannot escape the files directory.',
+  { sha256: z.string().describe('The 64-hex content hash, from axona_list_files or from whoever shared it'),
+    ...REGION,
+    filename: z.string().optional().describe('Override the saved filename (sanitised regardless)'),
+    timeoutSec: z.number().optional().describe('How long to wait for all chunks, 5-300 (default 90)') },
+  run(getFile),
+);
+
 await server.connect(new StdioServerTransport());
+
 
 // PUSH: every arrival on a watched topic is emitted as an MCP logging
 // notification to the client (best-effort — needs a client that consumes
