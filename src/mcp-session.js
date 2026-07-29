@@ -114,6 +114,7 @@ export async function ensureSession() {
     // Voluntary, signed self-declaration: this peer is an AI agent. Best-effort —
     // a failed declare must never fail the connection.
     if (DECLARE_CLASS) { try { await setAuthorClass({ cls: AUTHOR_CLASS, operator: OPERATOR, label: 'axona-relay MCP peer' }); } catch { /* */ } }
+    await armStandingWatches();
     return h;
   })();
   try { return await _connecting; } catch (e) { _connecting = null; throw e; }
@@ -172,6 +173,47 @@ export async function pull({ topic, region, owner, write }) {
   const s = await ensureSession();
   const env = await s.peer.pull(null, { topic: descriptorFor(topic, region, resolveOwner(s, owner), write) });
   return { ok: true, topic, region: region || REGION, found: !!env, message: env ? env.message : null, msgId: env?.msgId ?? null };
+}
+
+// ── standing watches that survive a restart ─────────────────────────────
+//
+// A watch is a session object: it lives on this peer, and when the MCP server
+// restarts — which it does every time the Claude host restarts — every watch is
+// gone. Re-arming them was a thing the agent had to REMEMBER to do, and the
+// failure mode is silence: no error, no empty result, just a channel nobody is
+// listening to. It went unnoticed for a whole session at least once.
+//
+// So the list lives in the environment and the server arms it at connect time.
+// Nothing has to remember anything.
+//
+//   MCP_STANDING_WATCHES="axona.dev,general,jokes,axona.chat,axona.bot!owned"
+//
+// Entry syntax:  name  ·  name@region  ·  name!owned  (owner-only: this peer's
+// own durable author, which is how the axona.bot channel is addressed — the
+// bare name resolves to a DIFFERENT topic id, which is exactly the bug that
+// once made every post to it invisible).
+const STANDING = String(process.env.MCP_STANDING_WATCHES || '').split(',').map(s => s.trim()).filter(Boolean);
+
+export function parseWatchSpec(spec) {
+  let s = String(spec);
+  const owned = s.endsWith('!owned');
+  if (owned) s = s.slice(0, -'!owned'.length);
+  const [topic, region] = s.split('@');
+  return { topic, region: region || undefined, ...(owned ? { owner: 'self', write: 'owner' } : {}) };
+}
+
+async function armStandingWatches() {
+  for (const spec of STANDING) {
+    // Best-effort and individually guarded: one unreachable topic must not stop
+    // the others, and must never fail the connection itself.
+    try {
+      const w = parseWatchSpec(spec);
+      await watch({ ...w, since: 'all' });
+      console.error(`[mcp] standing watch armed: ${spec}`);
+    } catch (e) {
+      console.error(`[mcp] standing watch FAILED: ${spec} — ${e.message}`);
+    }
+  }
 }
 
 // ── standing subscription ───────────────────────────────────────────────
