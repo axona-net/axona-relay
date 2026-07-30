@@ -32,7 +32,7 @@ import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
 import { createAuthorIdentity } from '../vendor/axona-protocol/src/identity/index.js';
 import { authorClassTopic } from '../vendor/axona-protocol/src/index.js';   // kernel author-class helper
 export { authorClassTopic };                                               // re-export for callers/smoke
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -68,11 +68,25 @@ const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';     // auto-declare
 const HANDLE        = process.env.MCP_HANDLE || 'axona.bot';
 
 // ── durable store (Node file-backed { get, set }) ───────────────────────
+// This file holds the author PRIVATE key. writeFileSync without an explicit
+// mode takes 0666 & ~umask, and the default umask here is 022 — so the store
+// was created 0644, world-readable. Two identity files minted 2026-07-30 landed
+// that way and had to be chmod'd by hand; the older ones were 0600 only because
+// something else tightened them. Relying on the operator's umask to protect a
+// signing key is not a safeguard, so the mode is stated here. chmodSync as well
+// as the create mode, because mode: on writeFileSync applies only when the file
+// is CREATED — an existing 0644 file keeps its permissions on rewrite, which is
+// exactly how these two would have stayed exposed.
 function fileStore(path) {
   const read = () => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
   return {
     get: (k) => read()[k] ?? null,
-    set: (k, v) => { const o = read(); o[k] = v; mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, JSON.stringify(o, null, 2)); },
+    set: (k, v) => {
+      const o = read(); o[k] = v;
+      mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+      writeFileSync(path, JSON.stringify(o, null, 2), { mode: 0o600 });
+      try { chmodSync(path, 0o600); } catch { /* best-effort on exotic filesystems */ }
+    },
   };
 }
 const STORE = fileStore(STORE_PATH);
