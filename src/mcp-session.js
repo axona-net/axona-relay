@@ -52,6 +52,21 @@ const AUTHOR_CLASS  = process.env.MCP_AUTHOR_CLASS || 'agent';    // this peer I
 const OPERATOR      = process.env.MCP_OPERATOR || null;          // optional: who runs it
 const DECLARE_CLASS = process.env.MCP_DECLARE_CLASS !== '0';     // auto-declare on connect
 
+// ── per-INSTALL display handle (2026-07-30) ─────────────────────────────
+// Was hardcoded 'axona.bot' at the publish site. That is correct while exactly
+// one agent runs this server, and wrong the moment a second one does: every
+// install defaults to the same handle, so a multi-agent conversation renders
+// as one participant talking to itself. A caller CAN pass handle per call, but
+// an agent forgets, and forgetting is silent — the message still lands, just
+// misattributed. So the default belongs to the INSTALL, not the call site.
+//
+// This is the cosmetic half of a pair. The other half is not cosmetic: two
+// installs sharing MCP_AUTHOR_PATH share an AUTHOR KEYPAIR, so their messages
+// are cryptographically indistinguishable, not merely identically labelled
+// (#356, same failure at the identity layer). assertDistinctIdentity() below
+// makes that visible at startup instead of at forensics time.
+const HANDLE        = process.env.MCP_HANDLE || 'axona.bot';
+
 // ── durable store (Node file-backed { get, set }) ───────────────────────
 function fileStore(path) {
   const read = () => { try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return {}; } };
@@ -110,6 +125,23 @@ export async function ensureSession() {
     const author = await createAuthorIdentity({ persistAs: AUTHOR_KEY, store: STORE });   // durable WHO
     const h = await connectPeer({ region: REGION, author });   // transport identity: fresh, ephemeral, per connection
     _session = h;
+    // Identity provenance, on stderr, once per session. stderr because stdout is
+    // the MCP JSON-RPC channel — anything written there corrupts the protocol.
+    //
+    // WHY THIS IS PRINTED AT ALL. With several agents each running their own copy
+    // of this server, the failure that costs the most to diagnose is two installs
+    // sharing MCP_AUTHOR_PATH: they load the SAME author keypair, so their posts
+    // carry the same signer and are not merely mislabelled but cryptographically
+    // indistinguishable. Nothing downstream can separate them after the fact —
+    // not the chat UI, not the envelope, not a later audit. So the one moment the
+    // distinction is still cheap to observe is startup, and the fix is to make
+    // each install state who it is out loud. An operator comparing two logs sees
+    // a collision immediately; #356 was the same class at the transport layer and
+    // took a live prod investigation to find.
+    process.stderr.write(
+      `[axona-mcp] handle=${HANDLE} authorId=${author.authorId.slice(0, 16)}… `
+      + `region=${REGION} authorPath=${STORE_PATH}\n`,
+    );
     _connecting = null;
     // Voluntary, signed self-declaration: this peer is an AI agent. Best-effort —
     // a failed declare must never fail the connection.
@@ -164,7 +196,7 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   // this peer's declared class; raw:true opts out for machine topics.
   const body = raw
     ? message
-    : { v: 1, text: message, handle: handle || 'axona.bot', authorClass: authorClass || AUTHOR_CLASS };
+    : { v: 1, text: message, handle: handle || HANDLE, authorClass: authorClass || AUTHOR_CLASS };
   const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
   return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
@@ -313,6 +345,10 @@ export async function status() {
   return {
     ok: true, connected: true, persistent: true, region: REGION, bridge: DEFAULT_BRIDGE,
     nodeId: _session.nodeId, authorId: _session.author.authorId, identityPath: STORE_PATH,
+    // handle is reported so an agent can check WHICH participant it is before
+    // posting into a shared conversation, rather than discovering it from how
+    // its own message rendered to everyone else.
+    handle: HANDLE,
     declaredClass: _session.declaredClass?.class ?? 'unstated', operator: _session.declaredClass?.operator ?? null,
     mesh: health ? { synaptomeSize: health.synaptomeSize ?? null, peers: health.peers?.length ?? null, state: health.state ?? null } : null,
     watches: [...WATCHES.values()].map((w) => ({ topic: w.topic, region: w.region, buffered: w.buffer.length, total: w.total, dropped: w.dropped, since: w.since, ageSec: Math.round((now() - w.startedAt) / 1000) })),
