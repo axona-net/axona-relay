@@ -94,8 +94,18 @@ async function main() {
   }
 
   if (cmd === 'pull') {
-    const env = await peer.pull(null, { topic: topicDesc });   // null msgId → latest
-    out({ ok: true, action: 'pull', topic, region: regionName, message: env ? env.message : null, found: !!env, msgId: env?.msgId ?? null });
+    // See ops.js pull — an unanswered read must not read as an empty topic.
+    const startedAt = Date.now();
+    let env = null, failure = null;
+    try { env = await peer.pull(null, { topic: topicDesc, timeoutMs: 8000 }); }
+    catch (e) { failure = String((e && e.message) || e); }
+    const elapsedMs = Date.now() - startedAt;
+    const inconclusive = !!failure || (!env && elapsedMs >= 7200);
+    out({ ok: !inconclusive, action: 'pull', topic, region: regionName,
+          message: env ? env.message : null,
+          found: inconclusive ? null : !!env, msgId: env?.msgId ?? null, elapsedMs,
+          ...(inconclusive ? { reason: failure ? `pull failed: ${failure} — absence NOT established`
+                                                : 'no answer within 8000ms — absence NOT established' } : {}) });
     await done(peer, transport); process.exit(0);
   }
 

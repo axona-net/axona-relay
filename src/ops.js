@@ -92,8 +92,19 @@ export async function publish({ topic, message, region = 'eagle', bridge = DEFAU
 
 export async function pull({ topic, region = 'eagle', bridge = DEFAULT_BRIDGE } = {}) {
   return withConnectedPeer({ region, bridge }, async (peer, ctx) => {
-    const env = await peer.pull(null, { topic: { region: ctx.regionName, name: topic } });   // null msgId → latest
-    return { ok: true, topic, region, found: !!env, message: env ? env.message : null, msgId: env?.msgId ?? null };
+    // Same defect the MCP layer had (2a9c611): a read that did not COMPLETE is
+    // not an empty topic. 8s budget, and absence is reported only when observed.
+    const startedAt = Date.now();
+    let env = null, failure = null;
+    try { env = await peer.pull(null, { topic: { region: ctx.regionName, name: topic }, timeoutMs: 8000 }); }
+    catch (e) { failure = String((e && e.message) || e); }
+    const elapsedMs = Date.now() - startedAt;
+    const inconclusive = !!failure || (!env && elapsedMs >= 7200);
+    return { ok: !inconclusive, topic, region,
+             found: inconclusive ? null : !!env,          // null = UNKNOWN, never false
+             message: env ? env.message : null, msgId: env?.msgId ?? null, elapsedMs,
+             ...(inconclusive ? { reason: failure ? `pull failed: ${failure} — absence NOT established`
+                                                  : 'no answer within 8000ms — absence NOT established' } : {}) };
   });
 }
 
