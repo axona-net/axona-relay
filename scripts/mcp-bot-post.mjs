@@ -57,7 +57,10 @@ const descriptor = { region: s.regionName, name: TOPIC_NAME, owner: author.autho
 
 // Warm the route toward the topic before publishing (fresh peers otherwise
 // distribute into a bad cohort and strand the message — see task #352).
-try { await s.peer.pull(null, { topic: descriptor }); } catch { /* warming only */ }
+// See mcp-post.mjs — the 1000ms kernel default is far below measured read
+// latency on this very channel (5340ms), so the probe was failing, not the publish.
+const CONFIRM_PULL_MS = 15_000;
+try { await s.peer.pull(null, { topic: descriptor, timeoutMs: CONFIRM_PULL_MS }); } catch { /* warming only */ }
 await new Promise(r => setTimeout(r, 5000));
 
 const body = { v: 1, text, handle: 'axona.bot', authorClass: 'agent' };
@@ -66,7 +69,7 @@ console.error(`published ${msgId.slice(0, 12)}… — holding publisher alive un
 
 // Independent probe session: subscribes since:'all' like a real client.
 const probe = await connectPeer({ region: REGION });
-let confirmed = false;
+let confirmed = false, lastPullMs = 0, pullTimeouts = 0;
 await probe.peer.sub(descriptor, (env) => {
   if (env?.msgId === msgId || env?.message?.text === text) confirmed = true;
 }, { since: 'all' });
@@ -76,8 +79,11 @@ while (Date.now() < deadline && !confirmed) {
   await new Promise(r => setTimeout(r, PROBE_EVERY_MS));
   if (!confirmed) {
     try {
-      const env = await probe.peer.pull(null, { topic: descriptor });
+      const t0 = Date.now();
+      const env = await probe.peer.pull(null, { topic: descriptor, timeoutMs: CONFIRM_PULL_MS });
+      lastPullMs = Date.now() - t0;
       if (env?.msgId === msgId || env?.message?.text === text) confirmed = true;
+      else if (lastPullMs >= CONFIRM_PULL_MS * 0.9) pullTimeouts++;
     } catch { /* keep waiting */ }
   }
   console.error(`  confirm: ${confirmed} (${Math.round((deadline - Date.now()) / 1000)}s left)`);
@@ -101,7 +107,12 @@ if (blurb) {
   await s.peer.pub({ region: s.regionName, name: 'advertised-topics' }, ad, { signWith: author });
 }
 
-console.log(JSON.stringify({ ok: true, topic: TOPIC_NAME, owner: author.authorId, write: 'owner', msgId, confirmed, advertised: !!ad }));
+console.log(JSON.stringify({ ok: confirmed, topic: TOPIC_NAME, owner: author.authorId, write: 'owner',
+  msgId, confirmed, advertised: !!ad,
+  ...(confirmed ? {} : { probe: { lastPullMs, pullTimeouts,
+    note: pullTimeouts > 0
+      ? 'probe reads timed out — delivery NOT disproven'
+      : 'probes completed and did not see the message' } }) }));
 await probe.close();
 await s.close();
 try { cleanupWebRTC(); } catch { /* */ }

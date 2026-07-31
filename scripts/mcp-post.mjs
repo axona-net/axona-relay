@@ -78,7 +78,13 @@ console.error(`[mcp-post] ${topic} -> ${topicId}` +
 // table (readiness gate = synaptome ≥ 1); publishing immediately can distribute
 // to the wrong cohort and strand the message. Warm the route with a lookup-read
 // of the target topic first, then let the mesh settle before publishing.
-try { await s.peer.pull(null, { topic: descriptor }); } catch { /* warming only */ }
+// CONFIRM_PULL_MS, not the kernel's 1000ms default. Measured 2026-07-31: a
+// pull on axona.bot takes 5340ms and on axona.dev exceeds 8000ms. A 1s probe
+// against those topics can essentially never confirm, so a slow READ was
+// reporting itself as a failed PUBLISH — and several 'lost' posts today were
+// probably nothing of the kind.
+const CONFIRM_PULL_MS = 15_000;
+try { await s.peer.pull(null, { topic: descriptor, timeoutMs: CONFIRM_PULL_MS }); } catch { /* warming only */ }
 await new Promise(r => setTimeout(r, 5000));
 const body = { v: 1, text, handle, authorClass: 'agent' };
 const msgId = await s.peer.pub(descriptor, body, { signWith: author });
@@ -111,13 +117,18 @@ await probe.peer.sub(descriptor, (env) => {
 
 const seen = (r) => r && (r.msgId === msgId || r.text === text || r.message?.text === text);
 const deadline = Date.now() + 150_000;
-let lastPub = Date.now(), lastPull = 0;
+let lastPub = Date.now(), lastPull = 0, lastPullMs = 0, pullTimeouts = 0, lastPullErr = null;
 while (Date.now() < deadline && !via) {
   await new Promise(r => setTimeout(r, 1000));
   if (!via && Date.now() - lastPull >= 5000) {
     lastPull = Date.now();
-    try { if (seen(await probe.peer.pull(null, { topic: descriptor }))) via = 'pull'; }
-    catch { /* pull is one of two paths; its failure is not the answer */ }
+    const t0 = Date.now();
+    try { if (seen(await probe.peer.pull(null, { topic: descriptor, timeoutMs: CONFIRM_PULL_MS }))) via = 'pull'; }
+    catch (e) { lastPullErr = String((e && e.message) || e); }
+    lastPullMs = Date.now() - t0;
+    // A probe that ran the clock out did not observe absence — it observed
+    // nothing. Recorded so an unconfirmed result can say WHICH it was.
+    if (!via && lastPullMs >= CONFIRM_PULL_MS * 0.9) pullTimeouts++;
   }
   if (!via && Date.now() - lastPub >= 45_000) {
     try { await s.peer.pub(descriptor, body, { signWith: author }); lastPub = Date.now(); } catch { /* retry next round */ }
@@ -127,6 +138,14 @@ const confirmed = via !== null;
 console.log(JSON.stringify({
   ok: confirmed, topic, topicId, region: s.regionName, msgId,
   signer: author.authorId, confirmed, via,
+  // Unconfirmed is not the same as undelivered. If every probe timed out we
+  // never READ the topic, so this says nothing about whether the publish landed.
+  ...(confirmed ? {} : {
+    probe: { lastPullMs, pullTimeouts, lastPullErr,
+             note: pullTimeouts > 0
+               ? 'probe reads timed out — delivery NOT disproven, re-read with a larger timeoutMs'
+               : 'probes completed and did not see the message' },
+  }),
   ...(descriptor.write ? { write: descriptor.write, owner: descriptor.owner } : {}),
 }));
 try { await probe.close(); } catch { /* */ }
