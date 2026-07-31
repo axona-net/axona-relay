@@ -215,10 +215,55 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
 
-export async function pull({ topic, region, owner, write }) {
+// A READ THAT DID NOT COMPLETE IS NOT AN EMPTY TOPIC.
+//
+// This returned `{ ok:true, found:false }` for any pull the kernel could not
+// answer inside its 1000ms default — indistinguishable from a genuinely empty
+// topic, and reported with ok:true so nothing downstream could tell. On
+// 2026-07-31 that false negative cost most of a day: axona.bot, a fresh owned
+// probe topic, and axona:bridge-directory all read `found:false` here while a
+// direct peer.pull returned their newest message in 368-663ms. Four hypotheses
+// were built and discarded on top of that reading — including "the channel is
+// dead", which I stated publicly.
+//
+// Two changes, and the second matters more than the first:
+//   1. A usable budget (PULL_TIMEOUT_MS, was the kernel's 1000ms default).
+//   2. Absence is only ever reported when it was actually OBSERVED. If the read
+//      threw, or ran out the clock, `found` is null and ok is false — never
+//      false. Callers may not read "no answer" as "no message".
+const PULL_TIMEOUT_MS = 8000;
+
+export async function pull({ topic, region, owner, write, timeoutMs = PULL_TIMEOUT_MS }) {
   const s = await ensureSession();
-  const env = await s.peer.pull(null, { topic: descriptorFor(topic, region, resolveOwner(s, owner), write) });
-  return { ok: true, topic, region: region || REGION, found: !!env, message: env ? env.message : null, msgId: env?.msgId ?? null };
+  const descriptor = descriptorFor(topic, region, resolveOwner(s, owner), write);
+  const startedAt = Date.now();
+  let env = null, failure = null;
+  try {
+    env = await s.peer.pull(null, { topic: descriptor, timeoutMs });
+  } catch (e) {
+    failure = String((e && e.message) || e);
+  }
+  const elapsedMs = Date.now() - startedAt;
+  // Ran the clock out with nothing to show → the network did not answer. The
+  // kernel resolves a timed-out pull to null, same as a real miss, so elapsed
+  // time is the only signal available here to tell them apart.
+  const timedOut = !env && !failure && elapsedMs >= timeoutMs * 0.9;
+  const inconclusive = !!failure || timedOut;
+  return {
+    ok: !inconclusive,
+    topic,
+    region: region || REGION,
+    found: inconclusive ? null : !!env,      // null = UNKNOWN, never false
+    message: env ? env.message : null,
+    msgId: env?.msgId ?? null,
+    elapsedMs,
+    timeoutMs,
+    ...(inconclusive
+      ? { reason: failure
+            ? `pull failed: ${failure} — absence NOT established`
+            : `no answer within ${timeoutMs}ms — absence NOT established, retry or use watch+poll` }
+      : {}),
+  };
 }
 
 // ── standing watches that survive a restart ─────────────────────────────
