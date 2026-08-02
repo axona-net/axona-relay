@@ -16,6 +16,24 @@ REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 mkdir -p relay-logs
 
+# COLD START ONLY (David, 2026-08-02). This script stops EVERYTHING it finds
+# and starts N — which on a live fleet is a march to zero, and the LAST relays
+# to leave have no heirs: their handoff drains into the void. That is how a
+# free-hand restart shrank 26 -> 3 mid-deploy on 2026-08-02, and on production
+# it destroys the region's held history. If a fleet is running, the only
+# sanctioned path is roll-fleet.sh (start-then-stop, one slot at a time, count
+# verified, never below strength). Excuses don't bring data back to life.
+RUNNING=0
+for pid in $(pgrep -f "src/index.js" 2>/dev/null || true); do
+  [ "$(ps -p "$pid" -o comm= 2>/dev/null)" = "node" ] && RUNNING=$((RUNNING + 1))
+done
+if [ "$RUNNING" -gt 0 ]; then
+  echo "✗ REFUSING: $RUNNING relay(s) are LIVE. This script is for cold start only." >&2
+  echo "  To update a running fleet:  EXPECT=$RUNNING EXPECT_KERNEL=<x.y.z> bash roll-fleet.sh" >&2
+  echo "  To genuinely tear down first (destroys held state): stop them yourself, deliberately." >&2
+  exit 1
+fi
+
 echo "→ stopping any existing relay fleet (ROLLING — one at a time)…"
 # Mass-simultaneous SIGTERM makes every relay's graceful-leave heirs the OTHER
 # dying relays (total-cohort teardown) and shreds the region's held history on
