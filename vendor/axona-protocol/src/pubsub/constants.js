@@ -201,6 +201,75 @@ export const TICK_LAG_WINDOW = 12;        // ticks retained for the rolling lag 
 // pressure before anything is actually lost — a node that waits until 1.0 has
 // already dropped history.
 export const SATURATION_PRESSURE = 0.6;
+
+// ── SERVICE OBLIGATIONS (D0 / M4, 2026-07-30) ───────────────────────────
+// What the refresh tick OWES each role, where that debt is discharged, and by
+// when. Normative and machine-readable so it can be fenced the way SYNC_POLICIES
+// is — a rule that is not a test drifts.
+//
+// WHY THIS TABLE EXISTS. Before D0, capacity was measured from a single
+// `lastServicedAt` stamped on EVERY role at the TOP of refreshTick, before any
+// work. The stamp therefore meant "a tick began while this role existed", not
+// "this role's obligation was discharged", and servicePressure was measured
+// against one denominator (DROP_MS) for every nature. Three consequences, all
+// measured (test/d0_probe.mjs, commit 89c0798):
+//   1. DOMINATED — reaching SATURATION_PRESSURE needed a 108s tick gap while
+//      helloPressure needed 8s, so servicePressure could never be the deciding
+//      signal in the only scenario it could detect.
+//   2. FALSE NEGATIVE under the exact cause its own docstring named. 640 roles /
+//      40 ticks: worst un-refreshed full push 95_000ms against its own 60_000ms
+//      deadline, while servicePressure read 0, overdue read 0, saturated() was
+//      false and admitPushedRole() still returned true.
+//   3. COVERAGE — mySubscriptions was outside the walk entirely, so the node's
+//      own app subscriptions were unmeasurable rather than mismeasured.
+//
+// THE FIX IS THE COMPLETION POINT, NOT THE FIELD. Each obligation is stamped
+// where the work actually finishes. Two of these were already in the right place
+// and simply were not being read: `sync.lastFullAt` is written inside the
+// `if (full)` branch of _replicateRole, AFTER the pushes.
+//
+// DEADLINES ARE PER-OBLIGATION, and that is the second half of the fix. One
+// DROP_MS denominator made 1.0 mean "failed" for renewal and something arbitrary
+// for everything else. Now age/deadline == 1.0 means THIS obligation has failed,
+// for every row, so the max across rows is comparable.
+//
+// ROOT carries replication only, deliberately. Beacons (BEACON_MS) and root
+// self-verify are both throttled/batched, and a missed one costs convergence
+// LATENCY; a missed replication costs DURABILITY. Measuring latency work as debt
+// would re-introduce the false-positive risk this table exists to remove. That is
+// a judgement, not a measurement — flagged as such to the council 2026-07-30.
+export const OBLIGATIONS = Object.freeze({
+  ROOT: Object.freeze({
+    what:     'replicate full state to the K-closest cohort',
+    stamp:    'lastFullAt',              // role.sync.lastFullAt
+    deadline: ROOT_REPLICATE_FULL_MS,    // 60s — the root's own re-arm interval
+    why:      'a missed full push costs DURABILITY: the cohort holds a stale copy',
+  }),
+  CHILD: Object.freeze({
+    what:     'renew the subscribe toward our upstream',
+    stamp:    'lastRenewAt',             // role.sync.lastRenewAt
+    deadline: DROP_MS,                   // 180s — when the upstream evicts us
+    why:      'past DROP_MS the upstream has dropped us and delivery stops',
+  }),
+  BACKUP: Object.freeze({
+    what:     'renew the subscribe that keeps us election-eligible',
+    stamp:    'lastRenewAt',
+    deadline: DROP_MS,
+    why:      'a lapsed backup cannot win the election its principal is relying on',
+  }),
+  HOLDER: Object.freeze({
+    what:     're-announce the hosted topic and advertise our high-water',
+    stamp:    'lastRenewAt',
+    deadline: DROP_MS,
+    why:      'a silent holder is invisible to a freshly promoted root, so its cache strands',
+  }),
+  APP_SUB: Object.freeze({
+    what:     'renew the local application subscription',
+    stamp:    'lastRenewSent',           // mySubscriptions entry, NOT a role
+    deadline: DROP_MS,
+    why:      'the node stops receiving its own subscriptions; invisible before D0',
+  }),
+});
 export const DELEGATE_BATCH  = 8;               // subscribers handed off when promoting a child
 export const MAX_VIA         = 8;               // ordered-waypoint list length cap (wire sanity)
 export const VIA_HOP_BUDGET  = 8;               // hops per via leg (enforced kernel-side, Phase 2+)

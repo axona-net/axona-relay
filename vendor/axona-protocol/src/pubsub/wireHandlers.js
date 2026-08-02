@@ -268,7 +268,11 @@ export const wireHandlersMethods = {
     // peer can arrive here via-pinned to me — the correction must still re-home it.
     {
       const closer = this._liveCloserRoot(topicBig, { requireReachable: false });
-      if (closer) { this._deferToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
+      // _forwardToRoot, NOT _deferToRoot (v4.59.0): the loose gate means
+      // `closer` may be a guess, and the guess is tested by the forward itself
+      // — the verdict demotes us only on confirmed consumption at that root,
+      // and a failed forward invalidates the pointer instead of our state.
+      if (closer) { this._forwardToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
@@ -318,8 +322,34 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
+    // The DURABILITY obligation opens at the stamp and can only be discharged
+    // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
+    // independently — that separation is the whole point (Aster, seq 123).
+    this._durability.open(env.msgId, role.topicId);
+    // rootReplicas = 0 means cohort replication is NOT configured, so the gate
+    // below never runs and nothing could ever discharge this entry. Choose the
+    // terminal state explicitly rather than leaving it pending forever.
+    if (!this._rootReplicas) this._durability.noCohortConfigured(env.msgId);
     this._fanout(role, msg, null);                                       // to subscribers
-    this._deliverToApp(role.topicId, json, env.msgId, ts, seq);          // local app (if subscribed)
+    // local app (if subscribed)
+    //
+    // KNOWN DEFECT, NOT YET FIXED — found by test/fence_q2_end_to_end.mjs.
+    // _deliverToApp CONFIRMS the pending entry (seeing your own message is the
+    // implicit ack, I-9), and it runs HERE, before the durability gate below. So
+    // a publisher subscribed to its own topic — the only way to verify a publish,
+    // since there is deliberately no publish-ack — confirms regardless of whether
+    // one byte reached the cohort. The v4.58.0 fail-closed gate is present,
+    // correct, counted, and BYPASSED on the most common path.
+    //
+    // The obvious fix (pass {confirm:false} here and let the single post-gate
+    // confirm below do it) was implemented and REVERTED: it turns every publish
+    // on a NON-REPORTING adapter into a permanent pending entry, and the tick's
+    // retry pump then re-sends the body forever — smoke_pubsub_kill caught it
+    // re-delivering a KILLED message to a late subscriber. Withholding a confirm
+    // is not free; it changes what the retry pump does. The real fix has to
+    // reconcile the durability gate with the retry pump and is design work, not
+    // a one-line change.
+    this._deliverToApp(role.topicId, json, env.msgId, ts, seq);
     // EAGER cohort distribution: push the freshly-stamped message to the K-closest the
     // instant it's stamped — a kill is just a publish with a side effect, so a publish
     // must reach the whole cohort exactly as a kill must, else a subscriber landing on a
@@ -336,7 +366,44 @@ export const wireHandlersMethods = {
     // Cohort-less nodes (rootReplicas 0 / solo network) confirm immediately.
     if (role.isRoot && this._rootReplicas) {
       const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
-      await this._replicateRole(role.topicId, role, bridge, this._now()).catch(() => {});
+      // Q2/C4: the outcome is READ, not discarded. `.catch(() => {})` here used to
+      // swallow the only evidence available and confirm regardless, so a publish
+      // whose every replication push exhausted still reported durable.
+      const rep = await this._replicateRole(role.topicId, role, bridge, this._now())
+        // A REJECTION FABRICATES NOTHING (Aster, on v4.58.2). I had this catch
+        // asserting dispatched:true, snapshot:true — inventing evidence flags for a
+        // call that threw, in the middle of a change whose entire purpose is that
+        // evidence must be demonstrated. An unexpected _replicateRole rejection shows
+        // no dispatch and no snapshot, so it must not burn a ledger attempt. The warn
+        // and the withheld confirm below still fire: the publish does NOT confirm, and
+        // the periodic path retries. Nothing is silently swallowed; it is simply not
+        // counted as an attempt that happened.
+        .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0,
+                         dispatched: false, snapshot: false, noCohort: false,
+                         reason: String(e?.message || e) }));
+      // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
+      // demands verified > 0. The previous gate also required unreported === 0,
+      // which meant a publish with no dispatch evidence at all still confirmed —
+      // it fired only when every push had EXPLICITLY failed. Absence of a failure
+      // report is not a success report. attempted === 0 is the singleton/no-cohort
+      // case and still confirms, deliberately and unchanged.
+      // THE ONLY PATH TO 'verified'. The ledger decides; this site just reports
+      // what the cohort said. verified === 0 is not final — the tick replicates
+      // again until the attempt budget runs out and the entry turns 'expired',
+      // which is an honest terminal answer rather than a silent confirm.
+      // ONE RULE, IN THE LEDGER (Aster, on v4.58.2). My previous version hand-rolled
+      // the guard here as `rep.dispatched !== false && rep.snapshot !== false`, which
+      // is not the contract: a MISSING flag passed it. That is inference by default —
+      // written by me one commit after "capability is DECLARED, never inferred", which
+      // is how deeply the habit runs. recordOne shares _classify with the periodic
+      // path, so the two callers cannot drift and neither can restate the rule wrong.
+      this._durability.recordOne(env.msgId, rep);
+      if (rep.attempted > 0 && rep.verified === 0) {
+        this._log('warn', 'pubsub:replicate-all-failed', {
+          topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+        });
+        return;                       // durability stays pending → the tick retries
+      }
       // Honesty signal (#362): the eager replicate could recruit NOBODY — this
       // node is a SINGLETON root and the confirm below asserts only "I, one
       // process, hold it" (field case: an in-region burst publisher self-rooted
@@ -632,6 +699,10 @@ export const wireHandlersMethods = {
   // first time we see the kill (tombstone-gated).
   _applyKill(role, topicBig, m) {
     const target = m.msgId;
+    // A retracted message has no durability obligation left. Cancel it BEFORE
+    // the tombstone/fan-out work below, so no retry can outlive the retraction
+    // (Aster: the kill must cancel atomically and preserve the tombstone).
+    this._durability?.cancel(target);
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
@@ -651,9 +722,20 @@ export const wireHandlersMethods = {
       // eager replicate dispatch, so a kill→leave() publisher holds until the tombstone left.
       if (role.isRoot && this._rootReplicas) {
         const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
+        // Q2/C4: same gate as the publish path — a kill is a publish plus a side
+        // effect, so a tombstone whose every replication push failed must not
+        // report durable either.
         this._replicateRole(topicBig, role, bridge, this._now())
-          .catch(() => {})
-          .then(() => this._confirmPending(topicBig, target));
+          .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, reason: String(e?.message || e) }))
+          .then((rep) => {
+            if (rep.attempted > 0 && rep.verified === 0) {
+              this._log('warn', 'pubsub:kill-replicate-all-failed', {
+                topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+              });
+              return;                 // leave pending → the killer keeps retrying
+            }
+            this._confirmPending(topicBig, target);
+          });
         this._deliverKillToApp(topicBig, target, killTs, seq);
         return;
       }
@@ -674,7 +756,11 @@ export const wireHandlersMethods = {
     // competing root that the rest of the tree never consults.
     if (!this.axonRoles.has(topicBig)) {
       const closer = this._liveCloserRoot(topicBig, { requireReachable: false });
-      if (closer) { this._deferToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
+      // _forwardToRoot, NOT _deferToRoot (v4.59.0) — same verdict-driven
+      // transition as PUB. A tombstone fed to a corpse is the kill-leak class
+      // all over again, with the extra sting that nothing ever retries a kill
+      // the app believes it already sent.
+      if (closer) { this._forwardToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
     if (!role) {
@@ -762,15 +848,48 @@ export const wireHandlersMethods = {
     if (!p) return 'consumed';
     clearTimeout(p.timer);
     this._pending.delete(payload.corrId);
-    let parsed = null;
-    if (payload.json) { try { parsed = JSON.parse(payload.json); } catch { parsed = null; } }
+    // Q1 TAGGED OUTCOME. These three cases were all collapsed to null:
+    //   a reply carrying an envelope   -> { kind:'response', envelope }
+    //   a reply carrying nothing       -> { kind:'response', envelope:null }
+    //   a reply that will not parse    -> { kind:'invalid-response', reason }
+    // The middle one is a RESPONDER's negative — this node says it holds nothing.
+    // That is not proof the network holds nothing, it is not a timeout, and a caller
+    // must be able to tell all three apart. (Aster, council 2026-07-31.)
+    //
+    // WHAT COUNTS AS A NO-HIT (Aster's Q1 review, and he was right — my first cut
+    // was wrong). The ONE responder is `_onPull` at :779, and it ALWAYS sets the
+    // field: `json: hit ? hit.json : null`. So a genuine responder negative is
+    // `json === null`, exactly. An OMITTED json is not a polite way of saying
+    // "nothing" — no conforming responder emits it — and neither is the STRING
+    // 'null', which would parse to null and impersonate a no-hit. Accepting either
+    // as an empty response would re-introduce the exact confusion Q1 exists to
+    // remove, one layer further in: a malformed or foreign message read as an
+    // authoritative "I do not have it".
+    let outcome;
+    if (payload.json === null) {
+      outcome = { kind: 'response', envelope: null };            // the real no-hit
+    } else if (typeof payload.json !== 'string') {
+      outcome = { kind: 'invalid-response', reason: payload.json === undefined
+        ? 'PULLRESP omitted json (a conforming responder always sets it)'
+        : `PULLRESP json was ${typeof payload.json}, expected string or null` };
+    } else {
+      let parsed, bad = null;
+      try { parsed = JSON.parse(payload.json); }
+      catch (e) { bad = String((e && e.message) || e); }
+      if (bad !== null) outcome = { kind: 'invalid-response', reason: bad };
+      else if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        // Parsed fine and is still not an envelope. 'null' lands here rather than
+        // masquerading as a no-hit; so do bare scalars and arrays.
+        outcome = { kind: 'invalid-response', reason: 'PULLRESP json did not parse to an envelope object' };
+      } else outcome = { kind: 'response', envelope: parsed };
+    }
     // Resolve the FULL envelope (msgId/ts/signer/message …) — the same shape a
     // sub() callback delivers, and what peer.pull has always documented. The
     // previous `parsed.message ?? parsed` unwrap discarded the identity at the
     // last step (task #355): publish-confirm loops comparing env.msgId could
     // never succeed, and pull-then-act (kill/reply/verify by msgId) was
     // impossible even though the wire carried everything.
-    p.resolve(parsed ?? null);
+    p.resolve(outcome);
     return 'consumed';
   },
 

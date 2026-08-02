@@ -57,9 +57,17 @@ export function roleNature(role) {
 }
 
 /** A relay's per-topic state (root or non-root child relay). */
-export function makeRole(topicId, isRoot) {
+export function makeRole(topicId, isRoot, createdAt = null) {
   return {
     topicId,                         // bigint
+    createdAt,                       // _now() when this role was admitted (D0 / M4).
+                                     // Needed because "never discharged" is only innocent for a role
+                                     // that is NEW. A role held for longer than its obligation's
+                                     // deadline and no stamp at all (null) has never been serviced,
+                                     // which is the WORST case, not an exempt one — capacity measures
+                                     // age from birth until the first discharge, then from the stamp.
+                                     // Caught by smoke_role_admission.mjs, which builds 96 roles that
+                                     // were never serviced and rightly expects saturation.
     isRoot,                          // closest-to-topic node → true; delegated child → false
     subscribers: new Map(),          // subHex -> { since, lastRenewed }
     children: new Set(),             // subHex of subscribers that are themselves child relays
@@ -80,11 +88,18 @@ export function makeRole(topicId, isRoot) {
     // properties; the 4.22.0 lw-pull storm lived in exactly this kind of guard.
     sync: {
       sig: '',                       // (when ROOT) state signature at the last FULL replica push (4.24.1 delta gate)
-      lastFullAt: 0,                 // (when ROOT) _now() of the last FULL push (backstop re-arms at ROOT_REPLICATE_FULL_MS)
-      lastServicedAt: 0,             // _now() of the last time the refresh tick SERVICED this role (any nature).
-                                     // lastFullAt above is roots-only; this one is universal, because capacity
-                                     // is measured as "age of my least-recently-serviced role / DROP_MS" and a
-                                     // partial field would under-report a node drowning in non-root work.
+      lastFullAt: null,              // (when ROOT) _now() of the last FULL push; null = never (NOT 0 — see C2) (backstop re-arms at ROOT_REPLICATE_FULL_MS)
+      lastRenewAt: null,                // _now() of the last SUB actually EMITTED for this role (D0 / M4).
+                                     // Completion point for the CHILD / BACKUP / HOLDER obligations — stamped in
+                                     // _emitSubscribe AFTER the send, not before, so it records work done rather
+                                     // than work attempted. Deadline is DROP_MS: past it the upstream has evicted us.
+      lastServicedAt: 0,             // DIAGNOSIS ONLY since D0 (2026-07-30) — drives nothing.
+                                     // Was the capacity input, stamped on every role at the TOP of refreshTick
+                                     // before any work, which made it mean "a tick began" rather than "the
+                                     // obligation was discharged". It read 0 while a role sat 95s past its own
+                                     // 60s deadline. Retained (unstamped by the tick) only so a reader diffing
+                                     // against an older kernel can see the field is deliberately dead rather than
+                                     // accidentally missing. See OBLIGATIONS in constants.js.
       probeTries: 0,                 // empty-self-root cohort pulls fired (4.24.0; quenches at EMPTY_ROOT_PROBE_MAX)
       probeAt: 0,                    // _now() of the last cohort pull (rate-limits the refreshTick re-probe)
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
@@ -129,7 +144,19 @@ export class RootClaim {
     if (b.root === lc(idHex(m.nodeId))) return null;
     let rb; try { rb = idBig(b.root); } catch { return null; }
     if ((rb ^ topicBig) >= (m.nodeId ^ topicBig)) return null;   // never defer to a farther node (I-2)
-    if (b.verified) return b.root;             // network-confirmed via iterative lookup
+    // A verified record used to return HERE unconditionally — no liveness test,
+    // no freshness cut, bounded only by exp (2×ROOT_VERIFY_MS = 90s, 3× the
+    // remote-beacon window). Verification proves the root WAS the terminus at
+    // lookup time, not that it is alive now, and during the 2026-08-02 outage
+    // one such record steered every SUB and PUB into a dead relay for its full
+    // life (fence_pub_defers_to_corpse §3; council seq 146/147, option B).
+    // The same 1.5×BEACON_MS cut the loose clause has applies now. Safe for
+    // live roots: their plain beacons overwrite this record within ≤20s anyway
+    // (rootElection.js:63 sets unconditionally) — only a DEAD root leaves a
+    // verified record standing long enough to go stale. A stale record still
+    // falls through to the reachability test rather than to null: a root that
+    // is a live neighbour deserves the defer regardless of the record's age.
+    if (b.verified && (m._now() - b.at) < this._beaconMs * 1.5) return b.root;
     if (m._isReachableId(b.root)) return b.root;                 // channel-verified live neighbour
     if (!requireReachable && (m._now() - b.at) < this._beaconMs * 1.5) return b.root;
     return null;
@@ -237,7 +264,7 @@ export class RootClaim {
     // syncEngine HANDOFF (see there). That asymmetry is the design, not an
     // oversight — a terminus that refuses drops data.
     if (!m.admitRole(topicBig, false)) return null;    // HARD only (bridge)
-    const role = makeRole(topicBig, true);
+    const role = makeRole(topicBig, true, m._now());
     role.formedAt = m._now(); role.lastVerify = 0;
     m.axonRoles.set(topicBig, role);
     m._log('info', 'root-formed', { topic: idHex(topicBig).slice(0, 12) });
@@ -323,7 +350,7 @@ export class RootClaim {
     const m = this.m;
     let role = m.axonRoles.get(topicBig);
     if (!role) {
-      role = makeRole(topicBig, false);
+      role = makeRole(topicBig, false, m._now());
       m.axonRoles.set(topicBig, role);
       m._log('info', 'relay-formed', { topic: idHex(topicBig).slice(0, 12) });
     }

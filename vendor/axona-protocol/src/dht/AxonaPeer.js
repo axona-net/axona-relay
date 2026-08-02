@@ -761,6 +761,7 @@ export class AxonaPeer extends DHT {
     if (this._axonaManager) {
       try { this._axonaManager.stop?.(); } catch { /* */ }
       try { this._axonaManager._pendingPub?.clear?.(); } catch { /* */ }
+      try { this._axonaManager._durability?.clear?.(); } catch { /* */ }
       try { this._axonaManager._pendingKill?.clear?.(); } catch { /* */ }
       try { this._axonaManager._verifyInflight?.clear?.(); } catch { /* */ }
     }
@@ -1058,7 +1059,16 @@ export class AxonaPeer extends DHT {
       // time to land. Any confirmation still in flight resets the stall clock,
       // so a genuinely-draining publisher is unaffected.
       const STALL_MS = 1500;
-      const pending = () => (am._pendingPub?.size ?? 0) + (am._pendingKill?.size ?? 0);
+      // DRAIN ON DURABILITY, NOT LOCAL DELIVERY (Aster, council 2026-08-01).
+      // _pendingPub is the DELIVERY leg: it clears when this node observes its
+      // own message, which proves the ROOT holds it and nothing more. Leaving on
+      // that alone is how an ephemeral publisher exited with history no one else
+      // had. durabilityPending() is the obligation that actually matters here —
+      // and its terminal states (verified/expired/cancelled) are all DONE, so an
+      // undurable message does not stall the drain waiting for a verdict that is
+      // never coming.
+      const pending = () => (am.durabilityPending?.() ?? 0)
+                          + (am._pendingKill?.size ?? 0);
       let prev = Infinity, lastProgressAt = Date.now();
       while (Date.now() < deadline) {
         const size = pending();
@@ -1146,6 +1156,7 @@ export class AxonaPeer extends DHT {
     if (am) {
       try { am.stop?.(); } catch { /* */ }
       try { am._pendingPub?.clear?.(); } catch { /* */ }
+      try { am._durability?.clear?.(); } catch { /* */ }
       try { am._pendingKill?.clear?.(); } catch { /* */ }
       try { am._verifyInflight?.clear?.(); } catch { /* */ }
     }
@@ -2285,7 +2296,11 @@ export class AxonaPeer extends DHT {
     }
     const desc       = await this._resolveReadTopic(topic, 'pull');
     const topicIdBig = desc.topicIdBig;
-    const result = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
+    const outcome = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
+    // requestPull is TAGGED as of Q1. peer.pull keeps its documented envelope|null
+    // shape so existing callers are unaffected; peer.pullOutcome() exposes the full
+    // outcome for callers that must distinguish timeout from empty from invalid.
+    const result = outcome && outcome.kind === 'response' ? outcome.envelope : null;
     if (!result) return null;
 
     // requestPull returns the parsed payload — which is the JSON we
@@ -2325,6 +2340,33 @@ export class AxonaPeer extends DHT {
     const attestation = await buildAuthorClass({ class: cls, operator, label, signWith, operatorSignWith });
     const msgId = await this.pub(authorClassTopic(signWith.pubkeyHex), JSON.stringify(attestation), { signWith });
     return { msgId, attestation };
+  }
+
+  /**
+   * Like pull(), but returns the TAGGED outcome instead of collapsing it:
+   *   { kind:'response', envelope }       a responder answered and holds this
+   *   { kind:'response', envelope:null }  a responder answered and holds nothing
+   *   { kind:'timeout', timeoutMs }       nobody answered in time
+   *   { kind:'invalid-response', reason } a reply arrived and would not parse
+   *
+   * pull() cannot express the difference and never could — it returns null for the
+   * last three. Callers that must not treat silence as absence should use this.
+   * NOTE: envelope:null is ONE RESPONDER's negative, not proof the network is empty.
+   */
+  async pullOutcome(msgId, { topic, timeoutMs = 1000 } = {}) {
+    // Mirrors pull()'s validation (Aster, Q1 review). Two public entry points onto
+    // the same read must not disagree about what a valid msgId is — the lenient one
+    // becomes the way callers accidentally bypass the check.
+    const wantsLatestEarly = msgId === null || msgId === undefined;
+    if (!wantsLatestEarly && (typeof msgId !== 'string' || msgId.length !== 64)) {
+      throw new PullError(ErrorCodes.PULL_INVALID_MSGID,
+        'peer.pullOutcome: msgId must be a 64-char hex string, or null/omitted for the latest message',
+        { context: { msgId } });
+    }
+    const am = this._requireAxonaManager('pullOutcome');
+    const desc = await this._resolveReadTopic(topic, 'pullOutcome');
+    const wantsLatest = msgId === null || msgId === undefined;
+    return am.requestPull(desc.topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
   }
 
   /**
@@ -2881,6 +2923,14 @@ export class AxonaPeer extends DHT {
     const selfId = peer.getNodeId();
 
     const dht = {
+      // CAPABILITY DECLARATION (v4.58.0). routeMessage below is async and reports
+      // its outcome by RESOLVING {consumed:true|false,...} — it never throws to
+      // signal a routing failure. Saying so explicitly is the contract: the
+      // pub/sub planes credit a replica, and unpin a dead waypoint, only on a
+      // verdict, and they will not INFER that this adapter reports one from the
+      // fact that it happens to. Undeclared is a construction error, not a
+      // degraded mode. See src/pubsub/dispatch.js.
+      verdictsSupported: true,
       getSelfId:    () => peer.getNodeId(),
       // Locally-known mesh neighbors (authenticated bound peers; synaptome as
       // fallback for transports without a bound list). Used by the root-beacon
