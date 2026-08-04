@@ -10,3 +10,7 @@ backups/
 
 # fleet runtime logs (start-fleet.sh writes here; churn — never commit)
 relay-logs/
+
+# Council gate: the override AUDIT LOG is tracked (it is the accountability
+# record); the per-ref approval cache is ephemeral machine state.
+.council/approved-*.json

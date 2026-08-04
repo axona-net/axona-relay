@@ -31,7 +31,7 @@
 // Pushing to `testnet` or any other working branch is NOT a deploy and passes
 // untouched. Local commits, tests, builds and installs pass untouched.
 import { deployReasons } from './council-scope.mjs';
-import { readFileSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -91,6 +91,39 @@ if (refFile && existsSync(refFile)) {
   const explicit = readFileSync(refFile, 'utf8').trim();
   if (explicit) ref = explicit;
 }
+
+// ─── Override (loud, logged) ────────────────────────────────────────────────
+// #424 closed 2026-08-03: the deny text advertised COUNCIL_OVERRIDE before any
+// code honored it. The override exists for one situation — a direct order from
+// David — and it stays loud: every use is appended to .council/overrides.log
+// and surfaced in the transcript. A silent override would be a bypass, and a
+// bypass is what the gate exists to prevent.
+const ovm = String(payload?.tool_input?.command || '')
+  .match(/COUNCIL_OVERRIDE=(?:"([^"]+)"|'([^']+)'|(\S+))/);
+if (ovm) {
+  const why = ovm[1] || ovm[2] || ovm[3] || '';
+  try {
+    const logDir = join(root || HERE, '.council');
+    mkdirSync(logDir, { recursive: true });
+    appendFileSync(join(logDir, 'overrides.log'), JSON.stringify({
+      at: new Date().toISOString(),
+      ref: ref || 'unresolved',
+      reason: why,
+      reasons,
+      command: String(payload?.tool_input?.command || '').slice(0, 400),
+    }) + '\n');
+  } catch { /* a log failure must not turn loud into silent-deny */ }
+  console.log(JSON.stringify({
+    systemMessage: `COUNCIL OVERRIDE for ${ref || 'unresolved'} — "${why}". Logged to .council/overrides.log; must be reported to David.`,
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      permissionDecisionReason: `council override: ${why}`,
+    },
+  }));
+  process.exit(0);
+}
+
 if (!ref) {
   deny(
     `COUNCIL GATE — this is a deploy (${reasons.join('; ')}) but no SHA could be resolved.\n` +
