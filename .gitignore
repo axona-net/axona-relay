@@ -11,6 +11,9 @@ backups/
 # fleet runtime logs (start-fleet.sh writes here; churn — never commit)
 relay-logs/
 
-# Council gate: the override AUDIT LOG is tracked (it is the accountability
-# record); the per-ref approval cache is ephemeral machine state.
-.council/approved-*.json
+# Council gate state stays OUT of version control. The first cut tracked the
+# override log "because an audit trail nobody can read is not an audit trail",
+# and that log carried raw command text — which published production host
+# addresses to this public repo. The durable public record of any override is
+# the #council post announcing it, which is where it belonged all along.
+.council/
