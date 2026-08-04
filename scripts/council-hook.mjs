@@ -92,36 +92,57 @@ if (refFile && existsSync(refFile)) {
   if (explicit) ref = explicit;
 }
 
-// ─── Override (loud, logged) ────────────────────────────────────────────────
-// #424 closed 2026-08-03: the deny text advertised COUNCIL_OVERRIDE before any
-// code honored it. The override exists for one situation — a direct order from
-// David — and it stays loud: every use is appended to .council/overrides.log
-// and surfaced in the transcript. A silent override would be a bypass, and a
-// bypass is what the gate exists to prevent.
+// ─── Override: RECORDED, NEVER HONORED ──────────────────────────────────────
+// The first cut of this (2026-08-03) treated any COUNCIL_OVERRIDE="…" string in
+// the command as an allow. Aster's review killed it, correctly, and the reason
+// is worth keeping in front of whoever reads this next:
+//
+//   THE STRING IS WRITTEN BY THE SAME PARTY THE GATE EXISTS TO CATCH. I type
+//   the command. I type the override. "David told me to" typed by me is not
+//   evidence that David told me to — it is my own assertion, checked by nobody,
+//   evaluated BEFORE any sha or verdict is looked at. An escape hatch whose key
+//   is held by the person being gated is not an escape hatch, it is an absence
+//   of a gate wearing a log file as a disguise. Logging it afterwards records
+//   what happened; it cannot retroactively make it authorization.
+//
+// It also failed open when the audit write failed, contradicting the "loud,
+// logged" invariant it claimed, and it stored raw command text — which put
+// production host addresses into a public repository the moment that log was
+// tracked.
+//
+// So the override is now RECORDED AND DENIED. A human who wants to bypass this
+// gate must act as a human: disable the hook in settings, or approve the sha on
+// #council. Both leave a trace that is not self-issued.
+//
+// If we ever want automation back, the design has to bind the grant to evidence
+// David actually produces — a short-lived grant signed by his Axona identity,
+// naming the exact ref and scope, verified here against his authorized key,
+// expiring on its own. That is a real protocol, not a string comparison, and it
+// is not built.
 const ovm = String(payload?.tool_input?.command || '')
   .match(/COUNCIL_OVERRIDE=(?:"([^"]+)"|'([^']+)'|(\S+))/);
 if (ovm) {
-  const why = ovm[1] || ovm[2] || ovm[3] || '';
+  const why = (ovm[1] || ovm[2] || ovm[3] || '').slice(0, 200);
+  // Attempt-record only. Never the command text: this file is tracked, and raw
+  // commands carry host addresses, key paths and anything else on the line.
+  let logged = false;
   try {
     const logDir = join(root || HERE, '.council');
     mkdirSync(logDir, { recursive: true });
     appendFileSync(join(logDir, 'overrides.log'), JSON.stringify({
-      at: new Date().toISOString(),
-      ref: ref || 'unresolved',
-      reason: why,
-      reasons,
-      command: String(payload?.tool_input?.command || '').slice(0, 400),
+      at: new Date().toISOString(), event: 'override-attempt-denied',
+      ref: ref || 'unresolved', reason: why, reasons,
     }) + '\n');
-  } catch { /* a log failure must not turn loud into silent-deny */ }
-  console.log(JSON.stringify({
-    systemMessage: `COUNCIL OVERRIDE for ${ref || 'unresolved'} — "${why}". Logged to .council/overrides.log; must be reported to David.`,
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'allow',
-      permissionDecisionReason: `council override: ${why}`,
-    },
-  }));
-  process.exit(0);
+    logged = true;
+  } catch { /* fall through — the deny below does not depend on the log */ }
+  deny(
+    `COUNCIL GATE — OVERRIDE NOT HONORED (recorded${logged ? '' : ', LOG WRITE FAILED'}).\n\n` +
+    `COUNCIL_OVERRIDE is a string you wrote, in a command you wrote. It is not\n` +
+    `evidence of an order from David, so this gate does not accept it.\n\n` +
+    `To proceed, one of:\n` +
+    `  · get "VERDICT: APPROVED ${ref}" on #council from Orion (08257233…) or Aster (8004d3b3…);\n` +
+    `  · ask David to disable this hook in settings for the duration — a human act, by the human whose authority is being claimed.\n\n` +
+    `Attempted reason: "${why}"`);
 }
 
 if (!ref) {
