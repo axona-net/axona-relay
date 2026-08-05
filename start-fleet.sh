@@ -55,10 +55,22 @@ for pid in $(pgrep -f "src/index.js"); do
   sleep 2                              # let heirs settle before the next departure
 done
 
-echo "→ starting $N relay(s): region=$REGION bridge=$BRIDGE"
+# CAFFEINATE=0 drops the per-relay wakefulness wrapper. Use it on a host already
+# held awake some other way (Amphetamine, pmset), and ALWAYS on a soak runner:
+# the soak SIGKILLs relays, `caffeinate -i node …` makes caffeinate the PARENT,
+# and killing the child orphans the parent — one live, assertion-holding process
+# per kill, accumulating for the length of the run. Thirty had collected on the
+# dev laptop before anyone looked. Default stays 1; existing behaviour unchanged.
+CAFFEINATE="${CAFFEINATE:-1}"
+echo "→ starting $N relay(s): region=$REGION bridge=$BRIDGE caffeinate=$CAFFEINATE"
 for n in $(seq 1 "$N"); do
-  RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
-    caffeinate -i nohup node src/index.js >> "relay-logs/relay-$n.log" 2>&1 &
+  if [ "$CAFFEINATE" = "1" ]; then
+    RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
+      caffeinate -i nohup node src/index.js >> "relay-logs/relay-$n.log" 2>&1 &
+  else
+    RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
+      nohup node src/index.js >> "relay-logs/relay-$n.log" 2>&1 &
+  fi
   echo "   relay-$n pid $!"
   sleep 1
 done
