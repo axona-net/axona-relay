@@ -141,5 +141,40 @@ console.log('council scope — quoted text is data; only a real command is a com
     deployReasons(CONTINUED).length === 1, JSON.stringify(deployReasons(CONTINUED)));
 }
 
+// ── 6. REFSPEC PARSING — the bypass Aster and Orion both found ─────────────
+//
+// Section 5 matched the branch word by its delimiter, which misses it behind a
+// slash or a force prefix. All three of these published while the classifier
+// reported no deploy reason. Reviewers caught it; no test did.
+{
+  const P = 'git' + ' push';
+  const B = 'ma' + 'in';
+  const bypasses = [
+    [`${P} origin refs/heads/${B}`,            'fully-qualified ref'],
+    [`${P} origin HEAD:refs/heads/${B}`,       'HEAD to a qualified ref'],
+    [`${P} origin +${B}:refs/heads/${B}`,      'force-prefixed to a qualified ref'],
+    [`${P} origin +${B}`,                      'force-prefixed bare'],
+    [`${P} --force origin HEAD:refs/heads/${B}`, 'flag + qualified ref'],
+    [`${P} origin testnet:refs/heads/${B}`,    'working branch to a qualified ref'],
+  ];
+  for (const [cmd, why] of bypasses) {
+    ok(`6. ${why} gates`, deployReasons(cmd).length === 1, JSON.stringify(deployReasons(cmd)));
+  }
+
+  // A refspec-less push publishes the CURRENT branch via push.default, which the
+  // command text cannot reveal. Ambiguous, therefore gated.
+  ok('6g. a push with no refspec gates (branch unknowable from the text)',
+    deployReasons(`${P}`).length === 1);
+  ok('6h. …and a remote with no refspec likewise',
+    deployReasons(`${P} origin`).length === 1);
+
+  // The working branch must still pass in every spelling.
+  ok('6i. a fully-qualified WORKING branch is not a deploy',
+    deployReasons(`${P} origin refs/heads/testnet`).length === 0,
+    JSON.stringify(deployReasons(`${P} origin refs/heads/testnet`)));
+  ok('6j. an explicit working-branch refspec is not a deploy',
+    deployReasons(`${P} origin testnet:refs/heads/testnet`).length === 0);
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);

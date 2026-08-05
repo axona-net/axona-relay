@@ -17,6 +17,10 @@ export const DEPLOY_HOSTS = [
   'bridge.axona.net', 'bridge-west.axona.net', 'testnet.axona.net',
 ];
 
+// Branches whose contents reach users. A push landing on one of these is the
+// gated act, however the refspec spells it.
+export const LIVE_BRANCHES = new Set(['main', 'master']);
+
 // HEREDOC BODIES ARE DATA, NOT COMMANDS.
 //
 // A commit message, a council post, or a runbook that QUOTES a deploy command is
@@ -59,9 +63,28 @@ export function deployReasons(rawCommand) {
   // refspec wrapped onto the next line is still seen; an invocation is scanned up
   // to the next shell separator, so anything inside the push's own arguments
   // counts against it.
+  // PARSE THE REFSPEC. Matching the branch word by delimiter was not enough:
+  // Aster and Orion both found that `refs/heads/main` hides it behind a slash and
+  // `+main:…` behind a force prefix, so all of
+  //     git push origin refs/heads/main
+  //     git push origin HEAD:refs/heads/main
+  //     git push origin +main:refs/heads/main
+  // published while returning no deploy reason. What matters is the DESTINATION
+  // ref of each refspec, which is the part after the last colon, minus any force
+  // prefix and any refs/heads/ qualification.
   const folded = cmd.replace(/\\\r?\n/g, ' ');
+  const destOf = (spec) => spec
+    .slice(spec.lastIndexOf(':') + 1)      // dst half, or the whole token
+    .replace(/^\+/, '')                    // force prefix
+    .replace(/^refs\/heads\//, '')         // fully-qualified form
+    .replace(/\.git$/, '');
   for (const m of folded.matchAll(/\bgit\s+push\b([^\n;&|]*)/g)) {
-    if (/(^|[\s:])main\b/.test(m[1])) {
+    const toks = m[1].trim().split(/\s+/).filter(t => t && !t.startsWith('-'));
+    // toks[0] is the remote; everything after it is a refspec. A push with NO
+    // refspec publishes the current branch via push.default — unknowable from the
+    // command text alone, so it gates. Fails closed by construction.
+    const specs = toks.slice(1);
+    if (!specs.length || specs.some(s => LIVE_BRANCHES.has(destOf(s)))) {
       reasons.push('pushes to main (live sites build from main)');
       break;
     }
