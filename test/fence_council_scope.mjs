@@ -176,5 +176,90 @@ console.log('council scope — quoted text is data; only a real command is a com
     deployReasons(`${P} origin testnet:refs/heads/testnet`).length === 0);
 }
 
+// ── 7. THE QUOTING BYPASS (Aster, 67f661d) ─────────────────────────────────
+// The gate read the refspec as raw text, so a quoted one did not match — but the
+// SHELL removes the quotes before git ever sees them. Every form below is a real
+// publish. This is why quoted arguments cannot be treated as data the way a
+// heredoc body is: a heredoc feeds a program that consumes it as text, while a
+// quoted argument is handed to the program as a live value.
+{
+  const P = 'git' + ' push';
+  const B = 'ma' + 'in';
+  const quoted = [
+    [`${P} origin 'HEAD:refs/heads/${B}'`,   'single-quoted qualified ref'],
+    [`${P} origin "HEAD:refs/heads/${B}"`,   'double-quoted qualified ref'],
+    [`${P} origin '${B}'`,                   'single-quoted bare branch'],
+    [`${P} origin "testnet:${B}"`,           'double-quoted explicit refspec'],
+    [`${P} 'origin' "+${B}"`,                'quoted remote and force-prefixed ref'],
+  ];
+  for (const [cmd, why] of quoted) {
+    ok(`7. ${why} gates`, deployReasons(cmd).length === 1, JSON.stringify(deployReasons(cmd)));
+  }
+  // …and quoting must not newly gate the working branch.
+  ok("7f. a quoted WORKING branch is still not a deploy",
+    deployReasons(`${P} origin 'testnet'`).length === 0,
+    JSON.stringify(deployReasons(`${P} origin 'testnet'`)));
+  ok('7g. a quoted working-branch refspec is still not a deploy',
+    deployReasons(`${P} origin "testnet:refs/heads/testnet"`).length === 0);
+}
+
+// ── 8. UNRESOLVABLE ARGUMENTS FAIL CLOSED ──────────────────────────────────
+// A gate that cannot resolve an argument must not clear it. None of these can be
+// evaluated from the command text; all of them can land on a live branch.
+{
+  const P = 'git' + ' push';
+  const dynamic = [
+    `${P} origin "$REFSPEC"`,
+    `${P} origin \${REFSPEC}`,
+    `${P} origin $(printf %s ma"in")`,
+    `${P} origin "$(cat .git/HEAD)"`,
+    `${P} "$REMOTE" "$BRANCH"`,
+  ];
+  for (const cmd of dynamic) {
+    ok(`8. an unresolvable refspec gates — ${cmd.slice(0, 34)}…`,
+      deployReasons(cmd).length === 1, JSON.stringify(deployReasons(cmd)));
+  }
+  // Ambiguous static forms resolve at push time, not here.
+  ok('8f. a bare HEAD gates (resolves to the current branch at push time)',
+    deployReasons(`${P} origin HEAD`).length === 1);
+  ok('8g. an empty destination gates',
+    deployReasons(`${P} origin ma` + `in:`).length === 1);
+}
+
+// ── 9. THE DESTINATION IS THE GATED THING, NOT A MENTIONED HOSTNAME ─────────
+// A relay told to speak to a bridge URL is a client, not a deployment. The old
+// rule ANDed "a remote-shell verb anywhere" with "a deploy host anywhere", so a
+// run against a laptop on the LAN was called a deploy because the hostname
+// appeared inside an environment variable.
+{
+  const H = 'testnet.axona' + '.net';
+  ok('9a. a remote shell to a LAN box carrying a bridge URL is NOT a deploy',
+    deployReasons(`ssh david@192.168.68.50 'BRIDGE=wss://${H} bash start-fleet.sh'`).length === 0,
+    JSON.stringify(deployReasons(`ssh david@192.168.68.50 'BRIDGE=wss://${H} bash start-fleet.sh'`)));
+  ok('9b. reading a health endpoint is not a deploy',
+    deployReasons(`curl -s https://${H}/healthz`).length === 0);
+
+  // Aster: a static quoted literal is still a real destination.
+  ok('9c. a quoted deploy host IS a deploy',
+    deployReasons(`ssh '${H}' uptime`).length === 1,
+    JSON.stringify(deployReasons(`ssh '${H}' uptime`)));
+  ok('9d. …with a user prefix likewise',
+    deployReasons(`ssh -i ~/.ssh/id_ed25519_axona "root@${H}" uptime`).length === 1);
+  ok('9e. an option VALUE is not mistaken for the destination',
+    deployReasons(`ssh -o ProxyCommand=none -p 22 -i /k/id root@${H} uptime`).length === 1);
+  ok('9f. an unresolvable destination fails closed',
+    deployReasons('ssh "$HOST" uptime').length === 1);
+  ok('9g. a copy to a deploy host is a deploy',
+    deployReasons(`scp build.tgz root@${H}:/opt/axona-bridge/`).length === 1);
+  ok('9h. a copy between local paths is not',
+    deployReasons('scp ./a.txt ./b.txt').length === 0);
+
+  // The payload of a remote shell runs AS A COMMAND on that host. A bastion hop
+  // hides a deploy behind an innocent destination.
+  ok('9i. a deploy nested inside a remote shell gates',
+    deployReasons(`ssh bastion.example "ssh ${H} uptime"`).length === 1,
+    JSON.stringify(deployReasons(`ssh bastion.example "ssh ${H} uptime"`)));
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);
