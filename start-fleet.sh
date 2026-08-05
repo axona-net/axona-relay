@@ -9,12 +9,35 @@
 #
 # Logs: relay-logs/relay-<n>.log  (one per slot). Survives the app closing
 # (caffeinate + nohup); launchd is TCC-blocked from ~/Documents.
+#
+# THIS SCRIPT VERIFIES ITS OWN ARTIFACT (2026-08-05). It used to print
+# "✓ fleet up" unconditionally — the loop backgrounds each launch, so $? is the
+# fork's, never node's. Over SSH (non-interactive shell, no Homebrew PATH) all
+# 26 relays died instantly on `nohup: node: No such file or directory` and the
+# script still reported success; the soak then ran against an empty fleet until
+# a process count caught it. A launcher whose success message is independent of
+# whether anything launched is not a launcher. Now: node is resolved BEFORE any
+# slot starts, and after a settle every slot must be alive AND have written its
+# startup banner to the log region THIS launch produced. Exit 1 otherwise.
 set -u
 cd "$(dirname "$0")"
 N="${N:-3}"
 REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
+SETTLE="${SETTLE:-10}"     # seconds to wait before verifying; raise on a slow host
 mkdir -p relay-logs
+
+# Resolve node ONCE, up front, and fail loud. Launching N processes that each
+# die on a missing interpreter produces N identical errors buried in N logs;
+# one check produces one message naming the fix.
+if ! NODE_BIN="$(command -v node 2>/dev/null)"; then
+  echo "✗ REFUSING: 'node' is not on PATH — nothing launched." >&2
+  echo "  A non-interactive shell (ssh host 'bash start-fleet.sh') does not read" >&2
+  echo "  the profile that puts Homebrew node on PATH. Export it explicitly:" >&2
+  echo "    export PATH=/opt/homebrew/opt/node@24/bin:\$PATH" >&2
+  exit 1
+fi
+echo "→ node $("$NODE_BIN" -v) at $NODE_BIN"
 
 # COLD START ONLY (David, 2026-08-02). This script stops EVERYTHING it finds
 # and starts N — which on a live fleet is a march to zero, and the LAST relays
@@ -63,15 +86,60 @@ done
 # dev laptop before anyone looked. Default stays 1; existing behaviour unchanged.
 CAFFEINATE="${CAFFEINATE:-1}"
 echo "→ starting $N relay(s): region=$REGION bridge=$BRIDGE caffeinate=$CAFFEINATE"
+declare -a SLOT_PID SLOT_OFF
 for n in $(seq 1 "$N"); do
+  LOG="relay-logs/relay-$n.log"
+  # Logs are APPENDED across launches, so a banner from a previous run would
+  # satisfy the check forever. Record the byte offset first and read only past
+  # it — the same offset-bounding the soak census uses on these files.
+  SLOT_OFF[$n]=$( [ -f "$LOG" ] && wc -c < "$LOG" | tr -d ' ' || echo 0 )
   if [ "$CAFFEINATE" = "1" ]; then
     RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
-      caffeinate -i nohup node src/index.js >> "relay-logs/relay-$n.log" 2>&1 &
+      caffeinate -i nohup "$NODE_BIN" src/index.js >> "$LOG" 2>&1 &
   else
     RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
-      nohup node src/index.js >> "relay-logs/relay-$n.log" 2>&1 &
+      nohup "$NODE_BIN" src/index.js >> "$LOG" 2>&1 &
   fi
-  echo "   relay-$n pid $!"
+  SLOT_PID[$n]=$!
+  echo "   relay-$n pid ${SLOT_PID[$n]}"
   sleep 1
 done
-echo "✓ fleet up. tail -f relay-logs/relay-1.log"
+
+# ---- VERIFY. Nothing below trusts the launch loop's exit status. ----
+echo "→ verifying (${SETTLE}s settle)…"
+sleep "$SETTLE"
+
+FAILED=0
+for n in $(seq 1 "$N"); do
+  LOG="relay-logs/relay-$n.log"
+  WHY=""
+  # 1. The launched process is still there. Under CAFFEINATE=1 this pid is
+  #    caffeinate, which exits when its child does — either way, gone is gone.
+  kill -0 "${SLOT_PID[$n]}" 2>/dev/null || WHY="process exited"
+  # 2. It got far enough to announce itself. Alive-but-wedged before startup
+  #    is not started, and only THIS launch's log region counts.
+  NEW=$(tail -c "+$(( ${SLOT_OFF[$n]} + 1 ))" "$LOG" 2>/dev/null || true)
+  case "$NEW" in
+    *"axona-relay v"*) : ;;
+    *) WHY="${WHY:+$WHY; }no startup banner" ;;
+  esac
+  if [ -n "$WHY" ]; then
+    FAILED=$((FAILED + 1))
+    echo "✗ relay-$n FAILED ($WHY)" >&2
+    echo "$NEW" | tail -3 | sed 's/^/    /' >&2
+  fi
+done
+
+# 3. The artifact itself: how many relay processes are actually live. This is
+#    the number that matters, and it is counted independently of the pids we
+#    think we started.
+LIVE=$(pgrep -f "src/index.js" 2>/dev/null | wc -l | tr -d ' ')
+
+if [ "$FAILED" -gt 0 ] || [ "$LIVE" -ne "$N" ]; then
+  echo "✗ FLEET NOT UP: $LIVE/$N relay(s) live, $FAILED slot(s) failed." >&2
+  echo "  The survivors were left running — stop them deliberately if you want a" >&2
+  echo "  clean retry (they are seconds old and hold nothing worth preserving)." >&2
+  exit 1
+fi
+
+echo "✓ fleet up — verified $LIVE/$N live with startup banners. tail -f relay-logs/relay-1.log"
