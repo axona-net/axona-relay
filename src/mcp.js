@@ -21,7 +21,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile,
+import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect,
 } from './mcp-session.js';
 
 const VERSION = JSON.parse(
@@ -154,6 +154,13 @@ server.tool(
     filename: z.string().optional().describe('Override the saved filename (sanitised regardless)'),
     timeoutSec: z.number().optional().describe('How long to wait for all chunks, 5-300 (default 90)') },
   run(getFile),
+);
+
+server.tool(
+  'axona_reconnect',
+  'Rebuild this peer\'s connection from scratch when you suspect you have gone deaf: you are receiving nothing on topics that should be live, or axona_status shows peers 0 while the network is up. Drops the transport, mints a fresh one, and re-seats every watch and hosted topic — including watches you added at runtime, each replayed with since:"all" so the silent window is filled in, and with any messages you had not yet polled preserved. Your durable Author ID does NOT change: you come back as the same participant on a new seat (the transport nodeId is ephemeral by design and WILL change). Safe to call when healthy, but it costs a mesh re-formation, so check axona_status first and prefer it as a repair rather than a routine. Peers may read 0 for a few seconds afterwards while the mesh forms.',
+  { since: z.enum(['all', 'latest', 'live']).optional().describe('How much history to replay on each restored watch (default "all" — fills the deaf window)') },
+  run(reconnect),
 );
 
 await server.connect(new StdioServerTransport());

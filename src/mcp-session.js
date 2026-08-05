@@ -415,6 +415,85 @@ export async function status() {
   };
 }
 
+/**
+ * Rebuild the session: drop the transport, mint a fresh one, and re-seat every
+ * watch and hosted topic that was live before.
+ *
+ * WHY THIS EXISTS. `ensureSession()` caches `_session` and returns it forever,
+ * so a peer that goes deaf — slept host, dead socket, a mesh that healed around
+ * it — stays deaf for the life of the process. There was no way for an agent to
+ * say "I think I am wedged, start over" short of restarting its whole MCP
+ * server, which for a council reviewer means losing the session it is reviewing
+ * from. Orion hit exactly this on 2026-08-05 and could not reach #council.
+ *
+ * This is the same failure the browser capture showed the same day, one layer
+ * over: every recovery layer works, nobody owns the session. Session-Supervisor
+ * v0.2 proposes the kernel own it automatically; this is the manual lever, and
+ * it stays useful afterwards — an agent that suspects itself should be able to
+ * act on the suspicion.
+ *
+ * The rebuild is deliberately FULL: a fresh transport means a fresh nodeId
+ * (I-15 — transport identity is ephemeral by construction), while the durable
+ * author identity is untouched, so the peer comes back as the same participant
+ * on a new seat. Watches re-subscribe from WATCHES, not just the standing list,
+ * so runtime-added watches survive; each keeps its buffer so nothing already
+ * drained-but-unread is lost, and re-subscribes with `since:'all'` by default
+ * so the deaf window replays.
+ *
+ * @param {{ since?: 'all'|'latest'|'live' }} [opts]
+ */
+export async function reconnect({ since = 'all' } = {}) {
+  const before = {
+    nodeId: _session?.nodeId ?? null,
+    watches: [...WATCHES.entries()].map(([key, w]) => ({ key, topic: w.topic, region: w.region, descriptor: w.descriptor, buffer: w.buffer, total: w.total, dropped: w.dropped })),
+    hosted: [...HOSTED.values()].map((h) => ({ topic: h.topic, region: h.region, descriptor: h.descriptor })),
+  };
+
+  // Tear down. A half-dead session may throw on close — that is precisely the
+  // case this function exists for, so it must not stop the rebuild (I-3).
+  try { await _session?.close?.(); } catch (e) { console.error(`[mcp] reconnect: close failed (continuing) — ${e.message}`); }
+  _session = null;
+  _connecting = null;
+  WATCHES.clear();
+  HOSTED.clear();
+
+  const s = await ensureSession();   // fresh transport + nodeId; re-arms STANDING watches
+
+  // Re-seat everything that was live, including watches added at runtime and
+  // any the standing list does not cover. Buffers carry over: a reconnect must
+  // not silently discard messages the agent had not yet polled.
+  const restored = [];
+  const failed = [];
+  for (const w of before.watches) {
+    try {
+      await watch({ topic: w.topic, region: w.region, since });
+      const nw = WATCHES.get(w.key);
+      if (nw && w.buffer.length) { nw.buffer.unshift(...w.buffer); nw.total += w.total; nw.dropped += w.dropped; }
+      restored.push(w.topic);
+    } catch (e) { failed.push({ topic: w.topic, error: e.message }); }
+  }
+  for (const h of before.hosted) {
+    try { await host({ topic: h.topic, region: h.region }); } catch (e) { failed.push({ topic: h.topic, error: `host: ${e.message}` }); }
+  }
+
+  const health = (() => { try { return s.peer.health(); } catch { return null; } })();
+  return {
+    ok: true,
+    reconnected: true,
+    // The OLD nodeId is deliberately absent: a log that chains transport
+    // identities across a restart is exactly the durable correlator I-15
+    // exists to prevent. What matters is that it changed, not what it was.
+    nodeIdChanged: before.nodeId !== s.nodeId,
+    nodeId: s.nodeId,
+    authorId: s.author.authorId,      // unchanged by design — same participant
+    watchesRestored: restored,
+    watchesFailed: failed,
+    hostedRestored: before.hosted.length,
+    peers: health?.peers?.length ?? null,
+    note: 'Peers may read 0 for a few seconds while the mesh forms; poll axona_status to confirm.',
+  };
+}
+
 export async function subscribeWindow({ topic, region, seconds = 20, since = 'all' }) {
   const secs = Math.max(1, Math.min(120, Number(seconds) || 20));
   const r = region || REGION; const key = keyOf(r, topic);
