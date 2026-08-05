@@ -99,5 +99,47 @@ console.log('council scope — quoted text is data; only a real command is a com
   ok('4f. a missing command does not throw', deployReasons(undefined).length === 0);
 }
 
+// ── 5. SCOPE IS THE PUSH'S OWN ARGUMENTS, NOT THE WHOLE COMMAND ────────────
+//
+// The first cut ANDed two independent tests across the entire command string:
+// "is there a git push anywhere" and "is there the word main anywhere". Any
+// compound command satisfying both halves separately was blocked. On 2026-08-05
+// it refused two testnet pushes because the command also carried an echo label
+// reading `push testnet (NOT main)` — written to say it was NOT a main push.
+//
+// Same defect class as section 2: text that CONTAINS a deploy string read as if
+// it performed one. These cases pin the fix in both directions — the loosening
+// must not let a real deploy through.
+{
+  const NOT_MAIN_LABEL = `${PUSH_TNET} && echo "push testnet (NOT ` + 'ma' + 'in' + ')"';
+  ok('5a. a testnet push whose LABEL names the branch is not a deploy',
+    deployReasons(NOT_MAIN_LABEL).length === 0, JSON.stringify(deployReasons(NOT_MAIN_LABEL)));
+
+  const MSG_NAMES_IT = `git commit -m "live sites build from ` + 'ma' + 'in' + `" && ${PUSH_TNET}`;
+  ok('5b. a commit MESSAGE naming the branch is not a deploy',
+    deployReasons(MSG_NAMES_IT).length === 0, JSON.stringify(deployReasons(MSG_NAMES_IT)));
+
+  ok('5c. two testnet pushes in one command are not a deploy',
+    deployReasons(`cd /a && ${PUSH_TNET}; cd /b && ${PUSH_TNET}`).length === 0);
+
+  const FILE_NAMED = `git add src/` + 'ma' + 'in' + `.js && ${PUSH_TNET}`;
+  ok('5d. a FILE named for the branch is not a deploy',
+    deployReasons(FILE_NAMED).length === 0, JSON.stringify(deployReasons(FILE_NAMED)));
+
+  // …and the gate must still bite.
+  ok('5e. a real deploy buried after a testnet push STILL gates',
+    deployReasons(`npm test && ${PUSH_TNET} && ${PUSH_MAIN}`).length === 1);
+
+  const PLAIN = ['git', 'push', 'origin', 'ma' + 'in'].join(' ');
+  ok('5f. a plain push to the live branch gates', deployReasons(PLAIN).length === 1);
+
+  const FORCED = ['git', 'push', '--force', 'origin', 'ma' + 'in'].join(' ');
+  ok('5g. a FORCED push to the live branch gates', deployReasons(FORCED).length === 1);
+
+  const CONTINUED = ['git', 'push', 'origin', '\\\n  testnet:' + 'ma' + 'in'].join(' ');
+  ok('5h. a line-continued refspec gates (continuations folded first)',
+    deployReasons(CONTINUED).length === 1, JSON.stringify(deployReasons(CONTINUED)));
+}
+
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);
 process.exit(fail ? 1 : 0);

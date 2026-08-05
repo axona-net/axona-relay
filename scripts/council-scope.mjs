@@ -42,8 +42,29 @@ export function deployReasons(rawCommand) {
 
   // A push to main. `git push origin testnet:main`, `git push origin main`,
   // `git push origin HEAD:main` — all publish. A push to testnet does not.
-  if (/\bgit\s+push\b/.test(cmd) && /(^|[\s:])main\b/.test(cmd.replace(/\bgit\s+push\b/, ''))) {
-    reasons.push('pushes to main (live sites build from main)');
+  //
+  // SCAN EACH `git push` INVOCATION'S OWN ARGUMENTS, NOT THE WHOLE COMMAND.
+  // The first cut ANDed two independent tests across the entire string: "is there
+  // a git push anywhere" and "is there the word main anywhere". Any compound
+  // command satisfying both halves separately was blocked. On 2026-08-05 it
+  // refused a pair of testnet pushes because the command also contained
+  //     echo "=== push testnet (NOT main) ==="
+  // — a label written specifically to say it was NOT a main push. A commit
+  // message, an echo, or a filename mentioning the word was enough.
+  //
+  // This is the same defect as the heredoc one directly below, one layer in:
+  // text that merely CONTAINS a deploy string read as if it performed one.
+  //
+  // Still fails CLOSED on ambiguity. Line continuations are folded first, so a
+  // refspec wrapped onto the next line is still seen; an invocation is scanned up
+  // to the next shell separator, so anything inside the push's own arguments
+  // counts against it.
+  const folded = cmd.replace(/\\\r?\n/g, ' ');
+  for (const m of folded.matchAll(/\bgit\s+push\b([^\n;&|]*)/g)) {
+    if (/(^|[\s:])main\b/.test(m[1])) {
+      reasons.push('pushes to main (live sites build from main)');
+      break;
+    }
   }
   const host = DEPLOY_HOSTS.find(h => cmd.includes(h));
   if (host && /\bssh\b|\bscp\b|\brsync\b/.test(cmd)) {
