@@ -194,6 +194,64 @@ const hostOf = (dest) => {
 
 const isDeployHost = (h) => DEPLOY_HOSTS.some(d => h === d || h.endsWith('.' + d));
 
+// ── read-only classification (David, 2026-08-06) ─────────────────────────────
+// A command that only OBSERVES a host is not a deployment. The council gate
+// used to treat every ssh to a deploy host as a deploy, so even `cat` on a
+// config or `docker logs` gated. isReadOnlyRemote PROVES a remote payload
+// cannot change the host; anything it cannot prove read-only returns false, so
+// the gate still fires. Fail-closed is the whole point: an unknown verb, a
+// redirection, a command substitution, or an interactive shell (no payload at
+// all) is never cleared.
+const READONLY_SIMPLE = new Set([
+  'cat', 'zcat', 'ls', 'head', 'tail', 'grep', 'egrep', 'fgrep', 'zgrep', 'less',
+  'more', 'stat', 'wc', 'pwd', 'whoami', 'hostname', 'uname', 'date', 'uptime',
+  'df', 'du', 'free', 'id', 'env', 'printenv', 'echo', 'true', 'false', 'tr',
+  'cut', 'sort', 'uniq', 'comm', 'nl', 'tac', 'basename', 'dirname', 'readlink',
+  'realpath', 'file', 'test', 'ps', 'lsof', 'netstat', 'ss', 'xxd', 'od',
+  'sha256sum', 'md5sum', 'cksum', 'column', 'jq', 'yq',
+]);
+// Multi-purpose tools: read-only ONLY for these first subcommands.
+const READONLY_SUB = {
+  docker:    new Set(['ps', 'logs', 'inspect', 'images', 'version', 'info', 'top', 'stats', 'port', 'history']),
+  systemctl: new Set(['status', 'show', 'cat', 'is-active', 'is-enabled', 'is-failed', 'list-units', 'list-timers', 'list-unit-files', 'list-sockets', 'get-default', 'show-environment']),
+  git:       new Set(['status', 'log', 'show', 'diff', 'rev-parse', 'ls-tree', 'ls-files', 'ls-remote', 'cat-file', 'describe', 'show-ref', 'for-each-ref', 'blame', 'grep', 'shortlog', 'reflog']),
+};
+const READONLY_DOCKER_COMPOSE = new Set(['ps', 'logs', 'config', 'top', 'version', 'images']);
+// journalctl reads by nature; these flags make it write.
+const JOURNALCTL_WRITES = /^--(rotate|vacuum-size|vacuum-time|vacuum-files|flush|sync|relinquish-var|update-catalog|setup-keys)/;
+
+export function isReadOnlyRemote(remote) {
+  const cmd = stripHeredocs(remote || '');
+  if (!cmd.trim()) return false;                       // no payload ≠ read-only
+  const toks = tokenize(cmd.replace(/\\\r?\n/g, ' '));
+  // Any redirection disqualifies. This also gates fd-dups like `2>&1` — the
+  // tokenizer splits them on `&`, so they cannot be told apart from a file
+  // write here. The cost is only that a read-only command must be written
+  // without `2>&1`; the safe direction to fail is toward gating.
+  if (toks.some(t => !t.sep && /[<>]/.test(t.value))) return false;
+  const groups = invocations(toks);
+  if (!groups.length) return false;
+  for (const words of groups) {
+    const w = fromVerb(words);
+    if (!w.length || w[0].dynamic) return false;       // unresolvable verb → gate
+    const verb = w[0].value.replace(/^.*\//, '');
+    if (READONLY_SIMPLE.has(verb)) continue;
+    // Subcommand is the first non-option operand, in order.
+    const argv = w.slice(1).filter(t => !t.value.startsWith('-'));
+    const sub = argv[0]?.value;
+    if (verb === 'docker') {
+      if (sub === 'compose') { if (argv[1] && READONLY_DOCKER_COMPOSE.has(argv[1].value)) continue; return false; }
+      if (sub && READONLY_SUB.docker.has(sub)) continue;
+      return false;
+    }
+    if (verb === 'systemctl') { if (sub && READONLY_SUB.systemctl.has(sub)) continue; return false; }
+    if (verb === 'git')       { if (sub && READONLY_SUB.git.has(sub)) continue; return false; }
+    if (verb === 'journalctl') { if (w.some(t => JOURNALCTL_WRITES.test(t.value))) return false; continue; }
+    return false;                                      // unknown verb → gate
+  }
+  return true;
+}
+
 // → array of human-readable reasons this command is a deploy. Empty = not one.
 export function deployReasons(rawCommand, depth = 0) {
   const cmd = stripHeredocs(rawCommand || '');
@@ -239,14 +297,19 @@ export function deployReasons(rawCommand, depth = 0) {
       if (!dest) { add('runs a remote shell with no resolvable destination (fails closed)'); continue; }
       if (dest.dynamic) { add('runs a remote shell at an unresolvable destination (fails closed)'); continue; }
       const host = hostOf(dest.value);
-      if (isDeployHost(host)) add(`reaches a deploy host (${host})`);
+      const remote = args.slice(1).map(t => t.value).join(' ');
+      // A PROVABLY read-only remote command on a deploy host is an inspection,
+      // not a deployment (David, 2026-08-06). Reaching the host only gates when
+      // the payload can change it — or when there is no payload at all, because
+      // an interactive shell can do anything. isReadOnlyRemote fails closed.
+      const readOnly = isReadOnlyRemote(remote);
+      if (isDeployHost(host) && !readOnly) add(`reaches a deploy host (${host})`);
 
       // Everything after the destination runs AS A COMMAND on that host. A
       // bastion hop is the obvious case: the outer destination is innocent and
-      // the payload is not.
-      if (depth < 2) {
-        const remote = args.slice(1).map(t => t.value).join(' ');
-        if (remote) for (const r of deployReasons(remote, depth + 1)) add(r);
+      // the payload is not. A read-only payload has nothing to recurse into.
+      if (depth < 2 && remote && !readOnly) {
+        for (const r of deployReasons(remote, depth + 1)) add(r);
       }
       continue;
     }
