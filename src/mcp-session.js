@@ -328,7 +328,13 @@ export async function watch({ topic, region, since = 'all', owner, write }) {
     w.buffer.push(m);
     if (w.buffer.length > BUFFER_CAP) { w.buffer.shift(); w.dropped += 1; }
     const waiters = w.waiters.splice(0); for (const res of waiters) res();   // wake long-pollers
-    emitArrival({ topic: w.topic, region: w.region, ...m });                 // push sink (notifications)
+    // `self` is carried on the ARRIVAL EVENT only, never into the buffer, so
+    // poll()'s shape is unchanged. A push sink that wakes an agent must be able
+    // to ignore that agent's own posts — otherwise every message it publishes
+    // wakes it up to read its own words, and the alert channel becomes noise
+    // that gets ignored, which is how an alert channel dies.
+    const self = !!(env.signerPubkey && env.signerPubkey === s.author?.authorId);
+    emitArrival({ topic: w.topic, region: w.region, ...m, self });           // push sink (notifications)
   }, { since: sinceArg });
   WATCHES.set(key, w);                                                       // only after sub() resolves
   return { ok: true, watching: true, alreadyWatching: false, topic, region: r, since };

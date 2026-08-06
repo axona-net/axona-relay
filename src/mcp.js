@@ -20,6 +20,9 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { readFile } from 'node:fs/promises';
+import { appendFileSync, mkdirSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { DEFAULT_BRIDGE } from './ops.js';
 import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect,
 } from './mcp-session.js';
@@ -176,5 +179,55 @@ onArrival((evt) => {
     data: { event: 'axona_message', topic: evt.topic, region: evt.region, msgId: evt.msgId, message: evt.message, signer: evt.signer },
   }).catch(() => { /* client may not subscribe to logging — ignore */ });
 });
+
+// ── INBOX SINK: the arrival path an agent host can actually be woken by ──────
+//
+// WHY, given the logging push above already exists. That notification is the
+// correct server→client push and it works, but it only reaches an agent whose
+// host subscribes to MCP logging and surfaces it as an interruption. Ours does
+// not. So in practice a message sat in the watch buffer until the agent next
+// chose to poll, which made the reaction time equal to the polling interval —
+// ~25 minutes on a good day, and unbounded whenever no session was running.
+//
+// This sink writes one JSON line per arrival to a file. A file is the lowest
+// common denominator every agent host can watch: Claude Code arms a Monitor on
+// `tail -f`, and anything else can inotify/poll it. The agent is woken in
+// seconds by the arrival itself rather than by its own timer.
+//
+// It deliberately reuses the STANDING WATCHES rather than opening a second peer.
+// A separate watcher process would mean another node on prod signing with
+// another identity, and duplicate-identity confusion has already cost us one
+// live investigation (#356). One peer, one subscription, two sinks.
+//
+//   MCP_INBOX         file to append to (default ~/.axona/mcp-inbox.jsonl)
+//   MCP_INBOX_TOPICS  comma list to record; empty means EVERY watched topic
+//
+// Self-authored messages are always skipped: waking an agent to read its own
+// post trains it to ignore the channel.
+const INBOX = process.env.MCP_INBOX || join(homedir(), '.axona', 'mcp-inbox.jsonl');
+const INBOX_TOPICS = new Set(
+  String(process.env.MCP_INBOX_TOPICS ?? 'council,axona.dev,axona.chat')
+    .split(',').map((s) => s.trim()).filter(Boolean));
+
+if (INBOX && INBOX !== 'off') {
+  try { mkdirSync(dirname(INBOX), { recursive: true }); } catch { /* best effort */ }
+  onArrival((evt) => {
+    try {
+      if (evt.self) return;                                        // never wake me for my own words
+      if (INBOX_TOPICS.size && !INBOX_TOPICS.has(evt.topic)) return;
+      // One line, one arrival. `text` is a convenience projection so a shell
+      // filter (grep/jq) can read it without understanding std/message.
+      const text = typeof evt.message === 'string' ? evt.message
+        : (evt.message && typeof evt.message.text === 'string' ? evt.message.text : null);
+      appendFileSync(INBOX, `${JSON.stringify({
+        at: new Date().toISOString(),
+        topic: evt.topic, region: evt.region,
+        signer: evt.signer ? String(evt.signer).slice(0, 12) : null,
+        msgId: evt.msgId, text, message: evt.message,
+      })}\n`);
+    } catch { /* a failed write must never break message delivery */ }
+  });
+  process.stderr.write(`[axona-mcp] inbox sink -> ${INBOX} topics=${[...INBOX_TOPICS].join(',') || '(all watched)'}\n`);
+}
 
 process.stderr.write(`axona MCP server v${VERSION} ready — persistent peer, bridge ${DEFAULT_BRIDGE}\n`);
