@@ -240,13 +240,19 @@ console.log('council scope — quoted text is data; only a real command is a com
     deployReasons(`curl -s https://${H}/healthz`).length === 0);
 
   // Aster: a static quoted literal is still a real destination.
+  // NOTE: the remote payload here must be MUTATING. Since the read-only
+  // exemption (isReadOnlyRemote, see council_readonly_fence.mjs) landed, a
+  // read-only payload like `uptime` on a deploy host no longer gates — that
+  // is the intended new policy (David: allow read-only bridge inspection).
+  // These cases exist to verify DESTINATION PARSING, so they use a mutating
+  // payload; the read-only-vs-mutating distinction is fenced separately.
   ok('9c. a quoted deploy host IS a deploy',
-    deployReasons(`ssh '${H}' uptime`).length === 1,
-    JSON.stringify(deployReasons(`ssh '${H}' uptime`)));
+    deployReasons(`ssh '${H}' 'systemctl restart coturn'`).length === 1,
+    JSON.stringify(deployReasons(`ssh '${H}' 'systemctl restart coturn'`)));
   ok('9d. …with a user prefix likewise',
-    deployReasons(`ssh -i ~/.ssh/id_ed25519_axona "root@${H}" uptime`).length === 1);
+    deployReasons(`ssh -i ~/.ssh/id_ed25519_axona "root@${H}" 'systemctl restart coturn'`).length === 1);
   ok('9e. an option VALUE is not mistaken for the destination',
-    deployReasons(`ssh -o ProxyCommand=none -p 22 -i /k/id root@${H} uptime`).length === 1);
+    deployReasons(`ssh -o ProxyCommand=none -p 22 -i /k/id root@${H} 'systemctl restart coturn'`).length === 1);
   ok('9f. an unresolvable destination fails closed',
     deployReasons('ssh "$HOST" uptime').length === 1);
   ok('9g. a copy to a deploy host is a deploy',
@@ -257,8 +263,8 @@ console.log('council scope — quoted text is data; only a real command is a com
   // The payload of a remote shell runs AS A COMMAND on that host. A bastion hop
   // hides a deploy behind an innocent destination.
   ok('9i. a deploy nested inside a remote shell gates',
-    deployReasons(`ssh bastion.example "ssh ${H} uptime"`).length === 1,
-    JSON.stringify(deployReasons(`ssh bastion.example "ssh ${H} uptime"`)));
+    deployReasons(`ssh bastion.example "ssh ${H} systemctl restart coturn"`).length === 1,
+    JSON.stringify(deployReasons(`ssh bastion.example "ssh ${H} systemctl restart coturn"`)));
 }
 
 console.log(`\n${fail ? `✗ ${fail} of ${n} failed` : `✓ all ${n} checks passed`}`);

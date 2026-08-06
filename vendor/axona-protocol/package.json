@@ -1,6 +1,6 @@
 {
   "name": "@axona/protocol",
-  "version": "4.59.2",
+  "version": "4.60.0",
   "description": "Pure-JS protocol kernel for the Axona peer-to-peer mesh. Contracts (DHT, Transport, BootstrapService), the per-node AxonaPeer implementation (NH-1 routing + axonal pub/sub), and supporting helpers. No simulator dependencies; runs in browsers and Node.",
   "type": "module",
   "main": "./src/index.js",
@@ -25,7 +25,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node test/run.mjs",
+    "test": "node scripts/sync-cachebust.mjs --check && node test/run.mjs",
     "test:guard": "node test/run.mjs --guard",
     "test:all": "node test/run.mjs --class all",
     "test:extended": "node test/run.mjs --class default,extended",
@@ -35,7 +35,9 @@
     "test:mesh-relay-e2e": "node test/integration/mesh_relay_e2e.mjs",
     "test:mesh-relay-auto-e2e": "node test/integration/mesh_relay_auto_e2e.mjs",
     "test:mesh-relay-multihop": "node test/integration/mesh_relay_multihop_e2e.mjs",
-    "test:integration": "node test/integration/mesh_relay_e2e.mjs && node test/integration/mesh_relay_auto_e2e.mjs && node test/integration/mesh_relay_multihop_e2e.mjs"
+    "test:integration": "node test/integration/mesh_relay_e2e.mjs && node test/integration/mesh_relay_auto_e2e.mjs && node test/integration/mesh_relay_multihop_e2e.mjs",
+    "cachebust": "node scripts/sync-cachebust.mjs",
+    "cachebust:check": "node scripts/sync-cachebust.mjs --check"
   },
   "engines": {
     "node": ">=20"
