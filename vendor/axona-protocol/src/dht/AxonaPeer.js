@@ -1169,6 +1169,18 @@ export class AxonaPeer extends DHT {
       try { this._engineListenerUnsub(); } catch { /* swallow */ }
       this._engineListenerUnsub = null;
     }
+    // leave() sets _started=false below, which makes a follow-up stop()
+    // early-return — so the transport listeners must come off HERE too, or
+    // they survive every graceful teardown (leak found by the GH #48
+    // regression set, case G).
+    if (this._onPeerBoundUnsub) {
+      try { this._onPeerBoundUnsub(); } catch { /* swallow */ }
+      this._onPeerBoundUnsub = null;
+    }
+    if (this._onPeerDiedUnsub) {
+      try { this._onPeerDiedUnsub(); } catch { /* swallow */ }
+      this._onPeerDiedUnsub = null;
+    }
 
     // (5) close transport
     if (this._transport && typeof this._transport.stop === 'function') {

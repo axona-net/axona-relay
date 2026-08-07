@@ -31,6 +31,38 @@ import { AxonaDomain } from './dht/AxonaDomain.js';
 import { AxonaPeer }   from './dht/AxonaPeer.js';
 import { MeshUnreachableError, ErrorCodes } from './errors.js';
 
+// Live-mesh admission wait (GH #48, council 2026-08-07). Resolves with the
+// live-channel count the moment it goes positive, or 0 when the shared
+// deadline expires. Event-driven off transport.onPeerBound with a bounded
+// fallback poll; meshBoundCount() is re-read on every wake, never cached.
+// All listeners and timers are released on exit regardless of outcome — a
+// bind that fires after the deadline finds no listener and does nothing.
+async function waitForLiveBind(transport, deadline, pollMs = 250) {
+  let unsub = null, poller = null, timer = null;
+  try {
+    return await new Promise((resolve) => {
+      let done = false;
+      const check = () => {
+        if (done) return;
+        const n = transport.meshBoundCount() ?? 0;
+        if (n > 0)                  { done = true; resolve(n); }
+        else if (Date.now() >= deadline) { done = true; resolve(0); }
+      };
+      check();
+      if (done) return;
+      if (typeof transport.onPeerBound === 'function') {
+        unsub = transport.onPeerBound(() => check());
+      }
+      poller = setInterval(check, pollMs);
+      timer  = setTimeout(check, Math.max(0, deadline - Date.now()) + 5);
+    });
+  } finally {
+    try { unsub?.(); } catch { /* best-effort */ }
+    if (poller) clearInterval(poller);
+    if (timer)  clearTimeout(timer);
+  }
+}
+
 /**
  * Bring up a ready-to-use Axona peer in one call.
  *
@@ -54,6 +86,16 @@ import { MeshUnreachableError, ErrorCodes } from './errors.js';
  * @param {object|false} [opts.ready]    Options forwarded to `peer.ready()`
  *                                       (minPeers, timeoutMs, …), or `false`
  *                                       to skip the mesh warm-up wait.
+ *                                       CONTRACT (GH #48): `minPeers` is a
+ *                                       SYNAPTOME target; mesh admission is an
+ *                                       independent "at least one live WebRTC
+ *                                       bind" condition judged against ONE
+ *                                       monotonic deadline (`timeoutMs`, default
+ *                                       10s) shared by both waits. ready()
+ *                                       resolving early leaves the remainder for
+ *                                       channels to bind; exhausting it leaves
+ *                                       none. No grace period beyond the
+ *                                       caller's own timeout.
  * @param {boolean} [opts.allowBridgeOnly=false]
  *                                       Mesh-reachability contract (GH #46). By
  *                                       DEFAULT connect() throws MeshUnreachableError
@@ -170,8 +212,16 @@ export async function connect({
   });
 
   // 4. Lifecycle: start the wire, start the peer, wait for the mesh.
+  //    ONE monotonic deadline (GH #48, council 2026-08-07) covers BOTH the
+  //    synaptome warm-up (peer.ready) and the live-mesh admission below. The
+  //    deadline derives from the caller's own ready timeout — ready() resolving
+  //    early (e.g. minPeers satisfied instantly by bridge announcements) leaves
+  //    the remainder for channels to bind; ready() exhausting it leaves none.
+  //    No grace period, no silent extension of caller timeouts.
   await transport.start(nodeIdentity.id);
   await peer.start();
+  const meshWaitStart = Date.now();
+  const deadline = meshWaitStart + ((ready === false) ? 0 : (ready.timeoutMs ?? 10_000));
   const status = (ready === false) ? null : await peer.ready(ready);
 
   // 4a. Mesh-reachability gate (GH #46). If we waited for the mesh and formed
@@ -193,20 +243,35 @@ export async function connect({
   //     fall back to status.peers only for transports that don't expose it (e.g.
   //     the sim transport in tests). status.peers (synaptome.size) is still
   //     reported for observability.
-  const liveMesh = (typeof transport.meshBoundCount === 'function')
+  //     ADMISSION vs READINESS (GH #48, the 2026-08-07 prod outage): ready()'s
+  //     minPeers is a SYNAPTOME target, which bridge announcements can satisfy
+  //     at 0ms — long before any WebRTC channel binds. The 4.61.0 gate judged
+  //     live channels at that instant and threw MESH_UNREACHABLE on every load
+  //     for every minPeers caller. The contract is now atomic: when mesh is
+  //     required, connect() does not resolve on synaptome count alone — it
+  //     waits (event-driven on channel bind, bounded fallback poll) until a
+  //     live channel exists OR the single shared deadline expires. minPeers
+  //     remains a synaptome target; live-mesh admission is the independent
+  //     "at least one live bind" condition on top of it.
+  const canCountLive = (typeof transport.meshBoundCount === 'function');
+  let liveMesh = canCountLive
     ? (transport.meshBoundCount() ?? 0)
     : (status ? status.peers : 0);
+  if (status && liveMesh === 0 && canCountLive && !allowBridgeOnly) {
+    liveMesh = await waitForLiveBind(transport, deadline);
+  }
   if (status && liveMesh === 0) {
     if (!allowBridgeOnly) {
+      const waitedMs = Date.now() - meshWaitStart;
       // Tear down what we built so a thrown connect() never leaks a live socket.
       try { await peer.stop?.(); } catch { /* best-effort */ }
       try { await transport.stop?.(); } catch { /* best-effort */ }
       throw new MeshUnreachableError(
         ErrorCodes.MESH_UNREACHABLE,
-        `connect: no live WebRTC peers after ${status.ms}ms — reached the bridge ` +
+        `connect: no live WebRTC peers after ${waitedMs}ms — reached the bridge ` +
         `but formed no peer mesh (your network may block WebRTC). Pass ` +
         `{ allowBridgeOnly: true } to run bridge-only with reduced resilience.`,
-        { context: { peers: liveMesh, synapses: status.peers, ms: status.ms, reason: status.reason, bridge: bridge ?? null } },
+        { context: { peers: liveMesh, synapses: status.peers, ms: waitedMs, reason: status.reason, bridge: bridge ?? null } },
       );
     }
     // Opted in: mark the status so the app can see the node came up bridge-only,

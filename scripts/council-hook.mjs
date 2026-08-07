@@ -36,6 +36,17 @@ import { execFileSync } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// ─── GATE REMOVED (David, 2026-08-06) ────────────────────────────────────────
+// David dissolved the automated deploy gate: "It is far too strict on obviously
+// appropriate responses." The new process is human-judged — Orion and Aster
+// review the DESIGN, David reads their verdicts and decides. David is the gate.
+// This hook is unregistered from settings.json; this early exit is belt-and-
+// suspenders so a lingering registration anywhere can never block a tool call.
+// council-gate.mjs / council-verdicts.mjs remain as ADVISORY read tools for
+// summarising a review thread — they no longer enforce anything.
+process.exit(0);
+/* eslint-disable no-unreachable */
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GATE = join(HERE, 'council-gate.mjs');
 // The cache exists so a multi-command deploy does not pay a 25s #council read
