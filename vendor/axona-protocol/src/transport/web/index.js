@@ -161,6 +161,12 @@ export function webTransport({
   // sink never intercepts it).  Design:
   // axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md.
   meshRelay = true,
+  // TURN credential refresh timings (kernel 4.60.x). Literal defaults; the
+  // refresh code aliases these below. Overridable for tests and ops tuning.
+  turnRefreshSafetyMs         = 5 * 60 * 1000,   // fire this long before the credential's expiry
+  turnRefreshReplyMs          = 20 * 1000,       // per-attempt wait for the bridge's `turn` reply
+  turnRefreshMaxTries         = 3,               // in-band attempts before graceful deferral
+  turnRefreshSendErrBackoffMs = 5 * 1000,        // re-arm this long after a send error
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -681,11 +687,14 @@ export function webTransport({
   // leading field must be all digits (a partial-numeric prefix like `12ab` is
   // rejected, not silently truncated — council review, Aster). A credential
   // with no parseable expiry is left alone (no worse than before this fix).
-  const TURN_REFRESH_SAFETY_MS   = 5 * 60 * 1000;  // refresh this long before expiry
-  // How long to wait for the bridge's in-band `turn` reply before falling back
-  // to a re-dial. Generous: the refresh fires SAFETY_MS (5min) before the
-  // credential actually lapses, so a slow bridge still has minutes of runway.
-  const TURN_REFRESH_REPLY_MS    = 60 * 1000;
+  // Timings come from the constructor opts (literal defaults there); aliased to
+  // the names the refresh code below uses. Overridable for tests / ops tuning.
+  // The refresh fires SAFETY_MS before the credential lapses, so several short
+  // reply windows still have runway.
+  const TURN_REFRESH_SAFETY_MS          = turnRefreshSafetyMs;
+  const TURN_REFRESH_REPLY_MS           = turnRefreshReplyMs;
+  const TURN_REFRESH_MAX_TRIES          = turnRefreshMaxTries;
+  const TURN_REFRESH_SENDERR_BACKOFF_MS = turnRefreshSendErrBackoffMs;
   function turnExpiryMs(turn) {
     const user = turn && typeof turn.username === 'string' ? turn.username : null;
     if (!user) return 0;
@@ -725,19 +734,49 @@ export function webTransport({
     if (typeof turnRefreshTimer?.unref === 'function') turnRefreshTimer.unref();
   }
   // Ask the bridge for a fresh credential without disturbing the connection.
-  // The bridge replies `{type:'turn', turn}` → applyTurnFrame(). If it does not
-  // (a bridge predating this RPC, during a rollout), fall back to a re-dial once
-  // the reply window lapses — still minutes before the credential expires.
-  function requestTurnRefreshInBand() {
-    try { sendToBridge({ type: 'turn-refresh' }); }
-    catch (err) { log('turn-refresh-send-failed', { err: err.message }); return; }
+  // The bridge replies `{type:'turn', turn}` → applyTurnFrame(). It NEVER closes
+  // the socket: a close drops in-flight bridge RPCs (council review, Aster), so
+  // the recovery for a non-answering bridge is a bounded RETRY, then graceful
+  // deferral — not a teardown. A bridge that predates this RPC simply isn't
+  // refreshed on this path; its next natural reconnect/graduation re-welcome
+  // installs a fresh credential. `attempt` is 0-based; the timer is shared with
+  // the send-error re-arm (mutually exclusive per attempt) and cleared by
+  // applyTurnFrame on success and by stopTurnRefresh on teardown.
+  function requestTurnRefreshInBand(attempt = 0) {
+    // Send-error re-arm: a transient wedged-socket send must not silently give
+    // up (council review, Aster) — schedule another attempt with backoff.
+    try {
+      sendToBridge({ type: 'turn-refresh' });
+    } catch (err) {
+      log('turn-refresh-send-failed', { err: err.message, attempt });
+      armTurnRefreshTimer(() => requestTurnRefreshInBand(attempt + 1),
+        TURN_REFRESH_SENDERR_BACKOFF_MS, attempt);
+      return;
+    }
+    // Await the bridge's `turn` reply; on silence, retry in-band up to the cap,
+    // then defer. No socket is ever torn down for a refresh.
+    armTurnRefreshTimer(() => {
+      if (attempt + 1 < TURN_REFRESH_MAX_TRIES) {
+        log('turn-refresh-no-reply-retry', { next: attempt + 1 });
+        requestTurnRefreshInBand(attempt + 1);
+      } else {
+        log('turn-refresh-unanswered-deferred', { tries: attempt + 1 });
+      }
+    }, TURN_REFRESH_REPLY_MS, attempt);
+  }
+  // Shared timer arm for the refresh RPC: bounded by MAX_TRIES, cleared on any
+  // success/teardown. `cb` runs only if still alive and the socket is open.
+  function armTurnRefreshTimer(cb, delayMs, attempt) {
     if (turnRefreshReplyTimer != null) clearTimeout(turnRefreshReplyTimer);
+    if (attempt + 1 >= TURN_REFRESH_MAX_TRIES && delayMs === TURN_REFRESH_SENDERR_BACKOFF_MS) {
+      log('turn-refresh-send-giveup', { tries: attempt + 1 });   // no more send retries
+      return;
+    }
     turnRefreshReplyTimer = setTimeout(() => {
       turnRefreshReplyTimer = null;
       if (stopped || !socketOpen) return;
-      log('turn-refresh-no-reply-redial', {});
-      try { if (socket) socket.close(1000, 'turn-refresh-fallback'); } catch { /* ignore */ }
-    }, TURN_REFRESH_REPLY_MS);
+      cb();
+    }, delayMs);
     if (typeof turnRefreshReplyTimer?.unref === 'function') turnRefreshReplyTimer.unref();
   }
   // Apply an in-band `turn` frame (the bridge's reply to turn-refresh): install

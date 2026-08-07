@@ -1,6 +1,6 @@
 {
   "name": "@axona/protocol",
-  "version": "4.60.0",
+  "version": "4.60.1",
   "description": "Pure-JS protocol kernel for the Axona peer-to-peer mesh. Contracts (DHT, Transport, BootstrapService), the per-node AxonaPeer implementation (NH-1 routing + axonal pub/sub), and supporting helpers. No simulator dependencies; runs in browsers and Node.",
   "type": "module",
   "main": "./src/index.js",
