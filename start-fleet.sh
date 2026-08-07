@@ -46,9 +46,14 @@ echo "→ node $("$NODE_BIN" -v) at $NODE_BIN"
 # it destroys the region's held history. If a fleet is running, the only
 # sanctioned path is roll-fleet.sh (start-then-stop, one slot at a time, count
 # verified, never below strength). Excuses don't bring data back to life.
+# PREDICATE FIX (2026-08-07, second site): this compared comm = "node", but
+# macOS ps reports comm as the FULL binary path, so the guard measured 0
+# against a live fleet and the refusal below never fired — the cold-start
+# fence was dead. Same predicate as the verify count and roll-fleet's
+# live_pids(): exclude the caffeinate wrapper, never match the node side.
 RUNNING=0
 for pid in $(pgrep -f "src/index.js" 2>/dev/null || true); do
-  [ "$(ps -p "$pid" -o comm= 2>/dev/null)" = "node" ] && RUNNING=$((RUNNING + 1))
+  [ "$(ps -p "$pid" -o comm= 2>/dev/null)" != "caffeinate" ] && RUNNING=$((RUNNING + 1))
 done
 if [ "$RUNNING" -gt 0 ]; then
   echo "✗ REFUSING: $RUNNING relay(s) are LIVE. This script is for cold start only." >&2
