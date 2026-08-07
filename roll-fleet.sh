@@ -62,9 +62,16 @@ fail() { echo "✗ ABORT: $*" >&2; exit 1; }
 # One measurement function, used everywhere — never two patterns in one deploy.
 # Suffix-anchored (absolute and relative launches both match); wrappers
 # (caffeinate) excluded by comm.
+# PREDICATE FIX (2026-08-07): this compared comm = "node", but macOS ps
+# reports comm as the FULL binary path (/usr/local/bin/node), so the equality
+# matched NOTHING and live_pids() measured 0 against a healthy fleet — every
+# roll would abort on EXPECT mismatch. Never match the node side (its path
+# varies by install); EXCLUDE the wrapper instead: caffeinate's comm is the
+# bare word "caffeinate" on every macOS. Verified against a live 3-relay
+# fleet: old predicate 0, this one 3.
 live_pids() {
   for pid in $(pgrep -f "src/index.js" 2>/dev/null || true); do
-    [ "$(ps -p "$pid" -o comm= 2>/dev/null)" = "node" ] && echo "$pid"
+    [ "$(ps -p "$pid" -o comm= 2>/dev/null)" != "caffeinate" ] && echo "$pid"
   done
   # Explicit success: without this, the loop's LAST iteration testing a
   # caffeinate wrapper leaves the function returning 1, and set -e kills the

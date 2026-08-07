@@ -133,7 +133,18 @@ done
 # 3. The artifact itself: how many relay processes are actually live. This is
 #    the number that matters, and it is counted independently of the pids we
 #    think we started.
-LIVE=$(pgrep -f "src/index.js" 2>/dev/null | wc -l | tr -d ' ')
+#    COUNT FIX (2026-08-07): a raw pgrep count also matches each relay's
+#    caffeinate wrapper (its command line contains "src/index.js" as args), so
+#    a healthy CAFFEINATE=1 launch of N read as 2N and this script exit-1'd on
+#    success — the inverse of the 2026-08-05 lie, a confident FALSE ALARM.
+#    Exclude wrappers by comm ("caffeinate" is bare and stable; node's comm is
+#    a full install-dependent path, so never match the node side). Same
+#    predicate as roll-fleet.sh's live_pids() — one pattern per deploy, both
+#    scripts.
+LIVE=0
+for pid in $(pgrep -f "src/index.js" 2>/dev/null || true); do
+  [ "$(ps -p "$pid" -o comm= 2>/dev/null)" != "caffeinate" ] && LIVE=$((LIVE+1))
+done
 
 if [ "$FAILED" -gt 0 ] || [ "$LIVE" -ne "$N" ]; then
   echo "✗ FLEET NOT UP: $LIVE/$N relay(s) live, $FAILED slot(s) failed." >&2
