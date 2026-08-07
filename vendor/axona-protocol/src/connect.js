@@ -29,6 +29,7 @@ import { createNodeIdentity, createAuthorIdentity } from './identity/index.js';
 import { NeuronNode }  from './dht/NeuronNode.js';
 import { AxonaDomain } from './dht/AxonaDomain.js';
 import { AxonaPeer }   from './dht/AxonaPeer.js';
+import { MeshUnreachableError, ErrorCodes } from './errors.js';
 
 /**
  * Bring up a ready-to-use Axona peer in one call.
@@ -53,6 +54,40 @@ import { AxonaPeer }   from './dht/AxonaPeer.js';
  * @param {object|false} [opts.ready]    Options forwarded to `peer.ready()`
  *                                       (minPeers, timeoutMs, …), or `false`
  *                                       to skip the mesh warm-up wait.
+ * @param {boolean} [opts.allowBridgeOnly=false]
+ *                                       Mesh-reachability contract (GH #46). By
+ *                                       DEFAULT connect() throws MeshUnreachableError
+ *                                       if the ready() window closes with ZERO
+ *                                       WebRTC peers — a node that reached the
+ *                                       bridge and nothing else. Failing loud is
+ *                                       honest: a silent bridge-only success tells
+ *                                       an app it will work when for its user it
+ *                                       won't. Set `true` to permit bridge-only
+ *                                       operation (WebRTC-blocked / locked-down
+ *                                       networks); the returned status then carries
+ *                                       `initialBridgeOnly: true` and the node runs
+ *                                       with reduced resilience. Ignored when
+ *                                       `ready: false`.
+ *
+ *                                       NOTE the threshold is exactly ZERO and is
+ *                                       NOT conditional on the bridge having offered
+ *                                       peers (Aster, council 2026-08-06: "the
+ *                                       bridge knew someone" is an ambiguous,
+ *                                       implementation-dependent proxy — the
+ *                                       observed outcome is what matters). An
+ *                                       intentional first-node / singleton says so
+ *                                       explicitly via allowBridgeOnly or ready:false.
+ *
+ *                                       `status.initialBridgeOnly` is a CONNECT-TIME
+ *                                       SNAPSHOT, not live state: it never updates,
+ *                                       so it reads stale once a healthy node loses
+ *                                       its mesh or a bridge-only node later joins.
+ *                                       Runtime disconnect monitoring must consume a
+ *                                       LIVE mesh signal, not this field (GH #438).
+ *
+ *                                       `ready: false` bypasses BOTH the measurement
+ *                                       and this honesty signal — a caller taking
+ *                                       that path owns its own runtime monitoring.
  * @param {object}  [opts.transport]     Inject a pre-built Transport (tests,
  *                                       sim, custom stacks). Skips webTransport.
  * @param {object}  [opts.nodeIdentity]  Inject a pre-minted node identity.
@@ -74,6 +109,7 @@ export async function connect({
   author = true,
   k = 20,
   ready = {},
+  allowBridgeOnly = false,
   transport,
   nodeIdentity,
   web = {},
@@ -137,6 +173,56 @@ export async function connect({
   await transport.start(nodeIdentity.id);
   await peer.start();
   const status = (ready === false) ? null : await peer.ready(ready);
+
+  // 4a. Mesh-reachability gate (GH #46). If we waited for the mesh and formed
+  //     ZERO WebRTC peers, the node reached the bridge and nothing else — it can
+  //     bootstrap but cannot participate in the peer mesh. Fail LOUD by default:
+  //     a peer returned in this state looks connected (it has a live bridge
+  //     socket) but silently won't work for its user, and the only prior tell
+  //     was status.peers === 1 on some surfaces. A caller who knows the node can
+  //     only ever reach the bridge (WebRTC blocked, carrier NAT) opts in with
+  //     allowBridgeOnly:true and gets a degraded-but-honest peer instead.
+  //     Skipped entirely when ready===false — the caller declined to measure,
+  //     so there is nothing to gate on.
+  //
+  //     SIGNAL SEMANTICS (Aster + Orion, council 2026-08-06): gate on the count
+  //     of LIVE authenticated WebRTC channels, NOT node.synaptome.size. The
+  //     routing table can hold un-evicted stale entries during rapid churn, so a
+  //     dead mesh could read as size>0 and mask itself. transport.meshBoundCount()
+  //     is the live-channel count (bridge WebSocket excluded); we prefer it and
+  //     fall back to status.peers only for transports that don't expose it (e.g.
+  //     the sim transport in tests). status.peers (synaptome.size) is still
+  //     reported for observability.
+  const liveMesh = (typeof transport.meshBoundCount === 'function')
+    ? (transport.meshBoundCount() ?? 0)
+    : (status ? status.peers : 0);
+  if (status && liveMesh === 0) {
+    if (!allowBridgeOnly) {
+      // Tear down what we built so a thrown connect() never leaks a live socket.
+      try { await peer.stop?.(); } catch { /* best-effort */ }
+      try { await transport.stop?.(); } catch { /* best-effort */ }
+      throw new MeshUnreachableError(
+        ErrorCodes.MESH_UNREACHABLE,
+        `connect: no live WebRTC peers after ${status.ms}ms — reached the bridge ` +
+        `but formed no peer mesh (your network may block WebRTC). Pass ` +
+        `{ allowBridgeOnly: true } to run bridge-only with reduced resilience.`,
+        { context: { peers: liveMesh, synapses: status.peers, ms: status.ms, reason: status.reason, bridge: bridge ?? null } },
+      );
+    }
+    // Opted in: mark the status so the app can see the node came up bridge-only,
+    // and log it so it is never silent (GH #46: "nothing is logged"). The peer is
+    // usable but has no mesh redundancy and no bridgeless resilience until a
+    // WebRTC peer forms. `initialBridgeOnly` is a CONNECT-TIME SNAPSHOT — it does
+    // not track later mesh changes; runtime disconnect monitoring must read a live
+    // mesh signal, not this (GH #438).
+    status.initialBridgeOnly = true;
+    peer._emitLog?.('warn', 'bridge-only', {
+      reason: status.reason, ms: status.ms,
+      note: 'no WebRTC peers formed; running bridge-only (allowBridgeOnly)',
+    });
+  } else if (status) {
+    status.initialBridgeOnly = false;
+  }
 
   // 4b. Proactively self-integrate into our keyspace neighbourhood
   //     (findKClosest(self) + open authenticated channels) so we are

@@ -1138,6 +1138,14 @@ export function webTransport({
     try { sendToBridge({ type: 'peer-list-request' }); return true; }
     catch { return false; }
   };
+  /**
+   * Count of LIVE authenticated WebRTC mesh channels (the bridge WebSocket is
+   * NOT counted — it is signaling, not a mesh peer). This is the honest mesh-
+   * reachability signal: unlike node.synaptome.size it holds no un-evicted stale
+   * entries, so connect()'s zero-mesh gate (GH #46) and runtime liveness checks
+   * key on this rather than the routing table's count. 0 ⇒ bridge-only.
+   */
+  composite.meshBoundCount = () => meshBoundCount();
   /** Subscribe to bridge-state transitions.  cb(state, detail). Returns unsub. */
   composite.onBridgeState = (cb) => {
     if (typeof cb !== 'function') throw new TypeError('onBridgeState: cb must be a function');

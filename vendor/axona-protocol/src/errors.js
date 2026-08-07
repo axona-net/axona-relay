@@ -139,6 +139,21 @@ export class MetricsError extends AxonaError {
 }
 
 /**
+ * connect() completed the bridge handshake but formed ZERO WebRTC mesh peers
+ * within the ready() window — the node can talk to the bridge and nothing else.
+ * By default connect() throws this rather than returning a peer that looks up
+ * (status.peers === 1 was the only tell — GH #46), because a silent bridge-only
+ * success tells an application it will work when for its user it will not. Some
+ * users genuinely can only reach the bridge (WebRTC blocked, locked-down or
+ * carrier-NAT'd networks); those callers pass `allowBridgeOnly: true` to opt in,
+ * and get a peer with `status.bridgeOnly === true` and its limits documented.
+ * context carries: { peers, ms, reason, bridge }.
+ */
+export class MeshUnreachableError extends AxonaError {
+  constructor(code, message, opts) { super(code, message, opts); }
+}
+
+/**
  * Wire-version handshake mismatch.  The bridge requires a newer peer
  * than this client, or vice versa.  context carries:
  *   { reason, serverVersion, clientVersion, downloadUrl? }
@@ -166,6 +181,9 @@ export const ErrorCodes = Object.freeze({
   TRANSPORT_TIMEOUT:         'TRANSPORT_TIMEOUT',
   TRANSPORT_CHANNEL_CLOSED:  'TRANSPORT_CHANNEL_CLOSED',
   TRANSPORT_HELLO_FAILED:    'TRANSPORT_HELLO_FAILED',
+
+  // Connect bootstrap
+  MESH_UNREACHABLE:          'MESH_UNREACHABLE',                // connect() formed 0 WebRTC peers; bridge-only (GH #46)
 
   // Publish
   PUBLISH_INVALID_TOPIC:     'PUBLISH_INVALID_TOPIC',
@@ -229,6 +247,7 @@ const CLASS_REGISTRY = {
   UnpubError,
   PullError,
   MetricsError,
+  MeshUnreachableError,
   UpgradeRequiredError,
 };
 

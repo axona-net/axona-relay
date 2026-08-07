@@ -28,6 +28,7 @@ export {
   TouchError,
   PullError,
   MetricsError,
+  MeshUnreachableError,
   UpgradeRequiredError,
   ErrorCodes,
   isWireError,
