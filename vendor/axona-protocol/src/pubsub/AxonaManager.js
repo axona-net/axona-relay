@@ -66,6 +66,7 @@ import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
 import { wireHandlersMethods }  from './wireHandlers.js';
 import { syncEngineMethods }    from './syncEngine.js';
+import { writeFlightMethods }   from './writeFlight.js';
 
 // Constants, wire types, and the region-lock switch live in constants.js
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
@@ -676,6 +677,10 @@ export class AxonaManager {
   _forwardToRoot(topicBig, type, payload, rootHex) {
     const declares = this.dht?.verdictsSupported;
     const rec = this._rootBeacons.get(topicBig);           // capture identity + at BEFORE the send
+    // E3 (v0.3): a WRITE completes only on its INGEST-ack. The flight opens at
+    // dispatch; every routing verdict below stays hop-local evidence — consumed
+    // (anywhere, including at the named root) no longer ends the write's story.
+    if (type === T.PUB || type === T.KILL) this._flightOpen(topicBig, rootHex, type, payload);
     const sent = this._send(type, { ...payload, via: [rootHex] });
     Promise.resolve(sent).then((r) => {
       const v = dispatchVerdict(r, declares);
@@ -1107,6 +1112,7 @@ Object.assign(
   repairPlaneMethods,    // the tick scheduler, retries, replication, departure
   wireHandlersMethods,   // routed handlers + axon-tree mechanics
   syncEngineMethods,     // Phase 8: the ONE repair/durability sync operation + policy table
+  writeFlightMethods,    // E3 (Dead-Root Eviction v0.3): ingest-ack write completion, receipt probe, evict + retry-promote
 );
 
 export default AxonaManager;

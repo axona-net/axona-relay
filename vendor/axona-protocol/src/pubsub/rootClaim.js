@@ -69,6 +69,11 @@ export function makeRole(topicId, isRoot, createdAt = null) {
                                      // Caught by smoke_role_admission.mjs, which builds 96 roles that
                                      // were never serviced and rightly expects saturation.
     isRoot,                          // closest-to-topic node → true; delegated child → false
+    epoch: 0,                        // root INCARNATION (Dead-Root Eviction v0.3): minted as
+                                     // knownEpoch(topic)+1 every time this role becomes root, 0 while
+                                     // not root. Carried in beacons; orders competing/returning claims
+                                     // for the same seat (higher epoch wins reconciliation, E4). A
+                                     // node that has never heard of the topic mints epoch 1.
     subscribers: new Map(),          // subHex -> { since, lastRenewed }
     children: new Set(),             // subHex of subscribers that are themselves child relays
     cache: [],                       // [{ msgId, publishTs, json, bytes }] asc by publishTs
@@ -144,6 +149,10 @@ export class RootClaim {
     if (b.root === lc(idHex(m.nodeId))) return null;
     let rb; try { rb = idBig(b.root); } catch { return null; }
     if ((rb ^ topicBig) >= (m.nodeId ^ topicBig)) return null;   // never defer to a farther node (I-2)
+    // E3 tombstone: a convicted incarnation's beacon is the corpse's ghost.
+    // Epoch-bounded — a HIGHER epoch from the same node is a legitimate
+    // rebirth and passes (the E4 adopt path mints it).
+    if (m._rootTombstoned?.(topicBig, b.root, b.epoch)) return null;
     // A verified record used to return HERE unconditionally — no liveness test,
     // no freshness cut, bounded only by exp (2×ROOT_VERIFY_MS = 90s, 3× the
     // remote-beacon window). Verification proves the root WAS the terminus at
@@ -202,6 +211,10 @@ export class RootClaim {
   // The ONLY place role.isRoot changes. One structured log per flip.
   _set(role, isRoot, why, ctx = {}) {
     if (role.isRoot === isRoot) return;
+    // Root INCARNATION mint (v0.3): every entry to the ROOT nature takes the
+    // next epoch for this seat. Minted BEFORE the flip so the announce that
+    // follows any promotion carries the new incarnation, never a stale one.
+    if (isRoot) role.epoch = (this.m._knownEpoch?.(role.topicId) ?? 0) + 1;
     // Nature hygiene (v4.26.0, Phase 7): a role flipping to ROOT sheds any
     // BACKUP residue in the same transition. Before this, promote() left
     // backupOf + the _backupTopics membership in place forever — a ROOT
@@ -265,6 +278,7 @@ export class RootClaim {
     // oversight — a terminus that refuses drops data.
     if (!m.admitRole(topicBig, false)) return null;    // HARD only (bridge)
     const role = makeRole(topicBig, true, m._now());
+    role.epoch = (m._knownEpoch?.(topicBig) ?? 0) + 1;   // incarnation mint (v0.3) — born-as-root site
     role.formedAt = m._now(); role.lastVerify = 0;
     m.axonRoles.set(topicBig, role);
     m._log('info', 'root-formed', { topic: idHex(topicBig).slice(0, 12) });

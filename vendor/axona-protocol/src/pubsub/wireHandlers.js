@@ -37,6 +37,9 @@ export const wireHandlersMethods = {
     on(T.HANDOFF,  this._onHandoff);
     on(T.REPLICATE, this._onReplicate);
     on(T.KILL,     this._onKill);
+    on(T.INGESTACK, this._onIngestAck);
+    on(T.RECEIPTPROBE, this._onReceiptProbe);
+    on(T.RECEIPTNACK, this._onReceiptNack);
     on(T.TOUCH,    this._onTouch);   // no-op (peer.touch deprecated v4.3.0); kept for wire compat
     on(T.PULL,     this._onPull);
     on(T.PULLRESP, this._onPullResp);
@@ -290,31 +293,36 @@ export const wireHandlersMethods = {
     // continue toward the topic id. Bare-topic publishes always promote above.
     if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
 
-    await this._ingestPublish(role, payload.json);
+    const ingest = await this._ingestPublish(role, payload.json);
+    if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub');
     return 'consumed';
   },
 
   // Root ingress: authenticate, enforce write policy, stamp, cache, fan out.
   async _ingestPublish(role, json) {
     let env;
-    try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return; }
+    try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return { ok: false, reason: 'unparseable' }; }
 
     const v = await verifyEnvelope(env);                                 // B-4 sig + msgId
-    if (!v.ok) { this._log('warn', 'drop-bad-envelope', { reason: v.reason }); return; }
+    if (!v.ok) { this._log('warn', 'drop-bad-envelope', { reason: v.reason }); return { ok: false, reason: 'bad-envelope' }; }
     const fr = checkFreshness(env, { now: this._now() });                 // C-2 freshness (live ingress)
-    if (!fr.ok) { this._log('warn', 'drop-stale', { reason: fr.reason }); return; }
+    if (!fr.ok) { this._log('warn', 'drop-stale', { reason: fr.reason }); return { ok: false, reason: 'stale' }; }
 
     const desc = env.topic;
     let tid;
     try { tid = await deriveTopicIdBig({ region: desc.region, owner: desc.owner, name: desc.name, write: desc.write }); }
-    catch { this._log('warn', 'drop-bad-descriptor'); return; }
-    if (tid !== role.topicId) { this._log('warn', 'drop-topic-mismatch'); return; }
+    catch { this._log('warn', 'drop-bad-descriptor'); return { ok: false, reason: 'bad-descriptor' }; }
+    if (tid !== role.topicId) { this._log('warn', 'drop-topic-mismatch'); return { ok: false, reason: 'topic-mismatch' }; }
     if (desc.write === 'owner' && (!env.signerPubkey || lc(env.signerPubkey) !== lc(desc.owner))) {
-      this._log('warn', 'drop-write-policy', { topic: desc.name }); return;
+      this._log('warn', 'drop-write-policy', { topic: desc.name }); return { ok: false, reason: 'write-policy' };
     }
 
-    if (role.cacheIds.has(env.msgId)) return;                            // idempotent re-publish
-    if (this._tombstoned(role, env.msgId, json)) return;                 // killed (or republish-after-kill) → suppress
+    // Both of these are TERMINAL for the write and ack as SUCCESS (v0.3 §1):
+    // already-held is the idempotent-retry case, and a tombstoned republish is
+    // settled state — an ack is what stops the writer's flight from probing a
+    // root that is doing its job.
+    if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
+    if (this._tombstoned(role, env.msgId, json)) return { ok: true, msgId: env.msgId, suppressed: true };
 
     // STAMP — single serialization point; strictly monotonic, floored at now.
     const ts = Math.max(role.lastTs + 1, this._now());
@@ -402,7 +410,10 @@ export const wireHandlersMethods = {
         this._log('warn', 'pubsub:replicate-all-failed', {
           topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
         });
-        return;                       // durability stays pending → the tick retries
+        // INGEST happened (cached, stamped, fanned) — the ack below still
+        // fires; durability is the cohort's job and the tick keeps retrying
+        // the replication independently (v0.3: the ack asserts ingestion).
+        return { ok: true, msgId: env.msgId, pendingDurability: true };
       }
       // Honesty signal (#362): the eager replicate could recruit NOBODY — this
       // node is a SINGLETON root and the confirm below asserts only "I, one
@@ -420,6 +431,43 @@ export const wireHandlersMethods = {
       }
     }
     this._confirmPending(role.topicId, env.msgId);                       // our own publish landed (we're its root) → stop retrying
+    return { ok: true, msgId: env.msgId };
+  },
+
+  // Emit the correlated INGEST-ack one hop back to the node that handed us the
+  // write (v0.3 §1). Never to the origin publisher — there is deliberately no
+  // publish-ack (location privacy); the E3 flight lives at the deferral sites.
+  _sendIngestAck(fromId, role, msgId, op) {
+    if (fromId == null) return;
+    let fromBig; try { fromBig = idBig(fromId); } catch { return; }
+    if (fromBig === this.nodeId) return;
+    this._route(fromBig, T.INGESTACK, {
+      topicId: idHex(role.topicId), msgId, epoch: role.epoch ?? 0, op,
+    });
+    this._log('debug', 'ingest-ack-sent', { topic: idHex(role.topicId).slice(0, 12), op });
+  },
+
+  // Receive an INGEST-ack: record the correlation for the write flight (E3).
+  // Bounded store; entries are consumed by the flight or age out by insertion
+  // order. Everything is validated — a malformed ack records nothing.
+  _onIngestAck(payload, meta) {
+    if (!payload || typeof payload.topicId !== 'string' || typeof payload.msgId !== 'string') return 'consumed';
+    const op = payload.op === 'kill' ? 'kill' : payload.op === 'pub' ? 'pub' : null;
+    if (!op) return 'consumed';
+    const epoch = (Number.isInteger(payload.epoch) && payload.epoch >= 0) ? payload.epoch : 0;
+    if (!this._ingestAcks) this._ingestAcks = new Map();
+    const key = `${lc(payload.topicId)}|${payload.msgId}|${op}`;
+    this._ingestAcks.set(key, { epoch, at: this._now(), from: meta?.fromId != null ? String(meta.fromId) : null });
+    while (this._ingestAcks.size > 512) {
+      const oldest = this._ingestAcks.keys().next().value;
+      this._ingestAcks.delete(oldest);
+    }
+    this._log('debug', 'ingest-ack', { key: key.slice(0, 24), epoch });
+    // The ONLY terminal write success (E3) — and it must bind: sender +
+    // epoch are enforced inside (Aster seq 439), so a stray holder's ack or
+    // a stale incarnation never settles a flight against the suspect.
+    this._flightComplete(payload.topicId, payload.msgId, op, meta?.fromId, epoch);
+    return 'consumed';
   },
 
   // ── stamped-replay-up durability (§6) ────────────────────────────────
@@ -794,6 +842,10 @@ export const wireHandlersMethods = {
     role.lastTs = ts;
     const seq = ++role.seq;
     this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq });
+    // KILL completes on tombstone ingest, separately from PUB (v0.3 §1).
+    // _applyKill is tombstone-gated internally; re-acking a duplicate kill is
+    // the idempotent-success case, same as a duplicate publish.
+    this._sendIngestAck(meta?.fromId, role, target, 'kill');
     return 'consumed';
   },
 

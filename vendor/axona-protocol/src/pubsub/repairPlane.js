@@ -47,6 +47,9 @@ import { dispatchVerdict } from './dispatch.js';
 
 export const repairPlaneMethods = {
   async refreshTick() {
+    // E3 write flights: deadline sweep rides the kernel's one scheduler — no
+    // per-flight timers, nothing to leak on teardown.
+    try { this._flightSweep(); } catch (e) { this._log('warn', 'flight-sweep-error', { err: String(e?.message || e) }); }
     const now = this._now();
 
     // ── Observed tick timing (v4.47.0) ────────────────────────────────────
