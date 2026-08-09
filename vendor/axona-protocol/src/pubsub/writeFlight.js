@@ -27,8 +27,20 @@
 // per-flight timers, nothing to leak; every exit path deletes the flight.
 import { T, BEACON_TTL_MS } from './constants.js';
 import { idHex, idBig } from './ids.js';
+import { rootPubMatchesNodeHash } from './ackProof.js';
 
 const lc = (s) => String(s).toLowerCase();
+
+// 16 random bytes as lowercase hex — a flightNonce (per flight generation) or an
+// attemptId (per entry). crypto.getRandomValues is available in every runtime
+// the kernel targets (browser, node, sim).
+function rand16hex() {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  let s = '';
+  for (let i = 0; i < 16; i++) s += b[i].toString(16).padStart(2, '0');
+  return s;
+}
 
 // Deadlines. One monotonic budget per stage, spent from flight-open (the
 // mesh-gate discipline): ack must land inside INGEST_ACK_MS of the forward;
@@ -54,9 +66,15 @@ export const writeFlightMethods = {
   // (Aster item 3): one flight per (topic, suspect incarnation); concurrent
   // stranded writers JOIN the standing flight — they never launch parallel
   // probes.
-  _flightOpen(topicBig, rootHex, type, payload) {
+  // Returns the ack-routing tuple {ackTo, flightNonce, attemptId} the caller
+  // stamps on the forwarded write (D1) — or null on a malformed write. `ackTo`
+  // (this node's transport id) + `flightNonce` (one per flight generation) are
+  // per-flight; `attemptId` is per-entry (Aster R10), inheritable across a
+  // promotion so the chain stays one attempt (the `attemptId` arg — D2 threads
+  // the API-boundary value here; passing null mints one).
+  _flightOpen(topicBig, rootHex, type, payload, attemptId = null) {
     const msgId = writeMsgId(type, payload);
-    if (!msgId) return;                                  // malformed write — verification refuses it downstream
+    if (!msgId) return null;                              // malformed write — verification refuses it downstream
     if (!this._writeFlights) this._writeFlights = new Map();
     const rec = this._rootBeacons.get(topicBig);
     const epoch = (rec && Number.isInteger(rec.epoch)) ? rec.epoch : 0;
@@ -64,11 +82,18 @@ export const writeFlightMethods = {
     let f = this._writeFlights.get(key);
     if (!f) {
       f = { topicBig, rootHex: lc(rootHex), epoch, entries: new Map(),
-            stage: 'await-ack', rounds: 0, deadline: this._now() + INGEST_ACK_MS };
+            stage: 'await-ack', rounds: 0, deadline: this._now() + INGEST_ACK_MS,
+            ackTo: lc(idHex(this.nodeId)), flightNonce: rand16hex() };
       this._writeFlights.set(key, f);
     }
     const op = type === T.KILL ? 'kill' : 'pub';
-    f.entries.set(corrKey(idHex(topicBig), msgId, op), { type, payload, msgId, op });
+    const ck = corrKey(idHex(topicBig), msgId, op);
+    let entry = f.entries.get(ck);
+    if (!entry) {
+      entry = { type, payload, msgId, op, attemptId: (attemptId ? lc(attemptId) : rand16hex()) };
+      f.entries.set(ck, entry);
+    }
+    return { ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: entry.attemptId };
   },
 
   // Called from _onIngestAck: a correlated receipt terminates the entry, and
@@ -100,6 +125,36 @@ export const writeFlightMethods = {
       f.entries.delete(ck);
       if (f.entries.size === 0) this._writeFlights.delete(key);
       this._log('debug', 'write-flight-complete', { key: key.slice(0, 20), via: 'ingest-ack' });
+    }
+  },
+
+  // D1 (Write-Flight Ack Routing): complete an entry on a VERIFIED signed ACK
+  // PROOF that reached the flight owner across any number of hops — the deaf-
+  // flight fix. `pf` is verifyAckProof(frame).fields (signature already checked
+  // against pf.rootPub by the caller). Binding: the entry's attemptId, the
+  // flight's ackTo + flightNonce, the incarnation epoch (unversioned epoch-0
+  // flights accept any), and the AUTHORITY — pf.rootPub must hash-bind to the
+  // flight's suspect rootHex (SHA-256(pub) hash slot; the region prefix is not
+  // key-derivable, so only the hash portion binds — same property as D1 R1).
+  // A proof failing any check leaves the flight open to run its receipt-bound
+  // recovery; it never falsely completes.
+  async _flightCompleteSigned(pf) {
+    if (!this._writeFlights || !pf) return;
+    const ck = corrKey(pf.topicId, pf.msgId, pf.op);
+    for (const [key, f] of this._writeFlights) {
+      const entry = f.entries.get(ck);
+      if (!entry) continue;
+      if (entry.attemptId !== lc(pf.attemptId)) { this._log('info', 'write-flight-ack-unbound-attempt', { key: key.slice(0, 20) }); continue; }
+      if (f.ackTo !== lc(pf.ackTo))             { this._log('info', 'write-flight-ack-unbound-ackto',   { key: key.slice(0, 20) }); continue; }
+      if (f.flightNonce !== lc(pf.flightNonce)) { this._log('info', 'write-flight-ack-unbound-nonce',   { key: key.slice(0, 20) }); continue; }
+      if (f.epoch !== 0 && pf.epoch !== f.epoch) { this._log('info', 'write-flight-ack-epoch-mismatch', { key: key.slice(0, 20), got: pf.epoch, want: f.epoch }); continue; }
+      let rootBig; try { rootBig = idBig(f.rootHex); } catch { continue; }
+      let authOk = false;
+      try { authOk = await rootPubMatchesNodeHash(pf.rootPub, rootBig); } catch { authOk = false; }
+      if (!authOk) { this._log('info', 'write-flight-ack-unbound-authority', { key: key.slice(0, 20), want: f.rootHex.slice(0, 12) }); continue; }
+      f.entries.delete(ck);
+      if (f.entries.size === 0) this._writeFlights.delete(key);
+      this._log('debug', 'write-flight-complete', { key: key.slice(0, 20), via: 'signed-proof' });
     }
   },
 
@@ -162,7 +217,10 @@ export const writeFlightMethods = {
       if (f.topicBig !== tBig || f.stage !== 'probing') continue;
       f.stage = 'retrying';
       f.deadline = this._now() + INGEST_ACK_MS;
-      for (const e of f.entries.values()) this._send(e.type, { ...e.payload, via: [f.rootHex] });
+      // Re-stamp the ack routing (D1): the retry must carry the same ackTo +
+      // flightNonce + per-entry attemptId so the root's signed proof still binds
+      // to THIS open flight.
+      for (const e of f.entries.values()) this._send(e.type, { ...e.payload, via: [f.rootHex], ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: e.attemptId });
       this._log('info', 'receipt-nack-retry', {
         topic: idHex(f.topicBig).slice(0, 12), root: f.rootHex.slice(0, 12),
       });
@@ -222,12 +280,18 @@ export const writeFlightMethods = {
       return;
     }
     const bestHex = lc(idHex(best));
-    for (const e of f.entries.values()) this._send(e.type, { ...e.payload, via: [bestHex] });
-    // The promoted write is itself a fresh forward — _forwardToRoot's caller
-    // path re-opens a flight against the NEW candidate, so a second flapper
-    // gets the same treatment (bounded by each flight's own rounds cap).
-    this._flightOpen(f.topicBig, bestHex, f.entries.values().next().value.type,
-      f.entries.values().next().value.payload);
+    // The promoted write is a fresh forward — open a flight against the NEW
+    // candidate FIRST so we can stamp its ack routing (D1) on the re-send, then
+    // forward each entry via-pinned. The attemptId is INHERITED from the old
+    // entry so the chain stays one attempt across the promotion (D2's budget
+    // reads it); the new flight generation gets its own flightNonce. A second
+    // flapper thus gets the same receipt-bound treatment, bounded by its own
+    // rounds cap.
+    for (const e of f.entries.values()) {
+      const m = this._flightOpen(f.topicBig, bestHex, e.type, e.payload, e.attemptId);
+      if (!m) { this._send(e.type, { ...e.payload, via: [bestHex] }); continue; }  // malformed — forward unstamped, unsigned recovery
+      this._send(e.type, { ...e.payload, via: [bestHex], ackTo: m.ackTo, flightNonce: m.flightNonce, attemptId: m.attemptId });
+    }
     this._log('info', 'write-flight-promoted', {
       topic: idHex(f.topicBig).slice(0, 12), to: bestHex.slice(0, 12),
     });

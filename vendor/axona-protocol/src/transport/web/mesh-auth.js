@@ -44,6 +44,8 @@
 // =====================================================================
 
 import { buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces, cbvFromFingerprints, AUTH_PROTO } from '../handshake-auth.js';
+import { signCapAttest, verifyCapAttest, WRITE_FLIGHT_ACK_V1 } from '../../pubsub/capAttest.js';
+import { hexToBytes } from '../../pubsub/ackProof.js';
 
 /** Symmetric domain-separation tag for the WebRTC-mesh CBV.  MUST be a
  *  constant both endpoints share (see header). */
@@ -64,7 +66,7 @@ export class MeshAuth {
    *        the CBV is nonce-only (sim / unit-test paths with no DTLS).
    * @param {(event: string, data?: object) => void} [opts.log]
    */
-  constructor({ identity, send, bindPeer, fingerprints = null, log = () => {} }) {
+  constructor({ identity, send, bindPeer, fingerprints = null, onCapable = null, log = () => {} }) {
     if (!identity || typeof identity.sign !== 'function') {
       throw new TypeError('MeshAuth: identity with sign() required');
     }
@@ -74,10 +76,17 @@ export class MeshAuth {
     if (fingerprints !== null && typeof fingerprints !== 'function') {
       throw new TypeError('MeshAuth: fingerprints must be a function or null');
     }
+    if (onCapable !== null && typeof onCapable !== 'function') {
+      throw new TypeError('MeshAuth: onCapable must be a function or null');
+    }
     this._identity     = identity;
     this._send         = send;
     this._bindPeer     = bindPeer;
     this._fingerprints = fingerprints;
+    // D0/R13: called once per channel when the peer's CAP_ATTEST verifies, with
+    // (peerNodeIdHex, meshId). The transport records the peer as write-flight-ack
+    // capable so AxonaManager.pickCapableAdjacent can delegate flight ownership.
+    this._onCapable    = onCapable;
     this._log          = log;
     /** @type {Map<string, {myNonce:string, peerNonce?:string, peerNodeId?:string, pendingSig?:object, sigSent:boolean, bound:boolean}>} */
     this._state = new Map();
@@ -200,7 +209,18 @@ export class MeshAuth {
         const channelKey = [st.myNonce, st.peerNonce].sort().join(':');
         this._bindPeer(res.nodeId, meshId, channelKey);
         st.bound = true;
+        // Retain what the post-bind CAP_ATTEST exchange needs: the peer's
+        // AUTHENTICATED pubkey (from the verified hello) and THIS channel's cbv.
+        // Capability is verified against these — never against anything a later
+        // frame supplies (R15).
+        st.peerPubkey = (st.pendingSig && typeof st.pendingSig.pubkey === 'string') ? st.pendingSig.pubkey : null;
+        st.cbv        = cbv;
         this._log('auth-mesh-complete', { meshId, peer: res.nodeId });
+        // D0/R13 (Write-Flight Ack Routing): now that base auth is complete,
+        // attest our own write-flight-ack capability and try any CAP_ATTEST the
+        // peer already sent. Post-bind + best-effort — never gates the bind.
+        this._sendCapAttest(meshId, st);
+        if (st.pendingCap) { const b = st.pendingCap; st.pendingCap = null; this._verifyCap(meshId, st, b); }
       } catch (err) {
         this._log('mesh-bind-failed', { meshId, err: err.message });
       } finally {
@@ -208,4 +228,47 @@ export class MeshAuth {
       }
     }
   }
+
+  // ── CAP_ATTEST (R13/R15/R17): capability as a post-bind decoration ──────
+  // Send our signed attestation over THIS channel's cbv. Best-effort: a failure
+  // just leaves us un-attested to the peer (they treat us as incapable and take
+  // their own fallback) — it never affects the bind.
+  async _sendCapAttest(meshId, st) {
+    if (!st?.cbv) return;
+    try {
+      const frame = await signCapAttest((b) => this._identity.sign(b), {
+        nodeId: this._identity.id, cbvString: st.cbv,
+      });
+      this._send(meshId, { k: 'ntf', type: 'cap-attest', body: frame });
+    } catch (err) { this._log('cap-attest-send-failed', { meshId, err: err.message }); }
+  }
+
+  // Peer's CAP_ATTEST. If we are not yet bound (their frame beat our bind),
+  // buffer ONE and re-try it at bind; otherwise verify now.
+  async onCapAttest(meshId, body) {
+    if (typeof meshId !== 'string') return;
+    const st = this._state.get(meshId);
+    if (!st) return;
+    if (!st.bound || !st.peerPubkey || !st.cbv) { st.pendingCap = body; return; }
+    await this._verifyCap(meshId, st, body);
+  }
+
+  // Verify against the peer's AUTHENTICATED pubkey + OUR channel cbv (R15/R17),
+  // require the attester nodeId to be this channel's peer, then record + notify.
+  async _verifyCap(meshId, st, body) {
+    if (st.capable) return;                                   // idempotent
+    let peerKey; try { peerKey = hexToBytes(String(st.peerPubkey), 32); } catch { peerKey = null; }
+    if (!peerKey) { this._log('cap-attest-no-peerkey', { meshId }); return; }
+    let res;
+    try {
+      res = await verifyCapAttest(body, { peerKey, expectedNodeId: st.peerNodeId, cbvString: st.cbv });
+    } catch (err) { this._log('cap-attest-verify-threw', { meshId, err: err.message }); return; }
+    if (!res.ok) { this._log('cap-attest-rejected', { meshId, reason: res.reason }); return; }
+    st.capable = true;
+    this._log('cap-attest-ok', { meshId, peer: st.peerNodeId, cap: WRITE_FLIGHT_ACK_V1 });
+    try { this._onCapable?.(st.peerNodeId, meshId); } catch { /* callback must not wedge the channel */ }
+  }
+
+  /** Has the peer on `meshId` attested write-flight-ack capability? */
+  isCapable(meshId) { return this._state.get(meshId)?.capable === true; }
 }

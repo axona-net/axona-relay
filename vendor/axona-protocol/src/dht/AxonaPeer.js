@@ -2963,6 +2963,11 @@ export class AxonaPeer extends DHT {
       // exclude it from the reachable-closest test in its root-claim fallback, the
       // same way findKClosest/routeMessage already skip it.
       bridgeId: () => node.transport?.bridgeNodeIdBig ?? null,
+      // Per-channel write-flight-ack capability (4.62.2 R13/R15/R17), read by
+      // pickCapableAdjacent for D0 delegation. The web transport sets this from a
+      // verified CAP_ATTEST; transports without a mesh (sim/node-WS/bridge) expose
+      // no isCapable, so this returns false and pickCapableAdjacent fails closed.
+      isCapable: (hex) => node.transport?.isCapable?.(hex) ?? false,
       // Mesh re-warm hook (task #332 facet 2): refreshTick calls this when the
       // mesh stays starved. Two complementary paths: ask the bridge to resend
       // its peer-list (a dissolved mesh leaves an EMPTY routing table, so
@@ -3103,6 +3108,7 @@ export class AxonaPeer extends DHT {
 
     const am = new AxonaManager({
       dht,
+      identity: this._identity || null,   // transport keypair — signs D1 INGEST-ACK proofs
       ...(this._rootReplicas != null ? { rootReplicas: this._rootReplicas } : {}),
     });
     // ARM the periodic refreshTick (kernel v4.9.1). Earlier this was deliberately

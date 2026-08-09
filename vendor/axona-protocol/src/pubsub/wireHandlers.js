@@ -22,6 +22,7 @@ import { idHex, idBig, lc, isHexId } from './ids.js';
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
+import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
 
 export const wireHandlersMethods = {
   _registerHandlers() {
@@ -294,7 +295,7 @@ export const wireHandlersMethods = {
     if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const ingest = await this._ingestPublish(role, payload.json);
-    if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub');
+    if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub', payload);
     return 'consumed';
   },
 
@@ -437,7 +438,23 @@ export const wireHandlersMethods = {
   // Emit the correlated INGEST-ack one hop back to the node that handed us the
   // write (v0.3 §1). Never to the origin publisher — there is deliberately no
   // publish-ack (location privacy); the E3 flight lives at the deferral sites.
-  _sendIngestAck(fromId, role, msgId, op) {
+  _sendIngestAck(fromId, role, msgId, op, hints) {
+    // D1 (Write-Flight Ack Routing): if the forwarder stamped an `ackTo` (the
+    // flight owner's transport id) AND this node holds a transport identity,
+    // sign an INGEST-ACK PROOF and route it STRAIGHT to the owner across however
+    // many hops — the deaf-flight fix. Otherwise fall back to the 4.62.1 unsigned
+    // ack one hop back to the forwarder: correct on the 1-hop routes where it
+    // ever worked, and the path a pre-4.62.2 forwarder (no ackTo) or an
+    // identity-less node (sim/test double) still takes. Additive-optional; no
+    // wire-version bump.
+    if (hints && typeof hints.ackTo === 'string' && this._nodeIdentity) {
+      this._sendSignedIngestAck(role, msgId, op, hints);   // async, self-contained, never throws out
+      return;
+    }
+    this._sendUnsignedIngestAck(fromId, role, msgId, op);
+  },
+
+  _sendUnsignedIngestAck(fromId, role, msgId, op) {
     if (fromId == null) return;
     let fromBig; try { fromBig = idBig(fromId); } catch { return; }
     if (fromBig === this.nodeId) return;
@@ -447,10 +464,48 @@ export const wireHandlersMethods = {
     this._log('debug', 'ingest-ack-sent', { topic: idHex(role.topicId).slice(0, 12), op });
   },
 
+  async _sendSignedIngestAck(role, msgId, op, hints) {
+    try {
+      let ackToBig; try { ackToBig = idBig(hints.ackTo); } catch { return; }
+      const frame = await signAckProof(
+        (bytes) => this._nodeIdentity.sign(bytes),
+        {
+          purpose:     PURPOSE.INGEST_ACK,
+          op:          op === 'kill' ? OP.kill : OP.pub,
+          topicId:     idHex(role.topicId),
+          msgId,
+          epoch:       role.epoch ?? 0,
+          attemptId:   hints.attemptId,
+          ackTo:       hints.ackTo,
+          flightNonce: hints.flightNonce,
+          rootPub:     this._nodeIdentity.pubkey,
+        },
+      );
+      this._route(ackToBig, T.INGESTACK, frame);
+      this._log('debug', 'ingest-ack-signed', { topic: idHex(role.topicId).slice(0, 12), op, to: String(hints.ackTo).slice(0, 12) });
+    } catch (e) {
+      // Malformed hint (bad attemptId/nonce width) or a signer failure: log and
+      // let the owner's flight recover via its receipt probe. Never a false
+      // completion; never an unhandled rejection.
+      this._log('warn', 'ingest-ack-sign-failed', { detail: String((e && (e.code || e.message)) || e) });
+    }
+  },
+
   // Receive an INGEST-ack: record the correlation for the write flight (E3).
   // Bounded store; entries are consumed by the flight or age out by insertion
   // order. Everything is validated — a malformed ack records nothing.
-  _onIngestAck(payload, meta) {
+  async _onIngestAck(payload, meta) {
+    // D1 (Write-Flight Ack Routing): a SIGNED ACK PROOF (carries `sig` + a
+    // 64-hex `rootPub`) is the multi-hop-safe completion — verify the signature
+    // and bind it to the open flight by attemptId + ackTo + flightNonce + the
+    // hash-bound root authority (never the last hop). An UNSIGNED ack is the
+    // 4.62.1 one-hop path, unchanged below.
+    if (payload && typeof payload.sig === 'string') {
+      const res = await verifyAckProof(payload);
+      if (!res.ok) { this._log('info', 'ingest-ack-proof-reject', { reason: res.reason }); return 'consumed'; }
+      await this._flightCompleteSigned(res.fields);
+      return 'consumed';
+    }
     if (!payload || typeof payload.topicId !== 'string' || typeof payload.msgId !== 'string') return 'consumed';
     const op = payload.op === 'kill' ? 'kill' : payload.op === 'pub' ? 'pub' : null;
     if (!op) return 'consumed';
@@ -845,7 +900,7 @@ export const wireHandlersMethods = {
     // KILL completes on tombstone ingest, separately from PUB (v0.3 §1).
     // _applyKill is tombstone-gated internally; re-acking a duplicate kill is
     // the idempotent-success case, same as a duplicate publish.
-    this._sendIngestAck(meta?.fromId, role, target, 'kill');
+    this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
     return 'consumed';
   },
 

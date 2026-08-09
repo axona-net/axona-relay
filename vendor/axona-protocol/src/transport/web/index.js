@@ -899,6 +899,9 @@ export function webTransport({
       send:         (meshId, frame)     => mesh.send(meshId, frame),
       bindPeer:     (nodeIdHex, meshId, channelKey) => webrtc.bindPeer(fromHex(nodeIdHex), meshId, channelKey),
       fingerprints: (meshId)            => mesh.fingerprintsFor(meshId),
+      // A verified CAP_ATTEST flips the peer write-flight-ack capable;
+      // log it so the capable fraction of the mesh is observable.
+      onCapable:    (nodeIdHex, meshId) => log('mesh-cap-attested', { nodeId: nodeIdHex, meshId }),
       log,
     });
 
@@ -917,6 +920,23 @@ export function webTransport({
     }
     webrtc.onNotification('hello',     (fromConnId, body) => meshAuth.onHello(fromConnId, body));
     webrtc.onNotification('hello-sig', (fromConnId, body) => meshAuth.onHelloSig(fromConnId, body));
+    // CAP_ATTEST arrives POST-bind, so webrtc dispatches the sender's
+    // BigInt nodeId here — not the pre-bind meshId string the hello
+    // handlers get.  Translate back to the meshId MeshAuth keys on.
+    webrtc.onNotification('cap-attest', (from, body) => {
+      const meshId = (typeof from === 'string') ? from : webrtc.meshIdFor(from);
+      if (meshId) meshAuth.onCapAttest(meshId, body);
+    });
+
+    // Surface per-node write-flight-ack capability up to the AxonaPeer dht
+    // adapter (dht.isCapable) so D0 delegation can pick a 4.62.2-capable
+    // adjacent peer: hex → BigInt → meshId → MeshAuth.isCapable.  An
+    // unknown/unmapped peer is fail-closed (never reported capable).
+    composite.isCapable = (nodeHex) => {
+      const big = fromHex(nodeHex);
+      const meshId = (big === null || big === undefined) ? null : webrtc.meshIdFor(big);
+      return meshId ? meshAuth.isCapable(meshId) : false;
+    };
   }
 
   // Wire start() so calling composite.start() opens the socket and
