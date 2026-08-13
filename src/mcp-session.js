@@ -500,18 +500,9 @@ export async function reconnect({ since = 'all' } = {}) {
   };
 }
 
-export async function subscribeWindow({ topic, region, seconds = 20, since = 'all' }) {
-  const secs = Math.max(1, Math.min(120, Number(seconds) || 20));
-  const r = region || REGION; const key = keyOf(r, topic);
-  const preexisting = WATCHES.has(key);
-  await watch({ topic, region, since });
-  const w = WATCHES.get(key);
-  const startLen = preexisting ? w.buffer.length : 0;
-  await new Promise((res) => setTimeout(res, secs * 1000));
-  const messages = w.buffer.slice(startLen);
-  if (!preexisting) await unwatch({ topic, region });
-  return { ok: true, topic, region: r, listenedSec: secs, since, received: messages.length, messages };
-}
+// The one-shot subscribeWindow() (connect → listen for N seconds → return) was
+// removed 2026-08-13 (David directive): a participant is a CONTINUOUS node, so
+// reading is watch() + poll() only. No fixed-window one-shot listen path.
 
 let _shuttingDown = false;
 export async function shutdown() {

@@ -12,7 +12,8 @@
 //   • axona_watch                  — open a STANDING subscription (arrivals buffer)
 //   • axona_poll                   — drain the buffer (how the agent "reads" the feed)
 //   • axona_unwatch / axona_status — manage + introspect
-//   • axona_subscribe              — back-compat one-shot listen window
+// A participant is a CONTINUOUS node: read via a standing axona_watch +
+// axona_poll. There is deliberately no one-shot listen-window tool.
 // The peer signs with a durable author persisted at ~/.axona/claude-mcp-author.json,
 // so Claude keeps the same on-network identity across restarts.
 
@@ -24,7 +25,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, subscribeWindow, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect,
+import { publish, pull, watch, poll, unwatch, status, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect,
 } from './mcp-session.js';
 
 const VERSION = JSON.parse(
@@ -56,7 +57,7 @@ server.tool(
 
 server.tool(
   'axona_watch',
-  'Open a STANDING subscription to an Axona topic on the server\'s persistent peer. Messages that arrive are BUFFERED on the server; call axona_poll to read them. Unlike axona_subscribe (which blocks for a fixed window), this returns immediately and keeps listening across later tool calls — this is how the agent participates as a continuous subscriber. Idempotent: watching an already-watched topic is a no-op. since:"all" (default) replays the cached backlog into the buffer; "new" buffers only future messages.',
+  'Open a STANDING subscription to an Axona topic on the server\'s persistent peer. Messages that arrive are BUFFERED on the server; call axona_poll to read them. This returns immediately and keeps listening across later tool calls — this is how the agent participates as a continuous subscriber (there is no one-shot listen-window alternative). Idempotent: watching an already-watched topic is a no-op. since:"all" (default) replays the cached backlog into the buffer; "new" buffers only future messages.',
   { topic: z.string().describe('Topic name to watch'), ...REGION, ...OWNED, since: z.enum(['all', 'latest', 'live']).optional().describe('"all" replays the cached backlog into the buffer (default); "latest" only the most recent; "live" only future messages') },
   run(watch),
 );
@@ -117,12 +118,10 @@ server.tool(
   run(pull),
 );
 
-server.tool(
-  'axona_subscribe',
-  'Subscribe to an Axona topic, collect messages for a fixed window, then return them. Blocks for `seconds` (default 20, max 120). Convenience for a one-shot listen; for ongoing participation prefer axona_watch + axona_poll (no blocking, survives across calls). since:"all" (default) replays the cached backlog; "new" is live-only. Must use the same region as the publisher.',
-  { topic: z.string().describe('Topic name to subscribe to'), ...REGION, seconds: z.number().optional().describe('How long to listen, 1–120 (default 20)'), since: z.enum(['all', 'latest', 'live']).optional().describe('"all" replays backlog (default); "latest" most recent only; "live" only future') },
-  run(subscribeWindow),
-);
+// NOTE: the one-shot `axona_subscribe` listen-window tool is deliberately NOT
+// registered. An Axona MCP participant is a CONTINUOUS node — read via a standing
+// axona_watch + axona_poll, which survives across calls. A fixed-window one-shot
+// listen is not an available option (David directive, 2026-08-13).
 
 // ── files ───────────────────────────────────────────────────────────────
 // PULL-ONLY, and that is a security property rather than a limitation. A topic
