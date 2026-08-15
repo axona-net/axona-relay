@@ -70,11 +70,6 @@ const relay = createRelay({
   onLog: () => {},        // quiet — the canary reports the summary, not transport chatter
 });
 
-// Confirm the registry actually built BEFORE we start taking traffic.
-const sh0 = relay.peer.frameRegistryShadow();
-line(`registry built=${sh0.built} rows=${sh0.rows} (expect built=true, rows>0)`);
-if (!sh0.built) { console.error('✗ registry did not arm (shadow.built===false) — aborting.'); await stopRelay(relay); process.exit(1); }
-
 let stopping = false;
 async function shutdown(codeOut) {
   if (stopping) return; stopping = true;
@@ -89,13 +84,24 @@ line('joining testnet mesh…');
 const status = await startRelay({ peer: relay.peer, transport: relay.transport, ready: { minPeers: 1, timeoutMs: 20_000 } });
 line(`joined: ready=${status.ready ?? '?'} peers=${status.peers ?? '?'} ms=${status.ms ?? '?'}${status.integrateError ? ' integrateErr=' + status.integrateError : ''}`);
 
+// Host this relay's keyspace neighborhood (exactly what a real fleet relay does):
+// it force-builds the lazy default AxonaManager — which ARMS the registry (peer was
+// constructed with frameRegistry:true) — AND recruits this node as a root/holder
+// for topics near its id, so ambient rootbeacon/replicate/deliver frames route here
+// and the shadow layer observes real inbound traffic (liveness).
+try { await relay.peer.host(); line('host() keyspace — armed manager + recruiting for nearby topics'); }
+catch (e) { line(`host() failed: ${e?.message || e}`); }
+const sh0 = relay.peer.frameRegistryShadow();
+line(`registry built=${sh0.built} rows=${sh0.rows} (expect built=true, rows>0)`);
+if (!sh0.built) { console.error('✗ registry did not arm (shadow.built===false) — aborting.'); await shutdown(1); }
+
 function report(final = false) {
   const s = relay.peer.frameRegistrySummary();
   const v = frameRegistryCanaryVerdict(s);
   const live = typeof s.total === 'number' && s.total > 0;   // LIVENESS: traffic actually flowed
   const tag = final ? 'FINAL' : 'tick';
   line(`${tag} verdict pass=${v.pass} ready=${v.ready} | observing=${s.observing} built=${s.built} total=${s.total} faults=${s.faults} dropped=${s.dropped} ring=${s.ringSize}`);
-  line(`      verdicts=${JSON.stringify(s.verdicts)} byType=${JSON.stringify(s.byType)}${v.reasons.length ? ' reasons=' + JSON.stringify(v.reasons) : ''}`);
+  line(`      verdicts=${JSON.stringify(s.verdicts)} faultKinds=${JSON.stringify(s.faultKinds)} byType=${JSON.stringify(s.byType)}${v.reasons.length ? ' reasons=' + JSON.stringify(v.reasons) : ''}`);
   return { s, v, live };
 }
 

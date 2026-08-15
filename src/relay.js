@@ -95,7 +95,8 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   // backbone regressed Howard's suite (0/9/6 failures across 3 runs; connection-count
   // storm + convergence wedge). Re-enable only behind a fix + Howard gate. Opt back in
   // via env once fixed: synaptomeMaintain: process.env.RELAY_SYNAPTOME_MAINTAIN==='1' ? {...} : null
-  const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport });
+  const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport,
+    ...(frameRegistry === true ? { frameRegistry: true } : {}) });
 
   return { peer, transport, node, domain };
 }
