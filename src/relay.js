@@ -53,8 +53,15 @@ export function regionDescriptor(token = 'eagle') {
  *                                    every process start and never persisted (I-ID)
  * @param {{lat:number,lng:number}} opts.region
  * @param {(level:string, event:string, ctx?:object)=>void} [opts.onLog]
+ * @param {boolean} [opts.frameRegistry] REF-1.1 M1 canary: arm the four
+ *   per-boundary frame-contract registries in SHADOW (observe-only). DEFAULT
+ *   OFF. When unset here it falls back to env AXONA_FRAME_REGISTRY==='1', so the
+ *   fleet stays inert unless a canary slot opts in. This is CONSTRUCTION-side
+ *   arming only; traces still emit only when the runtime gate AXONA_REGISTRY_SHADOW
+ *   is also on (kernel shadowEnabled()). Both default-off ⇒ two-part arming.
  */
-export function createRelay({ bridgeUrl, identity, region, onLog = () => {} }) {
+export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
+  frameRegistry = process.env.AXONA_FRAME_REGISTRY === '1' }) {
   const transport = webTransport({
     bridgeUrl,
     identity:    { ...identity, id: identity.id },  // kernel id is already 66-char hex

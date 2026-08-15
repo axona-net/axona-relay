@@ -257,6 +257,7 @@ export const repairPlaneMethods = {
       if (role.subscribers.size === 0 && !holdsHistory && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)) {
         this.axonRoles.delete(t);
         this._upstream.delete(t);
+        if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
       }
     }
 

@@ -48,3 +48,29 @@ export function encode(msg) {
 export function decode(text) {
   return JSON.parse(text, bigintReviver);
 }
+
+// MAX_FRAME_BYTES — the transport contract's HARD pre-parse ceiling on a single
+// inbound wire frame, in UTF-8 BYTES. This is the frame/envelope guard that the
+// decoders (node/index.js, web/index.js, web/mesh.js) own; it is NOT the
+// registry's per-scalar budget cap (registry/types.js MAX_BYTES_CEILING = 64 KiB),
+// which bounds one projected scalar, a different resource.
+//
+// *** PROVISIONAL VALUE — REF-1.1 S2.0c Finding 2 is OPEN (Aster seq 708). ***
+// A single decode-site ceiling must admit the LARGEST legitimate frame across
+// EVERY producer sharing the ingress, because the family is unknown before parse.
+// peer.pub (256 KiB-char envelope) is NOT the largest: REPLICATE / HANDOFF /
+// REPLAYUP carry the whole role cache (topicStore CACHE_BYTES = 16 MiB chars,
+// CACHE_MAX = 1024), so a legitimate full-state sync frame reaches ~16 MiB chars
+// (up to ~48 MiB UTF-8 with a multibyte body) — far above this 1 MiB. Aster
+// reproduced a 1,076,365-byte legitimate REPLICATE from 70 cache entries.
+// The final value is a protocol-design FORK (chunk the full-state producers below
+// a small documented ceiling, vs. a ~CACHE_BYTES-scale ceiling) recorded in
+// axona-docs/architecture/REF-1.1-S2.0c-Frame-Ceiling-Inventory.md and pending a
+// council/David scope decision. Until then this constant is NOT wired to any live
+// decode path (flag OFF, S2.1 blocked) and MUST NOT be treated as justified.
+//
+// The invariance and rejection semantics below are settled regardless of value:
+// a registered row / decoder variant MAY pass a TIGHTER ceiling, but the hard cap
+// can never be raised past — a supplied ceiling above it is rejected, not honored
+// (see snapshotMint._certify).
+export const MAX_FRAME_BYTES = 1 << 20;   // 1048576 — PROVISIONAL, see Finding 2

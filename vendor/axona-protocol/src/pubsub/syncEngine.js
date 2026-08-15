@@ -179,7 +179,7 @@ export const syncEngineMethods = {
       if (!role && !this.admitPushedRole(topicBig)) return;   // refuse: stay silent, leaver retries
       if (!role) role = this._becomeRoot(topicBig, 'handoff-heir');
       if (!role) return;                 // hard refusal (bridge) — no role, no ack, leaver re-homes
-      this._applyDels(role, topicBig, payload.dels);
+      await this._applyDels(role, topicBig, payload.dels);
       const tally = await this._ingestStampedBatch(role, payload.msgs);
       // Departure rules — purge the leaver's ghost beacon, never defer back to
       // the leaver, yield only to a strictly-closer live root (rootClaim).
@@ -206,7 +206,7 @@ export const syncEngineMethods = {
       if (mine?.isRoot) {
         // UNION_AT_ROOT — the cohort anti-entropy contract: co-hosting roots
         // converge to the union of cache+tombstones. We keep our claim.
-        this._applyDels(mine, topicBig, payload.dels);
+        await this._applyDels(mine, topicBig, payload.dels);
         await this._ingestStampedBatch(mine, payload.msgs);
         return;
       }
@@ -217,7 +217,7 @@ export const syncEngineMethods = {
       let role = this.axonRoles.get(topicBig);
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
       this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
-      this._applyDels(role, topicBig, payload.dels);
+      await this._applyDels(role, topicBig, payload.dels);
       await this._ingestStampedBatch(role, payload.msgs);
       return;
     }
@@ -225,7 +225,7 @@ export const syncEngineMethods = {
     // REPLAY_UP — stamped history I asked for; only meaningful if the role lives.
     const role = this.axonRoles.get(topicBig);
     if (!role) return;
-    this._applyDels(role, topicBig, payload.dels);
+    await this._applyDels(role, topicBig, payload.dels);
     await this._ingestStampedBatch(role, payload.msgs);
   },
 };

@@ -155,6 +155,7 @@ export async function connect({
   transport,
   nodeIdentity,
   web = {},
+  frameRegistry = false,
 } = {}) {
   // 1. Identities — connection (place-anchored) + authorship (place-free).
   if (!nodeIdentity) {
@@ -209,6 +210,12 @@ export async function connect({
     node,
     nodeIdentity,
     transport,
+    // REF-1.1 M1b: DEFAULT-OFF. Threads the Boundary-1 frame-contract registry
+    // (shadow, observe-only) into the default AxonaManager so a relay/standalone
+    // node bootstrapping via connect() can arm the canary — not just a peer
+    // built by hand. Arming still needs BOTH this flag AND the runtime
+    // AXONA_REGISTRY_SHADOW env; neither is set by default.
+    ...(frameRegistry === true ? { frameRegistry: true } : {}),
   });
 
   // 4. Lifecycle: start the wire, start the peer, wait for the mesh.

@@ -1,6 +1,6 @@
 {
   "name": "@axona/protocol",
-  "version": "4.62.2",
+  "version": "4.63.0",
   "description": "Pure-JS protocol kernel for the Axona peer-to-peer mesh. Contracts (DHT, Transport, BootstrapService), the per-node AxonaPeer implementation (NH-1 routing + axonal pub/sub), and supporting helpers. No simulator dependencies; runs in browsers and Node.",
   "type": "module",
   "main": "./src/index.js",
@@ -10,6 +10,8 @@
     "./contracts": "./src/contracts/index.js",
     "./contracts/*.js": "./src/contracts/*.js",
     "./dht/*.js": "./src/dht/*.js",
+    "./registry/snapshotMint.js": null,
+    "./registry/*.js": "./src/registry/*.js",
     "./pubsub/*.js": "./src/pubsub/*.js",
     "./persistence/*.js": "./src/persistence/*.js",
     "./transport/*.js": "./src/transport/*.js",
@@ -58,6 +60,7 @@
   ],
   "sideEffects": false,
   "devDependencies": {
+    "acorn": "^8.18.0",
     "fake-indexeddb": "^6.2.5",
     "node-datachannel": "^0.32.3"
   }

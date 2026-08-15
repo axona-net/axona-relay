@@ -67,6 +67,9 @@ import { repairPlaneMethods }  from './repairPlane.js';
 import { wireHandlersMethods }  from './wireHandlers.js';
 import { syncEngineMethods }    from './syncEngine.js';
 import { writeFlightMethods }   from './writeFlight.js';
+import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
+import buildBoundary1Registry from './boundary1Registry.js';
+import { shadowEnabled } from '../registry/index.js';
 
 // Constants, wire types, and the region-lock switch live in constants.js
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
@@ -105,6 +108,8 @@ export class AxonaManager {
     roleAdmitPerTick = ROLE_ADMIT_PER_TICK,  // paced admission: new roles per refresh tick
     neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
+    tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
+    frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -185,6 +190,39 @@ export class AxonaManager {
     // observing DELIVERY discharged DURABILITY. Nothing on the delivery path can
     // reach 'verified' — there is deliberately no function here for it to call.
     this._durability = new DurabilityLedger({ now });
+
+    // REF-1.1 S2.0c Phase 3 — DEFAULT-OFF shadow wiring of the accepted tombstone
+    // authorization core (src/pubsub/tombstoneAuth.js). When the flag is set, ONE
+    // per-node TombstoneAuthority is built and the _ta* observers (mixed in below)
+    // feed it the inbound body/kill/evict stream at the existing funnels WITHOUT
+    // changing any behavior — the legacy tombstone path stays authoritative. Flag
+    // OFF (default): this is null, every observer is a guarded no-op, and the node
+    // is byte-identical to today. Enforcement (making this the source of truth) is
+    // a SEPARATE gate that also needs the signed exp from the envelope flag day.
+    this._tombAuthority = tombstoneAuth ? makeTombstoneAuthority() : null;
+
+    // REF-1.1 S2: Boundary-1 frame-contract registry (DEFAULT-OFF). When set, the
+    // 19 routed handlers registered below are shadow-wrapped to OBSERVE a
+    // decoder-certified snapshot beside each handler — no acceptance behavior
+    // changes, and with the runtime shadow flag off the handler runs verbatim
+    // (byte-identical). Traces land in a bounded ring for inspection. Must be
+    // constructed BEFORE _registerHandlers() so the wrap map is available.
+    this._frameTraces = frameRegistry ? [] : null;
+    // REF-1.1 M1a recut (council F1): MONOTONIC lifetime counters, updated at
+    // ingestion BEFORE the bounded ring may evict a trace — so a fault that
+    // scrolls out of the 1024-entry ring is still counted. The canary invariant
+    // reads THESE, not the ring suffix; the ring stays only for the recent sample.
+    // `dropped` counts ring evictions. Null unless the registry is armed.
+    this._frameLifetime = frameRegistry
+      ? { total: 0, faults: 0, dropped: 0,
+          faultKinds: Object.create(null), verdicts: Object.create(null), byType: Object.create(null) }
+      : null;
+    this._frameRegistry = frameRegistry
+      ? buildBoundary1Registry({
+          enabled: shadowEnabled,
+          sink: (rec) => this._ingestFrameTrace(rec),
+        })
+      : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
     this.renewFastMs = renewFastMs;      // adaptive floor
@@ -1085,7 +1123,11 @@ export class AxonaManager {
       // manufactured a confident negative from it. See test/fence_pull_outcome.mjs.
       const timer = setTimeout(() => { this._pending.delete(corrId); resolve({ kind: 'timeout', timeoutMs }); }, timeoutMs);
       if (typeof timer.unref === 'function') timer.unref();
-      this._pending.set(corrId, { resolve, timer });
+      // Store the requester alongside corrId: the PULL/PULLRESP pair is (corrId,
+      // requesterId), not corrId alone. _onPullResp requires the response's
+      // requesterId to fold to this so a locally-routed response carrying a
+      // FOREIGN requesterId cannot settle our read (Aster, council d17ece0b).
+      this._pending.set(corrId, { resolve, timer, requesterId: this.nodeId });
       this._send(T.PULL, { topicId: idHex(topicId), via: hint ? [hint] : [], corrId, postHash: postHash || null, requesterId: idHex(this.nodeId) });
     });
   }
@@ -1126,6 +1168,7 @@ export class AxonaManager {
 
   resetState() {
     this.axonRoles.clear();
+    if (this._tombAuthority) this._taReset();   // Phase 3 shadow: no role holds a body now — rebuild (no-op flag-off)
     this.mySubscriptions.clear();
     this._hostedTopics.clear();
     this._backupTopics.clear();
@@ -1160,6 +1203,7 @@ Object.assign(
   wireHandlersMethods,   // routed handlers + axon-tree mechanics
   syncEngineMethods,     // Phase 8: the ONE repair/durability sync operation + policy table
   writeFlightMethods,    // E3 (Dead-Root Eviction v0.3): ingest-ack write completion, receipt probe, evict + retry-promote
+  tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
 );
 
 export default AxonaManager;

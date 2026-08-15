@@ -108,12 +108,18 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
     // Set 0 to disable (A/B diagnostics, or deployments that don't want backup roots).
     this._rootReplicas = rootReplicas;
+    // REF-1.1 M1: DEFAULT-OFF Boundary-1 frame-contract registry. When true, the
+    // default AxonaManager arms the shadow registry over its 19 routed handlers
+    // (observe-only; byte-identical flag-off; the runtime AXONA_REGISTRY_SHADOW env
+    // then gates whether the wrap observes or runs the handler verbatim). The M1
+    // telemetry-only canary sets this so a relay peer can report the shadow invariant.
+    this._armFrameRegistry = frameRegistry === true;
     // Synaptome maintenance (Synaptome-Maintenance-v0.1): continuously refill the
     // K_NEAR XOR-nearest "successor" quota so greedy routing's last-mile descent
     // always completes through churn. OPT-IN (default off) — when omitted the peer
@@ -2655,6 +2661,33 @@ export class AxonaPeer extends DHT {
    *
    * @returns {object}
    */
+
+  // REF-1.1 M1 canary surface. Delegates to the peer's AxonaManager. Both are
+  // read-only shadow inspectors — no effect on dispatch. `frameRegistryShadow()`
+  // returns { built, rows, traces } (built=false unless constructed with
+  // frameRegistry:true); `frameRegistrySummary()` returns the shadow INVARIANT
+  // counters { built, rows, total, faults, dropped, faultKinds, verdicts, byType,
+  // ringSize } — the numbers the telemetry-only canary reports (invariant holds iff
+  // faults===0 and no 'threw'/'trace-fault' verdict). Empty/inert if not armed.
+  //
+  // The pre-lazy-build fallbacks below MUST return the SAME key set the built
+  // manager returns (council F2, 6dd4344): a canary reading summary.dropped before
+  // _requireAxonaManager must get 0, not undefined. Keep these shapes in lockstep
+  // with AxonaManager.frameRegistryShadow / frameRegistrySummary.
+  frameRegistryShadow() {
+    const am = this._axonaManager;
+    return (am && typeof am.frameRegistryShadow === 'function')
+      ? am.frameRegistryShadow()
+      : { built: false, rows: 0, traces: [] };
+  }
+
+  frameRegistrySummary() {
+    const am = this._axonaManager;
+    return (am && typeof am.frameRegistrySummary === 'function')
+      ? am.frameRegistrySummary()
+      : { built: false, observing: false, rows: 0, total: 0, faults: 0, dropped: 0, faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
+  }
+
   health() {
     const am = this._axonaManager
             ?? (this._engine?.axonaManagerFor?.(this._node))
@@ -3110,6 +3143,7 @@ export class AxonaPeer extends DHT {
       dht,
       identity: this._identity || null,   // transport keypair — signs D1 INGEST-ACK proofs
       ...(this._rootReplicas != null ? { rootReplicas: this._rootReplicas } : {}),
+      ...(this._armFrameRegistry ? { frameRegistry: true } : {}),  // REF-1.1 M1 shadow (default-off)
     });
     // ARM the periodic refreshTick (kernel v4.9.1). Earlier this was deliberately
     // left un-armed ("apps subscribe after the mesh stabilises"), but that left the

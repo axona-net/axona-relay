@@ -37,7 +37,12 @@ export const topicStoreMethods = {
       if (!old) break;
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
+      if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow: keep body mirror in step (no-op flag-off)
     }
+    // NOTE: the body OBSERVE is NOT here — a cache write is not a local
+    // verification, and _cachePush is also reached from the relay _onDeliver path
+    // (unverified). Body observation is driven from the verified ingress
+    // (_ingestPublish / _ingestStamped) with a cache-survival guard.
   },
 
   _expireCache(role, now) {
@@ -45,7 +50,9 @@ export const topicStoreMethods = {
       const old = role.cache.shift();
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
+      if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
     }
+    if (this._tombAuthority) this._taReclaim();                          // Phase 3 shadow: reclaim + retry (no-op flag-off)
   },
 
   // My cache high-water = the newest stamp I hold (or have emitted, as root).
@@ -93,7 +100,7 @@ export const topicStoreMethods = {
     const now = this._now();
     const dels = [];
     for (const [tgt, tomb] of (role?.tombstones ?? [])) {
-      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs });
+      if ((tomb?.exp ?? 0) > now) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, seq: tomb.seq, publishTs: tomb.killTs, ...(this._tombAuthority && tomb.kill ? { kill: tomb.kill } : {}) });
     }
     return dels;
   },
@@ -101,9 +108,18 @@ export const topicStoreMethods = {
   // Apply a batch of migrated tombstones BEFORE ingesting the migrated bodies, so a
   // killed message in the same batch is suppressed (not briefly fanned/delivered then
   // retracted). Shared by the replay-up and handoff receive paths.
-  _applyDels(role, topicBig, dels) {
+  async _applyDels(role, topicBig, dels) {
     for (const d of (Array.isArray(dels) ? dels : [])) {
-      if (d && d.msgId) this._applyKill(role, topicBig, d);
+      if (d && d.msgId) {
+        // Verify + BIND any propagated proof (topicId+msgId+signer) BEFORE _applyKill
+        // may retain or re-fan it (Aster Phase-3 blocker b, B1). A proof that fails
+        // local verifyKill or does not bind is STRIPPED, so the tombstone migrates
+        // WITHOUT an unverified/cross-carrier proof. Awaited so verification completes
+        // before retention; a verified proof also observes into the shadow authority.
+        let dd = d;
+        if (this._tombAuthority && d.kill && !(await this._taVerifyBoundKill(topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
+        this._applyKill(role, topicBig, dd);
+      }
     }
   },
 

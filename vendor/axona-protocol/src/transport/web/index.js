@@ -39,6 +39,14 @@ import { CompositeTransport } from './composite.js';
 import { isHexId, toHex, fromHex } from '../../utils/hexid.js';
 import { TransportError, ErrorCodes, UpgradeRequiredError } from '../../errors.js';
 import { KERNEL_VERSION, WIRE_VERSION } from '../handshake.js';
+// REF-1.1 S4a: Boundary-2 (transport hello/auth/session + CAP_ATTEST) frame-contract
+// registry, SHADOW MODE, DEFAULT-OFF. Built only under the `frameRegistry` flag;
+// observe() is a pure side-channel that never touches the notification handlers.
+import { makeBoundary2Observers } from '../boundary2Registry.js';
+// REF-1.1 S4b: Boundary-3 (WebRTC signalling + mesh-auth) frame-contract registry,
+// SHADOW MODE, DEFAULT-OFF — same flag and no-op-when-off discipline as Boundary-2.
+import { makeBoundary3Observers } from '../boundary3Registry.js';
+import { makeBoundary4Observers } from '../boundary4Registry.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -167,6 +175,13 @@ export function webTransport({
   turnRefreshReplyMs          = 20 * 1000,       // per-attempt wait for the bridge's `turn` reply
   turnRefreshMaxTries         = 3,               // in-band attempts before graceful deferral
   turnRefreshSendErrBackoffMs = 5 * 1000,        // re-arm this long after a send error
+  // REF-1.1 S4a — Boundary-2 frame-contract registry, SHADOW MODE, DEFAULT-OFF.
+  // When true, the transport builds a Boundary-2 registry and OBSERVES a certified
+  // snapshot beside the bridge auth (hello/hello-ack), session (welcome), and
+  // CAP_ATTEST notification handlers — never mutating, suppressing, or reordering
+  // them. With the runtime shadow flag off (the default) observe() is a no-op, so
+  // flag-off is byte-identical. Dispatch is NOT migrated.
+  frameRegistry = false,
 } = {}) {
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
@@ -404,6 +419,40 @@ export function webTransport({
     log,
   });
 
+  // REF-1.1 S4a — Boundary-2 observers (SHADOW, DEFAULT-OFF). Built once, only
+  // under the `frameRegistry` flag. `b2observe(wire, connId, body)` is a pure
+  // side-channel called BEFORE each unchanged notification handler: with the
+  // runtime shadow flag off it returns immediately (byte-identical), and it never
+  // receives or alters the handler. `connId` is the ACTUAL channel/session scope
+  // at each site (the bridge connId / mesh id); observation is stateless, so the
+  // fixed BRIDGE_CONN_ID sentinel reused across reconnects carries no state.
+  // F2: bounded trace ring (Boundary-1 parity) — drop-oldest at 1024, never grows
+  // unbounded across reconnect/session traffic for the transport lifetime.
+  const B2_TRACE_CAP = 1024;
+  const b2traces = [];
+  const b2 = frameRegistry ? makeBoundary2Observers({ sink: (r) => { if (b2traces.length >= B2_TRACE_CAP) b2traces.shift(); b2traces.push(r); } }) : null;
+  const b2observe = b2 ? (wire, connId, body) => b2.observe(wire, connId, body) : () => {};
+
+  // REF-1.1 S4b increment 2 — Boundary-3 observers (SHADOW, DEFAULT-OFF), same
+  // discipline as Boundary-2: a pure side-channel called BEFORE each unchanged
+  // signalling / mesh-auth handler, never receiving or altering it. Flag-off it is a
+  // no-op (byte-identical). `scope` is the ACTUAL channel identity the observation
+  // ran under — the signalling peer `from` for a signal, the meshId for mesh auth —
+  // stamped onto each trace and, where the row projects it, certified under its
+  // declared meta key. Bounded trace ring (drop-oldest 1024, Boundary-2 parity).
+  const B3_TRACE_CAP = 1024;
+  const b3traces = [];
+  const b3 = frameRegistry ? makeBoundary3Observers({ sink: (r) => { if (b3traces.length >= B3_TRACE_CAP) b3traces.shift(); b3traces.push(r); } }) : null;
+  const b3observe = b3 ? (wire, scope, body) => b3.observe(wire, scope, body) : () => {};
+  // S4c increment 2: Boundary-4 (bridge administration). Only the THREE kernel-ingested
+  // frames are wired — version-gate / pong / turn in signaling.dispatch below (the four
+  // peer-SENT frames are ingested by the bridge server, out of kernel scope). B4 rows
+  // carry no meta leg, so scope is null (session-wide admin, no per-frame subject).
+  const B4_TRACE_CAP = 1024;
+  const b4traces = [];
+  const b4 = frameRegistry ? makeBoundary4Observers({ sink: (r) => { if (b4traces.length >= B4_TRACE_CAP) b4traces.shift(); b4traces.push(r); } }) : null;
+  const b4observe = b4 ? (wire, scope, body) => b4.observe(wire, scope, body) : () => {};
+
   // Signaling-frame dispatcher.  Bridge frames carry payloads addressed
   // to the local node's MeshManager so it can drive the WebRTC layer
   // (peer discovery + SDP/ICE relay).  The mapping from bridge frame
@@ -416,6 +465,7 @@ export function webTransport({
       const t = frame.type;
       switch (t) {
         case 'welcome':
+          b2observe('welcome', frame.connId, frame);   // S4a shadow (no-op unless flag on)
           // Bridge greeting (myConnId, server version, optional TURN
           // credentials).  composite.start has already called
           // mesh.setMyId(localNodeIdHex); here we just thread the TURN
@@ -455,6 +505,7 @@ export function webTransport({
           });
           return;
         case 'turn':
+          b4observe('turn', null, frame);   // S4c shadow (no-op unless flag on)
           // In-band credential refresh: the bridge's reply to a turn-refresh
           // request (see requestTurnRefreshInBand). Install the fresh credential
           // and reschedule — no socket or mesh change. Distinct from `welcome`
@@ -462,16 +513,19 @@ export function webTransport({
           applyTurnFrame(frame.turn ?? null);
           return;
         case 'peer-list':
+          b3observe('peer-list', null, frame);   // S4b shadow (no-op unless flag on)
           if (typeof mesh.onPeerList === 'function') {
             return mesh.onPeerList(Array.isArray(frame.peers) ? frame.peers : []);
           }
           break;
         case 'peer-joined':
+          b3observe('peer-joined', frame.peerId, frame);   // S4b shadow
           if (typeof mesh.onPeerJoined === 'function' && typeof frame.peerId === 'string') {
             return mesh.onPeerJoined(frame.peerId);
           }
           break;
         case 'peer-left': {
+          b3observe('peer-left', frame.peerId, frame);   // S4b shadow
           // Departure hint (#364-B): a bridge that knows the departed
           // connection's authenticated nodeId includes it — purge the node's
           // pub/sub ghosts via the standard peer-died path. Guarded inside
@@ -489,16 +543,19 @@ export function webTransport({
           break;
         }
         case 'signal':
+          b3observe('signal', frame.from, frame.payload);   // S4b shadow — body is frame.payload (kind/sdp|candidate); scope = signalling peer `from`
           if (typeof mesh.onSignal === 'function' && typeof frame.from === 'string') {
             return mesh.onSignal(frame.from, frame.payload);
           }
           break;
         case 'pong':
+          b4observe('pong', null, frame);   // S4c shadow
           bridge._emitPingTraffic('recv');
           // RTT + liveness: the bridge echoes the ping's `t` timestamp.
           recordPong(frame.t);
           return;
         case 'version-gate':
+          b4observe('version-gate', null, frame);   // S4c shadow
           // Version-gate announcement — no action needed.
           return;
       }
@@ -875,8 +932,12 @@ export function webTransport({
       setBridgeState('open');
       bridgeReadyResolve(nodeIdBig);
     };
-    bridge.onNotification('hello',     (c, b) => onBridgeAuthHello(c, b, 'hello'));
-    bridge.onNotification('hello-ack', (c, b) => onBridgeAuthHello(c, b, 'hello-ack'));
+    // F3: certify the per-SESSION connId (the welcome's frame.connId, captured on
+    // bridgeInfo), NOT the fixed BRIDGE_CONN_ID sentinel that BridgeTransport hands
+    // these handlers as `c`. welcome precedes hello per connection, and a reconnect
+    // installs a fresh welcome connId, so the two sessions' auth legs never conflate.
+    bridge.onNotification('hello',     (c, b) => { b2observe('hello',     bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello');     });
+    bridge.onNotification('hello-ack', (c, b) => { b2observe('hello-ack', bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello-ack'); });
 
     socketEvents.close.add(() => {
       if (bridgeNodeIdBig === null) {
@@ -918,13 +979,14 @@ export function webTransport({
     if (typeof mesh.onPeerLost === 'function') {
       mesh.onPeerLost((meshId) => meshAuth.onChannelLost(meshId));
     }
-    webrtc.onNotification('hello',     (fromConnId, body) => meshAuth.onHello(fromConnId, body));
-    webrtc.onNotification('hello-sig', (fromConnId, body) => meshAuth.onHelloSig(fromConnId, body));
+    webrtc.onNotification('hello',     (fromConnId, body) => { b3observe('hello',     fromConnId, body); return meshAuth.onHello(fromConnId, body); });
+    webrtc.onNotification('hello-sig', (fromConnId, body) => { b3observe('hello-sig', fromConnId, body); return meshAuth.onHelloSig(fromConnId, body); });
     // CAP_ATTEST arrives POST-bind, so webrtc dispatches the sender's
     // BigInt nodeId here — not the pre-bind meshId string the hello
     // handlers get.  Translate back to the meshId MeshAuth keys on.
     webrtc.onNotification('cap-attest', (from, body) => {
       const meshId = (typeof from === 'string') ? from : webrtc.meshIdFor(from);
+      b2observe('cap-attest', meshId, body);   // S4a shadow (no-op unless flag on)
       if (meshId) meshAuth.onCapAttest(meshId, body);
     });
 
@@ -1068,6 +1130,12 @@ export function webTransport({
   //   `mesh:signal` reached us as its target; feed it into the SAME mesh
   //   signaling state machine the bridge path drives (offerer/responder/ICE).
   composite.deliverMeshSignal = (fromHex, payload) => {
+    // S4b increment 2 (Vega): the RELAYED (bridgeless) signalling ingress. This is the
+    // SAME mesh:signal wire as the bridge-path signaling.dispatch case, reaching us via
+    // a relayed terminal delivery instead of the bridge socket, so it observes too —
+    // otherwise the flag-on shadow is blind to bridgeless signalling. scope = the
+    // relayed sender's nodeId hex (the bridge path's `from` analogue).
+    b3observe('signal', fromHex, payload);   // S4b shadow (no-op unless flag on)
     if (typeof mesh.onSignal !== 'function') return;
     try { return mesh.onSignal(fromHex, payload); }
     catch (err) { log('mesh-signal-deliver-threw', { from: fromHex, err: err.message }); }
@@ -1116,6 +1184,12 @@ export function webTransport({
       bridgeMsgFraction: (m + b) ? +(b / (m + b)).toFixed(3) : 0,
     };
   };
+  // REF-1.1 S4a/S4b — test-only introspection of the Boundary-2 and Boundary-3
+  // shadows (null unless frameRegistry:true). Mirrors AxonaManager.frameRegistryShadow();
+  // never read on the live path — a consumer inspects `traces` to assert flag-on
+  // observation and flag-off zero-trace identity. Boundary-2 keeps the top-level shape;
+  // Boundary-3 (S4b increment 2) is nested under `.b3`.
+  composite.frameRegistryShadow = () => (b2 ? { registry: b2.reg, traces: b2traces, b3: b3 ? { registry: b3.reg, traces: b3traces } : null, b4: b4 ? { registry: b4.reg, traces: b4traces } : null } : null);
   Object.defineProperty(composite, 'socket',          { get() { return socket; } });
   Object.defineProperty(composite, 'bridgeReady',     { get() { return bridgeReady; } });
   // Display surface: hex (derived from BigInt).  External UI / log
