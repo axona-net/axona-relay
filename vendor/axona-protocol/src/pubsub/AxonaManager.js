@@ -214,7 +214,7 @@ export class AxonaManager {
     // reads THESE, not the ring suffix; the ring stays only for the recent sample.
     // `dropped` counts ring evictions. Null unless the registry is armed.
     this._frameLifetime = frameRegistry
-      ? { total: 0, faults: 0, dropped: 0,
+      ? { total: 0, faults: 0, unobserved: 0, dropped: 0,
           faultKinds: Object.create(null), verdicts: Object.create(null), byType: Object.create(null) }
       : null;
     this._frameRegistry = frameRegistry

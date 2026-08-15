@@ -2685,7 +2685,7 @@ export class AxonaPeer extends DHT {
     const am = this._axonaManager;
     return (am && typeof am.frameRegistrySummary === 'function')
       ? am.frameRegistrySummary()
-      : { built: false, observing: false, rows: 0, total: 0, faults: 0, dropped: 0, faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
+      : { built: false, observing: false, rows: 0, total: 0, faults: 0, unobserved: 0, covered: 0, dropped: 0, faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
   }
 
   health() {

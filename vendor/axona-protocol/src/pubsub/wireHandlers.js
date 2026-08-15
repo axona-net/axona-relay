@@ -24,6 +24,8 @@ import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
 import { shadowEnabled } from '../registry/index.js';
+import { encode } from '../transport/wire.js';
+import { certifyBigint } from '../registry/snapshotMint.js';
 
 export const wireHandlersMethods = {
   _registerHandlers() {
@@ -34,12 +36,23 @@ export const wireHandlersMethods = {
     // when the runtime shadow flag is off, so flag-off (and registry-off) is
     // byte-identical. reg is null unless the construction flag is set.
     const reg = this._frameRegistry;
+    // REF-1.1 M1c (Decision 1): the LIVE-path certifier. On the routed dispatch
+    // path the handler args are freshly DECODED plain objects, never
+    // decoder-certified — so without this the wrap sees 100% unbranded-source and
+    // exercises no contract (the M1 canary finding). mintLive re-encodes an arg
+    // through the CANONICAL wire codec (bigint-faithful — a plain JSON.stringify
+    // would drop the pubsub BigInt ids Vega flagged) and certifies the TEXT. The
+    // mint still accepts only text; the wrap calls this ONLY on a freshly-decoded
+    // plain arg and GUARDS the call (a throw → no snapshot → unbranded no-op). Same
+    // discipline as B2-B4's certifyPlain(JSON.stringify(body)), with the type-faithful
+    // encoder for the pubsub boundary.
+    const mintLive = (x) => certifyBigint(encode(x));
     const on = (type, fn) => {
       const base = (p, m) => fn.call(this, p, m);
       let h = base;
       if (reg) {
         const w = reg.wiring.get(type);
-        if (w) h = reg.wrap(w.type, base, w.variantBy ? { variantBy: w.variantBy } : {});
+        if (w) h = reg.wrap(w.type, base, { mintLive, ...(w.variantBy ? { variantBy: w.variantBy } : {}) });
       }
       this.dht.onRoutedMessage(type, h);
     };
@@ -91,7 +104,20 @@ export const wireHandlersMethods = {
       const ty = rec && typeof rec.type === 'string' ? rec.type : 'unknown';
       L.byType[ty] = (L.byType[ty] || 0) + 1;
       const f = rec && Array.isArray(rec.faults) ? rec.faults : [];
-      if (f.length) { L.faults++; for (const k of f) L.faultKinds[k] = (L.faultKinds[k] || 0) + 1; }
+      if (f.length) {
+        for (const k of f) L.faultKinds[k] = (L.faultKinds[k] || 0) + 1;
+        // M1c coverage split (council Decision 1, Aster/Vega): 'unbranded-source' is
+        // a COVERAGE miss (the frame took the shadow no-op — no contract observed),
+        // NOT a contract fault. A trace whose ONLY fault code is 'unbranded-source'
+        // increments `unobserved`; anything else (schema/projection/variant/
+        // unregistered) increments `faults`. They are mutually exclusive by
+        // construction — _emitUnbranded emits ['unbranded-source'] alone, a certified
+        // observation never carries it. Splitting is SAFE only because the canary
+        // predicate's coverage gate (unobserved===0) keeps an all-unbranded window
+        // failing; see frameRegistryCanaryVerdict.
+        if (f.every((k) => k === 'unbranded-source')) L.unobserved++;
+        else L.faults++;
+      }
     }
     const b = this._frameTraces;
     if (b) { if (b.length >= 1024) { b.shift(); if (L) L.dropped++; } b.push(rec); }
@@ -109,7 +135,8 @@ export const wireHandlersMethods = {
   frameRegistrySummary() {
     const L = this._frameLifetime;
     if (!this._frameRegistry || !L) {
-      return { built: false, observing: false, rows: 0, total: 0, faults: 0, dropped: 0,
+      return { built: false, observing: false, rows: 0, total: 0, faults: 0,
+        unobserved: 0, covered: 0, dropped: 0,
         faultKinds: {}, verdicts: {}, byType: {}, ringSize: 0 };
     }
     return {
@@ -121,7 +148,9 @@ export const wireHandlersMethods = {
       observing: shadowEnabled(),
       rows: this._frameRegistry.size(),
       total: L.total,       // lifetime — survives rollover
-      faults: L.faults,     // lifetime — MUST be 0 for the canary to pass
+      faults: L.faults,     // lifetime CONTRACT violations (M1c: excludes unbranded) — MUST be 0
+      unobserved: L.unobserved,          // M1c: frames that took the unbranded no-op (coverage miss) — MUST be 0
+      covered: L.total - L.unobserved,   // M1c: frames that reached a certified snapshot; covered===total to pass
       dropped: L.dropped,   // ring evictions since arm (observability)
       faultKinds: { ...L.faultKinds },
       verdicts: { ...L.verdicts },

@@ -176,17 +176,38 @@ export class ShadowRegistry {
     if (typeof type !== 'string' || !type) throw new TypeError('ShadowRegistry.wrap: type (non-empty string) required at construction');
     if (typeof handler !== 'function') throw new TypeError(`ShadowRegistry.wrap(${type}): handler function required`);
     const variantBy = validateVariantBy(type, opts.variantBy, this._byType.get(type));
+    // REF-1.1 M1c (Decision 1): the LIVE-path certifying re-encoder. On the routed
+    // dispatch path the handler args are freshly DECODED plain objects (never
+    // decoder-certified), so without this the wrap observes nothing on live traffic
+    // (100% unbranded-source; the M1 canary finding). mintLive re-encodes an arg
+    // through the CANONICAL wire codec and certifies the TEXT — same discipline as
+    // B2-B4 (`certifyPlain(JSON.stringify(body))`), but the caller supplies a
+    // bigint-faithful encoder so pubsub ids survive (a plain JSON.stringify drops
+    // BigInt). It is only ever called on a freshly-decoded plain arg, and it is
+    // GUARDED at the call site: any throw (a hostile getter/Proxy trap fired by the
+    // re-encode) yields no snapshot → unbranded no-op → handler verbatim. The mint
+    // still accepts only TEXT; the wrap never brands a live object.
+    const mintLive = typeof opts.mintLive === 'function' ? opts.mintLive : null;
     const self = this;
 
     return function shadowWrapped(...args) {
       let on; try { on = self._enabled(); } catch { on = false; }
       if (!on) return handler.apply(this, args);
 
-      // Observe ONLY a certified snapshot. Identity check fires no Proxy trap; an
-      // uncertified arg (including any Proxy) is never reflected on — handler runs
-      // verbatim. Contained so nothing here can suppress the handler or escape.
-      const payloadIsSnap = isCertified(args[0]);
-      if (!payloadIsSnap) {
+      // Observed payload/meta are CERTIFIED snapshots — never the live args. Prefer
+      // an already-certified arg (decoder-minted); else, if a mintLive re-encoder is
+      // provided, mint one from the live arg (guarded). The identity check fires no
+      // Proxy trap; an uncertified, un-mintable arg is never reflected on — handler
+      // runs verbatim. Contained so nothing here can suppress the handler or escape.
+      let obsPayload = isCertified(args[0]) ? args[0] : null;
+      let obsMeta = isCertified(args[1]) ? args[1] : null;
+      if (!obsPayload && mintLive) {
+        try { const s = mintLive(args[0]); if (isCertified(s)) obsPayload = s; } catch { /* → unbranded */ }
+        if (obsPayload && args.length > 1 && args[1] != null && !obsMeta) {
+          try { const m = mintLive(args[1]); if (isCertified(m)) obsMeta = m; } catch { /* meta stays uncertified */ }
+        }
+      }
+      if (!obsPayload) {
         try { self._emitUnbranded(type); } catch { /* never break dispatch */ }
         return handler.apply(this, args);
       }
@@ -197,14 +218,13 @@ export class ShadowRegistry {
         const ops = { n: 0 };
         let variantFault = null;
         if (variantBy) {
-          const leaf = readLeaf(args[0], variantBy.path, DEFAULT_MAX_BYTES, ops);
+          const leaf = readLeaf(obsPayload, variantBy.path, DEFAULT_MAX_BYTES, ops);
           const r = pickVariant(variantBy, leaf);
           variant = r.variant; variantFault = r.fault;
         }
         const row = variantFault ? null : self.row(type, variant);
         const unknownVariant = (!variantFault && variant != null && !row);
-        const metaObj = isCertified(args[1]) ? args[1] : null;
-        pre = self._observe(row, args[0], metaObj, { variantFault, unknownVariant }, ops);
+        pre = self._observe(row, obsPayload, obsMeta, { variantFault, unknownVariant }, ops);
         pre._t0 = t0;
       } catch { pre = null; }   // an observer fault must never change delivery
 
@@ -432,9 +452,20 @@ function verdictOf(r) {
 //                       the wrap actually emits traces. built without observing is
 //                       a BLIND window: zero traces, faults:0 — looks clean but
 //                       observed nothing (council F1, Aster/Vega). BOTH gates.
-//   faults===0        — a present, non-negative safe integer, and zero;
+//   faults===0        — a present, non-negative safe integer, and zero. As of M1c
+//                       `faults` counts CONTRACT violations only (schema / projection
+//                       / variant / unregistered); a frame that took the unbranded no-op
+//                       is NOT a fault — it is a COVERAGE miss counted in `unobserved`.
 //   no 'threw'/'trace-fault' verdict — a threw can carry an empty faults[], so the
 //                       faults counter alone is insufficient (council carry-forward).
+//   total>0           — LIVENESS: frames actually flowed (M1c; Vega — this lived only
+//                       in the canary script, so the predicate could pass an empty window).
+//   unobserved===0    — COVERAGE (covered===total): every observed frame reached a
+//                       certified snapshot and exercised its contract. An unbranded
+//                       no-op frame counts 'unobserved' and MUST fail. This gate is
+//                       what makes splitting 'unbranded-source' out of `faults` safe:
+//                       an all-unbranded window still fails (F1 cannot be renamed),
+//                       and a residual unbranded live frame fails even after the mint.
 // Telemetry validation (council F2, Aster/Vega): summary must be a plain object;
 // faults a non-negative safe integer; verdicts a plain counter object; each own
 // verdict count a non-negative safe integer. Missing / null / negative / non-finite
@@ -530,6 +561,27 @@ function _frameRegistryCanaryVerdict(summary) {
       if (traceFault > 0) reasons.push(`trace-fault=${traceFault}`);
     }
   }
+  // COVERAGE (REF-1.1 M1c — Decision-1 synthesis, Aster + Vega). A window that
+  // observed NO contracts must fail even with faults===0. Two own-data counts,
+  // both fail-closed on accessor/absence/garbage:
+  //   total>0        — LIVENESS. Frames actually flowed. Vega: the canary script
+  //                    required this, the predicate did not — a consumer reading
+  //                    only the predicate could pass an empty window. Now it can't.
+  //   unobserved===0 — COVERAGE (covered===total). Every observed frame reached a
+  //                    certified snapshot and exercised its contract. A frame that
+  //                    took the unbranded-source no-op is counted 'unobserved' and
+  //                    MUST fail. This is why splitting 'unbranded-source' out of
+  //                    `faults` (M1c fold change) is safe: the coverage gate keeps
+  //                    an all-unbranded window failing — F1 cannot be renamed. A
+  //                    residual unbranded live frame after the mint lands still fails.
+  const totalD = ownData(summary, 'total');
+  if (totalD.accessor)             reasons.push('invalid-summary: total is an accessor');
+  else if (!isCount(totalD.value)) reasons.push('invalid-summary: total not a non-negative safe integer');
+  else if (totalD.value === 0)     reasons.push('no-traffic (total===0 — nothing observed)');
+  const unobsD = ownData(summary, 'unobserved');
+  if (unobsD.accessor)             reasons.push('invalid-summary: unobserved is an accessor');
+  else if (!isCount(unobsD.value)) reasons.push('invalid-summary: unobserved not a non-negative safe integer');
+  else if (unobsD.value > 0)       reasons.push(`uncovered (unobserved=${unobsD.value} — frames bypassed contract certification)`);
   const ready = built && observing;
   return { pass: ready && reasons.length === 0, ready, reasons };
 }
