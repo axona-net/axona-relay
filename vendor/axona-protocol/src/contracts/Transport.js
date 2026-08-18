@@ -170,38 +170,20 @@ export class Transport {
 
   // ─── Inbound dispatch ──────────────────────────────────────────────
   //
-  // Protocol code registers handlers per message type. Only one handler
-  // per (type, kind) — calling twice with the same type replaces the
-  // previous handler.
-
-  /**
-   * Register a handler for inbound request/response messages of a
-   * given type. The handler's return value is sent back to the caller
-   * as the `send()` resolution.
-   *
-   * Throwing from the handler causes the caller's `send()` to reject
-   * with the thrown error.
-   *
-   * @param {string} type
-   * @param {(fromId: bigint, payload: *) => Promise<*>} handler
-   * @returns {void}
-   */
-  onRequest(type, handler) {
-    throw new Error('Transport.onRequest: not implemented');
-  }
-
-  /**
-   * Register a handler for inbound one-way notifications of a given
-   * type. The handler's return value is ignored. Throws inside the
-   * handler are logged but do not propagate to the sender.
-   *
-   * @param {string} type
-   * @param {(fromId: bigint, payload: *) => void} handler
-   * @returns {void}
-   */
-  onNotification(type, handler) {
-    throw new Error('Transport.onNotification: not implemented');
-  }
+  // Protocol code registers handlers per message type through the ONE canonical
+  // door: registerFrame(recv, wire, handler, { registry }). Only one handler per
+  // (type, kind) — registering twice with the same type replaces the previous.
+  //
+  // REF-1.1 E3 (SEAL): the base contract does NOT declare onRequest / onNotification
+  // / onRoutedMessage as public methods. A concrete transport DEPOSITS its this-bound
+  // dispatch closures into the module-private capability channel at construction
+  // (depositDispatchCapability); registerFrame is the reader. Declaring throwing
+  // stubs here would leave the primitive NAME reachable on every subclass by
+  // prototype / computed / Reflect access — which is exactly the absence the seal
+  // establishes (Aster ASTER-E3A-SEAL-REVIEW: "inert/throwing is not the E3 absence
+  // invariant"). So the contract carries no dispatch method: on a sealed transport,
+  // every access path to onRequest / onNotification / onRoutedMessage resolves to
+  // undefined. The dispatch obligation is the capability deposit, documented here.
 
   // ─── Liveness & latency ────────────────────────────────────────────
   //

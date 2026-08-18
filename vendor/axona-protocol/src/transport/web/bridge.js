@@ -34,6 +34,7 @@
 
 import { Transport }            from '../../contracts/Transport.js';
 import { TransportError, ErrorCodes } from '../../errors.js';
+import { depositDispatchCapability } from '../../registry/index.js';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_REQ_ID = 0x7fffffff;
@@ -63,6 +64,22 @@ export class BridgeTransport extends Transport {
 
     this._reqHandlers = new Map();
     this._ntfHandlers = new Map();
+
+    // REF-1.1 E3b.2b (SEAL): the raw dispatch primitives are deposited into
+    // the module-private capability channel (read solely by registerFrame),
+    // keyed by dispatch KIND — never by the public method name. Bodies are
+    // byte-identical to the former onRequest/onNotification methods.
+    depositDispatchCapability(this, {
+      request: (type, handler) => {
+        if (typeof handler !== 'function') throw new TypeError('onRequest: handler must be a function');
+        this._reqHandlers.set(type, handler);
+      },
+      notification: (type, handler) => {
+        if (typeof handler !== 'function') throw new TypeError('onNotification: handler must be a function');
+        this._ntfHandlers.set(type, handler);
+      },
+    });
+
     this._pending     = new Map();
     this._nextId      = 1;
     this._peerDiedHandlers = [];
@@ -283,15 +300,9 @@ export class BridgeTransport extends Transport {
     }
   }
 
-  onRequest(type, handler) {
-    if (typeof handler !== 'function') throw new TypeError('onRequest: handler must be a function');
-    this._reqHandlers.set(type, handler);
-  }
-
-  onNotification(type, handler) {
-    if (typeof handler !== 'function') throw new TypeError('onNotification: handler must be a function');
-    this._ntfHandlers.set(type, handler);
-  }
+  // REF-1.1 E3b.2b (SEAL): onRequest/onNotification are no longer public
+  // instance methods. The raw dispatch primitives live only in the capability
+  // channel (deposited in the constructor); registerFrame is the one door.
 
   onPeerDied(handler) {
     if (typeof handler !== 'function') throw new TypeError('onPeerDied: handler must be a function');

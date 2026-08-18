@@ -48,6 +48,15 @@ const EVIDENCE_FOR_PROOF = Object.freeze({
 
 export const CorrelationSubjectKind = Object.freeze({
   LegacyAuthorityRef: 'LegacyAuthorityRef', IngressRef: 'IngressRef', HolderRef: 'HolderRef', AuthorLaneRef: 'AuthorLaneRef',
+  // REF-1.1 E2.0 (Aster ASTER-E2-CHANNEL-SUBJECT, all three seats): the transport
+  // request-return pairing. The association is supplied by the transport RPC
+  // channel itself — NOT a separately dispatched frame and NOT a payload field. It
+  // is the honest correlation subject for an onRequest RPC whose reply is the
+  // transport return value (lookup_step, find_closest_set, axona:direct request …).
+  // A CHANNEL subject: it carries a fixed transportScope and an EMPTY requires (no
+  // payload projection is a correlation id), a schema exception available ONLY to
+  // FrameKind.REQUEST_RESPONSE + TransportRpcRef.
+  TransportRpcRef: 'TransportRpcRef',
 });
 const CORRELATION_KINDS = new Set(Object.values(CorrelationSubjectKind));
 
@@ -199,8 +208,26 @@ export function defineRow(row) {
     if (!isPlainObject(row.correlation)) fail(type, 'correlation must be a plain spec object');
     if (!CORRELATION_KINDS.has(row.correlation.kind)) fail(type, 'correlation.kind (CorrelationSubjectKind) required');
     const requires_ = validPaths(type, 'correlation.requires', row.correlation.requires ?? [], MAX_LIST);
-    if (requires_.length === 0) fail(type, 'correlation must declare non-empty requires');
-    for (const p of requires_) if (!inProjection(p)) fail(type, `correlation.requires path ${p} is not in the declared projection`);
+    // TransportRpcRef is a CHANNEL subject (Aster ASTER-E2-CHANNEL-SUBJECT): the
+    // request↔return pairing comes from the transport RPC channel, not a payload
+    // field. The empty-requires + fixed-transportScope exception is available ONLY
+    // to FrameKind.REQUEST_RESPONSE + TransportRpcRef; every other subject keeps the
+    // non-empty projected-requires rule, and no generic empty-requires escape hatch
+    // exists. transportScope is likewise rejected on any other kind/subject.
+    const isRpcSubject = row.correlation.kind === CorrelationSubjectKind.TransportRpcRef;
+    if (row.correlation.transportScope != null && !(isRpcSubject && kind === FrameKind.REQUEST_RESPONSE)) {
+      fail(type, 'correlation.transportScope is valid ONLY for FrameKind.REQUEST_RESPONSE with CorrelationSubjectKind.TransportRpcRef');
+    }
+    let transportScope = null;
+    if (isRpcSubject) {
+      if (kind !== FrameKind.REQUEST_RESPONSE) fail(type, 'CorrelationSubjectKind.TransportRpcRef is valid only on FrameKind.REQUEST_RESPONSE');
+      if (row.correlation.transportScope !== 'request-return') fail(type, 'TransportRpcRef requires an explicit correlation.transportScope === "request-return" (the transport request-return channel)');
+      if (requires_.length !== 0) fail(type, 'TransportRpcRef must NOT claim a payload projection as a correlation id — correlation.requires must be empty (the pairing is the transport RPC channel)');
+      transportScope = 'request-return';
+    } else {
+      if (requires_.length === 0) fail(type, 'correlation must declare non-empty requires');
+      for (const p of requires_) if (!inProjection(p)) fail(type, `correlation.requires path ${p} is not in the declared projection`);
+    }
     const requiresSet = new Set(requires_);
     let binding = null;
     if (row.correlation.binding != null) {
@@ -232,7 +259,7 @@ export function defineRow(row) {
       }
       binding = Object.freeze(bindOut);
     }
-    correlation = Object.freeze({ kind: row.correlation.kind, requires: requires_, binding });
+    correlation = Object.freeze({ kind: row.correlation.kind, requires: requires_, binding, ...(transportScope ? { transportScope } : {}) });
     subjectShape = row.correlation.kind;
   }
   if (kind === FrameKind.REQUEST_RESPONSE && !correlation) fail(type, 'REQUEST_RESPONSE requires a correlation spec');

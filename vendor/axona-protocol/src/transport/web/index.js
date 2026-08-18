@@ -42,10 +42,14 @@ import { KERNEL_VERSION, WIRE_VERSION } from '../handshake.js';
 // REF-1.1 S4a: Boundary-2 (transport hello/auth/session + CAP_ATTEST) frame-contract
 // registry, SHADOW MODE, DEFAULT-OFF. Built only under the `frameRegistry` flag;
 // observe() is a pure side-channel that never touches the notification handlers.
-import { makeBoundary2Observers } from '../boundary2Registry.js';
+import { makeBoundary2Observers, buildBoundary2Registry } from '../boundary2Registry.js';
+// REF-1.1 E2.2: the canonical registration DOOR + the runtime shadow flag. The 3
+// Boundary-2 auth sites (hello, hello-ack, cap-attest) register through registerFrame
+// instead of the raw X.onNotification primitive; observation stays default-off.
+import { registerFrame, shadowEnabled } from '../../registry/index.js';
 // REF-1.1 S4b: Boundary-3 (WebRTC signalling + mesh-auth) frame-contract registry,
 // SHADOW MODE, DEFAULT-OFF — same flag and no-op-when-off discipline as Boundary-2.
-import { makeBoundary3Observers } from '../boundary3Registry.js';
+import { makeBoundary3Observers, buildBoundary3Registry } from '../boundary3Registry.js';
 import { makeBoundary4Observers } from '../boundary4Registry.js';
 import {
   buildAuthHello, verifyAuthHello, cbvFromNonces, AUTH_PROTO,
@@ -586,6 +590,21 @@ export function webTransport({
   composite.addSubtransport(bridge);   // bridge is the single-peer fast-path
   composite.addSubtransport(webrtc);   // WebRTC for everyone else
 
+  // REF-1.1 E2.2 — the Boundary-2 registration DOOR (transport hello / hello-ack /
+  // cap-attest). Built UNCONDITIONALLY (mirrors AxonaManager._frameDoor) so
+  // registerFrame always has its registry on the default path — gating it on the
+  // observe flag would make registerFrame throw on construct. Registration + dispatch
+  // only: OBSERVATION stays with the b2observe side-channel below (the B2 handler arg
+  // order is (connId, body), which the wrap's payload model does not fit — S4a chose
+  // observeShape for exactly that reason), and the registry carries no mintLive, so the
+  // wrap is an unbranded no-op flag-on and byte-identical dispatch flag-off.
+  composite._b2door = buildBoundary2Registry({ enabled: shadowEnabled });
+  // REF-1.1 E2.3: the Boundary-3 door for the two webrtc mesh-base-auth notifications
+  // (hello, hello-sig). Built unconditionally, same discipline as _b2door — the b3observe
+  // side-channel keeps the (wire, fromConnId) scoping the wrap can't see; flag-off the
+  // wrap is byte-identical. (mesh:signal, the routed B3 site, holds its own door on AxonaPeer.)
+  composite._b3door = buildBoundary3Registry({ enabled: shadowEnabled });
+
   // ── Bridge handshake state (auto-handshake path) ─────────────────
   //
   // The kernel's webTransport optionally drives the full bridge
@@ -936,8 +955,8 @@ export function webTransport({
     // bridgeInfo), NOT the fixed BRIDGE_CONN_ID sentinel that BridgeTransport hands
     // these handlers as `c`. welcome precedes hello per connection, and a reconnect
     // installs a fresh welcome connId, so the two sessions' auth legs never conflate.
-    bridge.onNotification('hello',     (c, b) => { b2observe('hello',     bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello');     });
-    bridge.onNotification('hello-ack', (c, b) => { b2observe('hello-ack', bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello-ack'); });
+    registerFrame(bridge, 'hello',     (c, b) => { b2observe('hello',     bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello');     }, { registry: composite._b2door });
+    registerFrame(bridge, 'hello-ack', (c, b) => { b2observe('hello-ack', bridgeInfo?.connId ?? c, b); return onBridgeAuthHello(c, b, 'hello-ack'); }, { registry: composite._b2door });
 
     socketEvents.close.add(() => {
       if (bridgeNodeIdBig === null) {
@@ -979,16 +998,16 @@ export function webTransport({
     if (typeof mesh.onPeerLost === 'function') {
       mesh.onPeerLost((meshId) => meshAuth.onChannelLost(meshId));
     }
-    webrtc.onNotification('hello',     (fromConnId, body) => { b3observe('hello',     fromConnId, body); return meshAuth.onHello(fromConnId, body); });
-    webrtc.onNotification('hello-sig', (fromConnId, body) => { b3observe('hello-sig', fromConnId, body); return meshAuth.onHelloSig(fromConnId, body); });
+    registerFrame(webrtc, 'hello',     (fromConnId, body) => { b3observe('hello',     fromConnId, body); return meshAuth.onHello(fromConnId, body); },    { registry: composite._b3door });
+    registerFrame(webrtc, 'hello-sig', (fromConnId, body) => { b3observe('hello-sig', fromConnId, body); return meshAuth.onHelloSig(fromConnId, body); }, { registry: composite._b3door });
     // CAP_ATTEST arrives POST-bind, so webrtc dispatches the sender's
     // BigInt nodeId here — not the pre-bind meshId string the hello
     // handlers get.  Translate back to the meshId MeshAuth keys on.
-    webrtc.onNotification('cap-attest', (from, body) => {
+    registerFrame(webrtc, 'cap-attest', (from, body) => {
       const meshId = (typeof from === 'string') ? from : webrtc.meshIdFor(from);
       b2observe('cap-attest', meshId, body);   // S4a shadow (no-op unless flag on)
       if (meshId) meshAuth.onCapAttest(meshId, body);
-    });
+    }, { registry: composite._b2door });
 
     // Surface per-node write-flight-ack capability up to the AxonaPeer dht
     // adapter (dht.isCapable) so D0 delegation can pick a 4.62.2-capable

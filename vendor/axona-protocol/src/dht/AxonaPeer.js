@@ -57,6 +57,25 @@ import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES, isRegionLo
 import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
 import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
+// REF-1.1 E2.3: the canonical registration DOOR + runtime shadow flag, and the
+// Boundary-3 registry. The routed mesh:signal handler registers through registerFrame
+// (transportKind 'routed' resolved from the B3 row) instead of the raw onRoutedMessage
+// primitive; observation is default-off, so flag-off dispatch is byte-identical.
+import { registerFrame, registerDirectFrame, depositDispatchCapability, readDispatchCapability, shadowEnabled } from '../registry/index.js';
+import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
+import { buildBoundary6Registry } from './boundary6Registry.js';
+import { buildBoundary5Registry } from './boundary5Registry.js';
+
+// REF-1.1 E3: a transport can receive dispatch either through the legacy
+// public primitive (unsealed transport) OR through a deposited capability
+// (sealed transport, read via the module-private channel). The old install
+// guards keyed on `typeof transport.onRequest === 'function'`; after E3 seals
+// a transport that predicate is false even though registerFrame binds the
+// handler fine via the capability channel — so the guard must accept both.
+function _canReceiveDispatch(recv) {
+  if (!recv) return false;
+  return typeof recv.onRequest === 'function' || readDispatchCapability(recv) !== undefined;
+}
 
 // ── B-3 (eclipse prevention) tunables ───────────────────────────────
 // Max concurrent verification probes triggered by gossip introductions —
@@ -108,7 +127,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -120,6 +139,37 @@ export class AxonaPeer extends DHT {
     // then gates whether the wrap observes or runs the handler verbatim). The M1
     // telemetry-only canary sets this so a relay peer can report the shadow invariant.
     this._armFrameRegistry = frameRegistry === true;
+    // REF-1.1 E2.3: the Boundary-3 door for the routed mesh:signal handler (built
+    // unconditionally, same discipline as the transport's _b2door/_b3door). The B3
+    // row keys mesh:signal on transportKind 'routed', so registerFrame binds it to
+    // this.onRoutedMessage; flag-off the wrap runs the handler verbatim (byte-identical).
+    this._b3door = buildBoundary3Registry({ enabled: shadowEnabled });
+    // REF-1.1 E2.4: the Boundary-6 door for the direct-messaging frames. B6 is the SOLE
+    // composite registry — axona:direct binds TWO primitives (onRequest + onNotification)
+    // on one wire, plus the routed __tunneled_direct__ leg — so its migration sites NAME
+    // the primitive via transportKind (bare lookup would refuse). Flag-off the wrap runs
+    // each handler verbatim (byte-identical). Reachable at both direct-handler sites
+    // (this._b6door) and the tunneled site in _buildDefaultAxonaManager (peer === this).
+    this._b6door = buildBoundary6Registry({ enabled: shadowEnabled });
+    // REF-1.1 E2.5: the Boundary-5 door for the ten dht:transport routing frames
+    // (built unconditionally, same discipline as _b3door/_b6door). B5 is BARE-KEYED
+    // single-primitive — each row keys on the plain wire and carries its own
+    // transportKind — so the 10 migration sites OMIT transportKind (the row selects
+    // onRequest vs onNotification). Reachable in _installRoutingHandlers on this._b5door,
+    // alongside the B3 mesh:signal door (this._b3door), disambiguated by the registry.
+    this._b5door = buildBoundary5Registry({ enabled: shadowEnabled });
+    // REF-1.1 E1 direct_* admissible-type fence (council-cleared design; David:
+    // registration-time allowlist; Vega ffdba957 hardening). The construction-time
+    // admissible set for direct-message `type`s. OMITTED (undefined/null) = dormant
+    // (no allowlist to check). An explicit Set — INCLUDING an empty Set (= this
+    // deployment admits ZERO direct types) — is an active policy. Copy at construct
+    // [R1]: new Set() snapshots the caller's iterable so later caller mutation cannot
+    // change the peer's admissible set. Immutable for the peer's lifetime; no hot-swap.
+    this._directMessageTypes = (directMessageTypes == null) ? null : new Set(directMessageTypes);
+    // Phased like the cutover: OBSERVE at E1-E3 (record would-refuse, allow), ENFORCE
+    // at E4 (throw = fail closed). Default OBSERVE. Malformed types are refused in
+    // BOTH phases (a corrupt wire is not an allowlist question).
+    this._enforceDirectMessageTypes = enforceDirectMessageTypes === true;
     // Synaptome maintenance (Synaptome-Maintenance-v0.1): continuously refill the
     // K_NEAR XOR-nearest "successor" quota so greedy routing's last-mile descent
     // always completes through churn. OPT-IN (default off) — when omitted the peer
@@ -217,6 +267,16 @@ export class AxonaPeer extends DHT {
     /** @type {Map<string, Function>} direct-message type → handler */
     this._directHandlers = new Map();
 
+    // REF-1.1 E3b.2c (SEAL): the AxonaPeer IS the routed-dispatch receiver —
+    // registerFrame(this, 'mesh:signal' | '__tunneled_direct__' | the B1 pub/sub
+    // wires) binds through this deposited `routed` closure, keyed by dispatch KIND,
+    // never the public onRoutedMessage name. The peer receives only routed frames,
+    // so it deposits only the routed slot. Body is byte-identical to the former
+    // onRoutedMessage method; registerFrame is the one door.
+    depositDispatchCapability(this, {
+      routed: (type, handler) => { this._routedHandlers.set(type, handler); },
+    });
+
     // ─── Routing-handler install flag (Phase 5e follow-up) ───────
     /** True once start() has called transport.onRequest('lookup_step') etc. */
     this._routingHandlersInstalled = false;
@@ -296,7 +356,7 @@ export class AxonaPeer extends DHT {
     // in dht-sim sets node.transport from network.makeTransport
     // before constructing the peer, so the receive path is wired
     // either way).
-    if (this._node?.transport && typeof this._node.transport.onRequest === 'function') {
+    if (this._node?.transport && _canReceiveDispatch(this._node.transport)) {
       this._installRoutingHandlers();
     }
 
@@ -450,7 +510,7 @@ export class AxonaPeer extends DHT {
     // coercion the second hop in any multi-hop walk throws
     // "ctx.queried.add is not a function" and the lookup short-
     // circuits to found=false.
-    transport.onRequest('lookup_step', async (_fromId, payload) => {
+    registerFrame(transport, 'lookup_step', async (_fromId, payload) => {
       const queried = payload?.queried instanceof Set
         ? payload.queried
         : Array.isArray(payload?.queried)
@@ -465,10 +525,10 @@ export class AxonaPeer extends DHT {
         queried,
         totalTimeMs: payload.totalTimeMs,
       });
-    });
+    }, { registry: this._b5door });
 
     // ── lookahead_probe — AP-best forward synapse to target ─────────
-    transport.onRequest('lookahead_probe', async (_fromId, payload) => {
+    registerFrame(transport, 'lookahead_probe', async (_fromId, payload) => {
       const target   = payload.target;
       const fromDist = payload.fromDist;
       const fwd = [];
@@ -480,10 +540,10 @@ export class AxonaPeer extends DHT {
       }
       const best = node.bestByAP(fwd, target, 0);
       return { peerId: best.peerId, latency: best.latency, terminal: false };
-    });
+    }, { registry: this._b5door });
 
     // ── reinforce — LTP weight bump on a used synapse ───────────────
-    transport.onNotification('reinforce', (_fromId, payload) => {
+    registerFrame(transport, 'reinforce', (_fromId, payload) => {
       const syn = node.synaptome.get(payload.synapsePeerId);
       if (!syn) return;
       // B-3: on identity-binding transports, only reinforce a synapse whose
@@ -504,24 +564,24 @@ export class AxonaPeer extends DHT {
       // eligible for vitality-based eviction protection.
       syn.reinforce(domain.simEpoch, domain.INERTIA_DURATION ?? 8);
       syn.useCount = (syn.useCount ?? 0) + 1;
-    });
+    }, { registry: this._b5door });
 
     // ── triadic_introduce — observer-driven candidate ──────────────
     // B-3: an introduced peer is a *candidate*, not a table entry.  On
     // identity-binding transports it is admitted only after first-party
     // verification (see _considerCandidate); a forged introduction can no
     // longer poison the synaptome.
-    transport.onNotification('triadic_introduce', async (_fromId, payload) => {
+    registerFrame(transport, 'triadic_introduce', async (_fromId, payload) => {
       await this._considerCandidate(payload.peerId, 'triadic');
-    });
+    }, { registry: this._b5door });
 
     // ── hop_cache + lateral_spread — observed-path candidates ──────
     const hopCacheHandler = async (_fromId, payload) => {
       const source = (payload.depth ?? 0) === 0 ? 'hopCache' : 'lateralSpread';
       await this._considerCandidate(payload.target, source);
     };
-    transport.onNotification('hop_cache',      hopCacheHandler);
-    transport.onNotification('lateral_spread', hopCacheHandler);
+    registerFrame(transport, 'hop_cache',      hopCacheHandler, { registry: this._b5door });
+    registerFrame(transport, 'lateral_spread', hopCacheHandler, { registry: this._b5door });
 
     // ── peer-leaving — graceful-departure fast path ─────────────────
     // A peer (e.g. the bridge on a `systemctl restart`) announces that
@@ -548,7 +608,7 @@ export class AxonaPeer extends DHT {
     // early-returns before re-anchoring, so it can't be used as a
     // refreshTick-amplification lever.  Additive + backward-compatible:
     // peers that never receive this behave exactly as before.
-    transport.onNotification('peer-leaving', (fromId, _payload) => {
+    registerFrame(transport, 'peer-leaving', (fromId, _payload) => {
       try {
         let leaving =
           (typeof fromId === 'bigint')                  ? fromId :
@@ -573,7 +633,7 @@ export class AxonaPeer extends DHT {
         // Re-anchor now rather than waiting for the 10 s refreshTick.
         Promise.resolve(this._axonaManager?.refreshTick?.()).catch(() => {});
       } catch { /* best-effort resilience path */ }
-    });
+    }, { registry: this._b5door });
 
     // ── Phase 7 handlers ────────────────────────────────────────────
 
@@ -583,7 +643,7 @@ export class AxonaPeer extends DHT {
     // when a synapse goes dead.  Reply: the synaptome peerIds,
     // excluding the requestor itself (otherwise they'd see themselves
     // as a candidate — useless).
-    transport.onRequest('local_probe', async (fromId, _payload) => {
+    registerFrame(transport, 'local_probe', async (fromId, _payload) => {
       const fromBig = asId(fromId);   // wire→internal id gate
       const peerIds = [];
       for (const syn of node.synaptome.values()) {
@@ -601,13 +661,13 @@ export class AxonaPeer extends DHT {
         peerIds.length = LOCAL_PROBE_MAX;
       }
       return peerIds;
-    });
+    }, { registry: this._b5door });
 
     // ── find_closest_set — top-K closest peers from local synaptome
     // Used by AxonaManager's findKClosest (pub/sub) and by iterative
     // discovery.  Insertion-sorted scan; cheap because synaptome is
     // bounded by MAX_SYNAPTOME.  Caller merges results across rounds.
-    transport.onRequest('find_closest_set', async (_fromId, payload) => {
+    registerFrame(transport, 'find_closest_set', async (_fromId, payload) => {
       const targetBig = asId(payload.target);   // wire→internal id gate
       const K = payload.K ?? domain._k;
       const top = [];
@@ -625,7 +685,7 @@ export class AxonaPeer extends DHT {
         }
       }
       return top.map(t => t.peerId);
-    });
+    }, { registry: this._b5door });
 
     // ── route_msg — recursive routed-message forwarder ──────────────
     // Receiver runs greedy 1-hop scan over its own synaptome (closer
@@ -633,7 +693,7 @@ export class AxonaPeer extends DHT {
     // local routed handler for `type` (if any).  Returns 'consumed' /
     // 'terminal' / 'exhausted', or forwards to nextHop via another
     // route_msg request and bubbles the downstream reply unchanged.
-    transport.onRequest('route_msg', async (fromId, msg) => {
+    registerFrame(transport, 'route_msg', async (fromId, msg) => {
       const { type, payload, targetId, hops, originId } = msg;
       const targetBig = asId(targetId);   // wire→internal id gate
 
@@ -701,7 +761,7 @@ export class AxonaPeer extends DHT {
       } catch {
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
-    });
+    }, { registry: this._b5door });
 
     // ── mesh:signal — peer-relayed WebRTC signaling (bridgeless connect) ──
     // A routed message carrying an opaque SDP/ICE payload toward a target
@@ -714,7 +774,7 @@ export class AxonaPeer extends DHT {
     // channel is still authenticated end-to-end (axona/4 + DTLS-fingerprint
     // binding), so a relay can drop/observe but never MITM.  Design:
     // axona-docs/implementation/Peer-Relayed-Signaling-v0.1.md §3.1.
-    this.onRoutedMessage('mesh:signal', async (payload, meta) => {
+    registerFrame(this, 'mesh:signal', async (payload, meta) => {
       if (meta.targetId !== node.id) return null;       // not us — forward
       const t = node.transport;
       if (t && typeof t.deliverMeshSignal === 'function'
@@ -725,7 +785,7 @@ export class AxonaPeer extends DHT {
         }
       }
       return 'consumed';
-    });
+    }, { registry: this._b3door });
 
     this._routingHandlersInstalled = true;
   }
@@ -2582,9 +2642,9 @@ export class AxonaPeer extends DHT {
   _installDirectHandlers() {
     if (this._directHandlersInstalled) return;
     const t = this._transport;
-    if (!t || typeof t.onRequest !== 'function') return;
+    if (!t || !_canReceiveDispatch(t)) return;
 
-    t.onRequest('axona:direct', async (fromId, payload) => {
+    registerFrame(t, 'axona:direct', async (fromId, payload) => {
       const h = this._directMessageHandler;
       if (!h) return undefined;
       // The wire fromId is the transport's notion:
@@ -2599,8 +2659,8 @@ export class AxonaPeer extends DHT {
         (typeof fromId === 'string' && isHexId(fromId)) ? fromId :
         (payload?.from ?? null);
       return await h(senderId, payload?.message);
-    });
-    t.onNotification('axona:direct', (fromId, payload) => {
+    }, { registry: this._b6door, transportKind: 'request' });
+    registerFrame(t, 'axona:direct', (fromId, payload) => {
       const h = this._directMessageHandler;
       if (!h) return;
       const senderId =
@@ -2609,7 +2669,7 @@ export class AxonaPeer extends DHT {
         (payload?.from ?? null);
       try { h(senderId, payload?.message); }
       catch { /* notification handler errors swallow */ }
-    });
+    }, { registry: this._b6door, transportKind: 'notification' });
     this._directHandlersInstalled = true;
   }
 
@@ -3086,7 +3146,11 @@ export class AxonaPeer extends DHT {
         });
         return true;
       },
-      onRoutedMessage: (type, h) => peer.onRoutedMessage(type, h),
+      // REF-1.1 E3b.2c: the peer's onRoutedMessage is sealed — this default-DHT
+      // adapter (one of the three module-identity-frozen mechanism shims) reaches
+      // the routed primitive through the allowlisted capability reader, not a raw
+      // public method. AxonaManager installs its pub/sub routed handlers via this.
+      onRoutedMessage: (type, h) => readDispatchCapability(peer).routed(type, h),
       onDirectMessage: (type, h) => peer.onDirectMessage(type, h),
       // Robust ITERATIVE lookup (α-parallel, escapes the greedy local minima that
       // strand subscribers on a sparse mesh). Every consumer — rootElection's
@@ -3113,10 +3177,23 @@ export class AxonaPeer extends DHT {
       },
     };
 
+    // REF-1.1 E3b.4 (SEAL — Aster boundary ruling 39012d73 / option 1): the
+    // default-DHT adapter is the receiver AxonaManager registers its 19 B1 pub/sub
+    // frames on. registerFrame now MANDATES a deposited capability — no literal-name
+    // fallback — so this adapter DEPOSITS its routed capability at construction, here,
+    // as a named registrar (one of the module-identity-frozen mechanism shims). The
+    // deposited closure delegates to the sealed peer's routed primitive through the
+    // allowlisted reader, exactly as the public onRoutedMessage above does; the public
+    // method is retained only for AxonaManager's readiness guard (AxonaManager.js:116).
+    // B1 binding stays on the adapter — it is NOT moved to the peer (option 1, not 2).
+    depositDispatchCapability(dht, {
+      routed: (type, h) => readDispatchCapability(peer).routed(type, h),
+    });
+
     // Receiver end of the routed fallback.  Mirrors browser_engine.
     // meta.targetId arrives over the wire as hex; convert to BigInt
     // before comparing to selfId.
-    peer.onRoutedMessage('__tunneled_direct__', async (payload, meta) => {
+    registerFrame(peer, '__tunneled_direct__', async (payload, meta) => {
       const targetBig =
         (typeof meta?.targetId === 'bigint')   ? meta.targetId :
         (typeof meta?.targetId === 'string' && isHexId(meta.targetId))
@@ -3137,7 +3214,7 @@ export class AxonaPeer extends DHT {
         }
       }
       return 'consumed';
-    });
+    }, { registry: peer._b6door, transportKind: 'routed' });
 
     const am = new AxonaManager({
       dht,
@@ -4151,6 +4228,35 @@ export class AxonaPeer extends DHT {
   }
 
   /**
+   * REF-1.1 E1 direct_* admissible-type fence. Gates BOTH sides of the direct-message
+   * capability (sendDirect + onDirectMessage) on the construction-time allowlist, so
+   * the door is whole (Vega ffdba957: "E4 fail-closed is half a door if send is open").
+   *
+   * Malformed `type` — non-string, empty, or already `direct_`-prefixed — is a corrupt
+   * wire, not an allowlist question: refused in BOTH phases, throwing always.
+   *
+   * When an allowlist is configured (this._directMessageTypes !== null) and `type` is
+   * not in it: ENFORCE (E4) throws = fail closed; OBSERVE (E1, default) records a
+   * would-refuse trace and returns (byte-identical for well-formed types). Omitted
+   * allowlist = dormant (well-formed types pass untouched).
+   *
+   * Throws on refusal; returns void on admit/observe.
+   */
+  _gateDirectType(type, op) {
+    if (typeof type !== 'string' || type.length === 0 || type.startsWith('direct_')) {
+      throw new TypeError(`peer.${op}: malformed direct-message type ${JSON.stringify(type)} — must be a non-empty string, not 'direct_'-prefixed`);
+    }
+    const allow = this._directMessageTypes;
+    if (allow === null || allow.has(type)) return;      // dormant, or admitted
+    if (this._enforceDirectMessageTypes) {              // E4: fail closed
+      const err = new Error(`peer.${op}: direct-message type '${type}' is not in the directMessageTypes allowlist`);
+      err.code = 'ERR_DIRECT_TYPE_INADMISSIBLE';
+      throw err;
+    }
+    this._emitLog?.('warn', 'direct-fence-would-refuse', { type, op });  // E1: observe
+  }
+
+  /**
    * Fire-and-forget direct notification to one peer.  `type` is the
    * application name; the wire type is `direct_${type}`.
    */
@@ -4158,6 +4264,9 @@ export class AxonaPeer extends DHT {
     if (typeof peerId !== 'bigint') {
       throw new TypeError(`peer.sendDirect: peerId must be bigint, got ${typeof peerId}`);
     }
+    // Fence the send side (outside the try/catch below so a capability/malformed
+    // refusal surfaces to the caller instead of being swallowed as `return false`).
+    this._gateDirectType(type, 'sendDirect');
     const fromNode = this._node;
     if (!fromNode?.alive || !fromNode.transport) return false;
     try {
@@ -4216,23 +4325,30 @@ export class AxonaPeer extends DHT {
     return best;
   }
 
-  /**
-   * Register a routed-message handler for `type`.  Per-peer storage;
-   * engine version still works because engine delegates here.
-   */
-  onRoutedMessage(type, handler) {
-    this._routedHandlers.set(type, handler);
-  }
+  // REF-1.1 E3b.2c (SEAL): onRoutedMessage is no longer a public instance method.
+  // The routed dispatch primitive lives only in the capability channel (deposited
+  // in the constructor); registerFrame reaches it, and the default-DHT adapter's
+  // routed passthrough reads it via readDispatchCapability. This is the LAST
+  // primitive-definition sealed — the E3 absence invariant now holds for every
+  // receiver in the program.
 
   /**
    * Register a direct-message handler for `type`.  Bridges to a
    * transport.onNotification listener on `direct_${type}`.
    */
   onDirectMessage(type, handler) {
+    // REF-1.1 E1 direct_* fence (receive side). Malformed/enforce-refuse throws →
+    // nothing installed (fail closed). Observe-refuse records + returns → install
+    // proceeds byte-identical. This is the single parameterized registrar for the
+    // computed `direct_${type}` wire; the fence is the check, it adds no new site.
+    this._gateDirectType(type, 'onDirectMessage');
     const node = this._node;
-    const wireType = `direct_${type}`;
     if (!this._directHandlers.has(type)) {
-      node.transport.onNotification(wireType, (fromId, payload) => {
+      // REF-1.1 E3 decision 2: register the computed direct_${type} wire through the
+      // ONE named registrar (registerDirectFrame), not a raw transport.onNotification.
+      // It reads the sealed transport's capability (or falls back, transitionally),
+      // and enforces the direct_-prefix shape so no computed wire escapes the seal.
+      registerDirectFrame(node.transport, type, (fromId, payload) => {
         const h = this._directHandlers.get(type);
         if (!h) return;
         const fromHex = (typeof fromId === 'bigint') ? nodeIdToHex(fromId) : fromId;

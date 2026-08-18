@@ -26,6 +26,7 @@
 
 import { Transport }       from '../../contracts/Transport.js';
 import { TransportError, ErrorCodes } from '../../errors.js';
+import { depositDispatchCapability, readDispatchCapability } from '../../registry/index.js';
 
 export class CompositeTransport extends Transport {
   /**
@@ -57,6 +58,40 @@ export class CompositeTransport extends Transport {
     /** @type {Array<(t: Transport) => void>} */ this._peerBoundRegistrars = [];
 
     this._started = false;
+
+    // REF-1.1 E3b.2b (SEAL): the composite is itself a sealed transport — the
+    // peer registers frames on it through registerFrame, which reaches these
+    // deposited closures (never a public onRequest/onNotification). Each closure
+    // records the handler (so a sub added later inherits it) and fans it out to
+    // every current sub-transport via the sub's OWN capability channel.
+    depositDispatchCapability(this, {
+      request: (type, handler) => {
+        this._reqHandlers.set(type, handler);
+        for (const t of this._subs) this._fanOutRequest(t, type, handler);
+      },
+      notification: (type, handler) => {
+        this._ntfHandlers.set(type, handler);
+        for (const t of this._subs) this._fanOutNotification(t, type, handler);
+      },
+    });
+  }
+
+  // REF-1.1 E3b.4 (SEAL): fan one handler onto a single sub-transport through its
+  // capability channel ONLY. Every sub-transport is a sealed transport that deposits
+  // at construction, so the literal-method fallback (t.onRequest / t.onNotification)
+  // is GONE — an undeposited sub cannot receive a fan-out, it throws. This keeps the
+  // composite fan-out on the same mandatory-capability path as registerFrame (Aster
+  // boundary ruling 39012d73 / option 1): no receiver reaches a raw primitive by name.
+  _fanOutRequest(t, type, handler) {
+    const cap = readDispatchCapability(t);
+    if (typeof cap?.request !== 'function') throw new TypeError('CompositeTransport._fanOutRequest: sub-transport has no deposited request dispatch capability (E3 seal: every sub-transport must deposit at construction)');
+    cap.request(type, handler);
+  }
+
+  _fanOutNotification(t, type, handler) {
+    const cap = readDispatchCapability(t);
+    if (typeof cap?.notification !== 'function') throw new TypeError('CompositeTransport._fanOutNotification: sub-transport has no deposited notification dispatch capability (E3 seal: every sub-transport must deposit at construction)');
+    cap.notification(type, handler);
   }
 
   /**
@@ -66,9 +101,9 @@ export class CompositeTransport extends Transport {
    */
   addSubtransport(t) {
     this._subs.push(t);
-    // Replay handler registrations to the new sub-transport.
-    for (const [type, h] of this._reqHandlers) t.onRequest(type, h);
-    for (const [type, h] of this._ntfHandlers) t.onNotification(type, h);
+    // Replay handler registrations to the new sub-transport (via its capability).
+    for (const [type, h] of this._reqHandlers) this._fanOutRequest(t, type, h);
+    for (const [type, h] of this._ntfHandlers) this._fanOutNotification(t, type, h);
     for (const h of this._peerDiedHandlers)    t.onPeerDied(h);
     for (const reg of this._peerBoundRegistrars) reg(t);
   }
@@ -219,15 +254,9 @@ export class CompositeTransport extends Transport {
     return t.notify(nodeId, type, body);
   }
 
-  onRequest(type, handler) {
-    this._reqHandlers.set(type, handler);
-    for (const t of this._subs) t.onRequest(type, handler);
-  }
-
-  onNotification(type, handler) {
-    this._ntfHandlers.set(type, handler);
-    for (const t of this._subs) t.onNotification(type, handler);
-  }
+  // REF-1.1 E3b.2b (SEAL): onRequest/onNotification are no longer public
+  // instance methods. registerFrame reaches the deposited capability closures
+  // (constructor), which record + fan out via _fanOutRequest/_fanOutNotification.
 
   // ── Liveness & latency ─────────────────────────────────────────────
 

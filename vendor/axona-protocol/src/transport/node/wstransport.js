@@ -26,6 +26,7 @@
 import { Transport }                from '../../contracts/Transport.js';
 import { isHexId }                  from '../../utils/hexid.js';
 import { TransportError, ErrorCodes } from '../../errors.js';
+import { depositDispatchCapability } from '../../registry/index.js';
 import {
   buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -106,6 +107,27 @@ export class WebSocketTransport extends Transport {
     this._reqHandlers = new Map();
     /** @type {Map<string, (fromId: string|null, payload: any) => void>} */
     this._ntfHandlers = new Map();
+
+    // REF-1.1 E3 (SEAL): this transport is sealed. Its request/notification dispatch
+    // primitives are NOT public methods — the class no longer defines onRequest or
+    // onNotification. The ONLY way to register a handler is registerFrame, which reads
+    // these this-bound closures out of the module-private capability channel, keyed by
+    // dispatch KIND (request|notification), never by the public method name. Bodies are
+    // byte-identical to the former onRequest/onNotification methods.
+    depositDispatchCapability(this, {
+      request: (type, handler) => {
+        if (typeof handler !== 'function') {
+          throw new TypeError('onRequest: handler must be a function');
+        }
+        this._reqHandlers.set(type, handler);
+      },
+      notification: (type, handler) => {
+        if (typeof handler !== 'function') {
+          throw new TypeError('onNotification: handler must be a function');
+        }
+        this._ntfHandlers.set(type, handler);
+      },
+    });
 
     /** @type {Map<number, { nodeId: string, resolve: Function, reject: Function, timer: any }>} */
     this._pending = new Map();
@@ -368,19 +390,15 @@ export class WebSocketTransport extends Transport {
     }
   }
 
-  onRequest(type, handler) {
-    if (typeof handler !== 'function') {
-      throw new TypeError('onRequest: handler must be a function');
-    }
-    this._reqHandlers.set(type, handler);
-  }
-
-  onNotification(type, handler) {
-    if (typeof handler !== 'function') {
-      throw new TypeError('onNotification: handler must be a function');
-    }
-    this._ntfHandlers.set(type, handler);
-  }
+  // REF-1.1 E3 (SEAL): onRequest / onNotification are no longer public methods of
+  // this class. The dispatch closures were deposited into the capability channel in
+  // the constructor; registerFrame is the sole registrant. The registering primitive
+  // is therefore unreachable by name on a sealed instance — the class defines no such
+  // method. (The base Transport contract still declares inert "not implemented" stubs
+  // for the interface; those are sealed in E3b, tightening every access path to
+  // `undefined`. E3a proves the primitive — the capability that registers a handler —
+  // is off-door-unreachable, and the residual base stub registers nothing.)
+  // See src/registry/registerFrame.js and the E3 design note.
 
   // ─── Liveness & latency ───────────────────────────────────────────
 

@@ -23,6 +23,7 @@
 import { AxonaError, TransportError, ErrorCodes } from '../../errors.js';
 import { toHex, fromHex }                         from '../../utils/hexid.js';
 import { Transport }                              from '../../contracts/Transport.js';
+import { depositDispatchCapability }              from '../../registry/index.js';
 import {
   buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces,
 } from '../handshake-auth.js';
@@ -98,6 +99,26 @@ export class SimTransport extends Transport {
     this._reqHandlers = new Map();
     /** @type {Map<string, NotificationHandler>} */
     this._ntfHandlers = new Map();
+
+    // REF-1.1 E3 (SEAL): request/notification are not public methods — the dispatch
+    // closures live in the module-private capability channel, read only by
+    // registerFrame (+ the allowlisted shims). Bodies byte-identical to the former
+    // onRequest/onNotification methods.
+    depositDispatchCapability(this, {
+      request: (type, handler) => {
+        if (typeof type !== 'string' || typeof handler !== 'function') {
+          throw new TypeError('onRequest: (type: string, handler: function) required');
+        }
+        this._reqHandlers.set(type, handler);
+      },
+      notification: (type, handler) => {
+        if (typeof type !== 'string' || typeof handler !== 'function') {
+          throw new TypeError('onNotification: (type: string, handler: function) required');
+        }
+        this._ntfHandlers.set(type, handler);
+      },
+    });
+
     /** @type {Set<(peerId: string) => void>} */
     this._diedHandlers = new Set();
 
@@ -377,19 +398,11 @@ export class SimTransport extends Transport {
     }, fwd);
   }
 
-  onRequest(type, handler) {
-    if (typeof type !== 'string' || typeof handler !== 'function') {
-      throw new TypeError('onRequest: (type: string, handler: function) required');
-    }
-    this._reqHandlers.set(type, handler);
-  }
-
-  onNotification(type, handler) {
-    if (typeof type !== 'string' || typeof handler !== 'function') {
-      throw new TypeError('onNotification: (type: string, handler: function) required');
-    }
-    this._ntfHandlers.set(type, handler);
-  }
+  // REF-1.1 E3 (SEAL): onRequest / onNotification are no longer public methods —
+  // the dispatch closures were deposited into the capability channel in the
+  // constructor. registerFrame (+ the allowlisted shims) is the sole registrant;
+  // the base Transport contract declares no such method, so on a sealed SimTransport
+  // every access path resolves to undefined.
 
   // ─── Liveness ──────────────────────────────────────────────────────
 

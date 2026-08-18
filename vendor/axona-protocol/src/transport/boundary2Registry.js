@@ -137,7 +137,9 @@ function frameWiring(defs) {
   const out = new Map();
   for (const d of defs) {
     if (out.has(d.wire)) throw new Error(`boundary2Registry: duplicate wire ${d.wire}`);
-    out.set(d.wire, { type: d.type });
+    // transportKind (E2.0): every Boundary-2 frame is a transport onNotification;
+    // carried on the value for registerFrame + the coverage gate. Bare wire key.
+    out.set(d.wire, { type: d.type, wire: d.wire, transportKind: d.transportKind || 'notification' });
   }
   return out;
 }

@@ -38,6 +38,8 @@ import {
   defineRow, FrameKind, EvidenceLevel, Proves, CorrelationSubjectKind,
   Retry, NOT_APPLICABLE as NA, ConversationRole, PairSide, ShadowRegistry,
 } from '../registry/index.js';
+import { certifyBigint } from '../registry/snapshotMint.js';   // REF-1.1 E1: the B1 observation certifier lives WITH the B1 registry
+import { encode } from '../transport/wire.js';
 
 const V = { min: 4, max: 4 };                 // Kernel-4 wire version
 const LAR = CorrelationSubjectKind.LegacyAuthorityRef;
@@ -357,10 +359,14 @@ function frameWiring(defs) {
   }
   const out = new Map();
   for (const [wire, info] of byWire) {
+    // REF-1.1 E1: `transportKind` selects the raw dispatch primitive registerFrame
+    // uses (routed -> onRoutedMessage). Every Boundary-1 frame is routed (registered
+    // via the DHT adapter's onRoutedMessage in wireHandlers). Additive: the existing
+    // wrap site reads only .type/.variantBy.
     if (info.variants) {
-      out.set(wire, { type: info.type, variantBy: { path: 'sig', valueType: 'string', whenPresent: 'signed', whenAbsent: 'legacy' } });
+      out.set(wire, { type: info.type, transportKind: 'routed', variantBy: { path: 'sig', valueType: 'string', whenPresent: 'signed', whenAbsent: 'legacy' } });
     } else {
-      out.set(wire, { type: info.type });
+      out.set(wire, { type: info.type, transportKind: 'routed' });
     }
   }
   return out;
@@ -375,6 +381,11 @@ export function buildBoundary1Registry({ sink = () => {}, enabled, now, sampleEv
   const reg = new ShadowRegistry({ boundary: 'pubsub+dht', sink, enabled, now, sampleEvery });
   for (const d of defs) reg.register(defineRow(d));
   reg.wiring = frameWiring(defs);
+  // REF-1.1 E1 (Aster F1): the OBSERVATION CERTIFIER belongs to the boundary, not
+  // to a caller. B1's is the bigint-faithful re-encode certifier (M1c). registerFrame
+  // reads reg.mintLive; there is no public caller-supplied certifier path. It is
+  // still inert unless the runtime shadow flag is armed (default off).
+  reg.mintLive = (x) => certifyBigint(encode(x));
   return reg;
 }
 

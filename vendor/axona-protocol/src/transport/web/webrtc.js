@@ -43,6 +43,7 @@ import {
   TransportError,
   ErrorCodes,
 }                       from '../../errors.js';
+import { depositDispatchCapability } from '../../registry/index.js';
 
 /** Reject `send()` if the remote hasn't responded within this. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000;
@@ -88,6 +89,20 @@ export class WebRTCTransport extends Transport {
     this._reqHandlers = new Map();
     /** @type {Map<string, (fromId: bigint|string|null, payload: any) => void>} */
     this._ntfHandlers = new Map();
+
+    // REF-1.1 E3b.2b (SEAL): deposit the raw dispatch primitives into the
+    // module-private capability channel (read solely by registerFrame), keyed
+    // by dispatch KIND. Bodies are byte-identical to the former public methods.
+    depositDispatchCapability(this, {
+      request: (type, handler) => {
+        if (typeof handler !== 'function') throw new TypeError('onRequest: handler must be a function');
+        this._reqHandlers.set(type, handler);
+      },
+      notification: (type, handler) => {
+        if (typeof handler !== 'function') throw new TypeError('onNotification: handler must be a function');
+        this._ntfHandlers.set(type, handler);
+      },
+    });
 
     /**
      * Outstanding requests awaiting response.  Keyed by correlation id.
@@ -397,19 +412,9 @@ export class WebRTCTransport extends Transport {
     }
   }
 
-  onRequest(type, handler) {
-    if (typeof handler !== 'function') {
-      throw new TypeError('onRequest: handler must be a function');
-    }
-    this._reqHandlers.set(type, handler);
-  }
-
-  onNotification(type, handler) {
-    if (typeof handler !== 'function') {
-      throw new TypeError('onNotification: handler must be a function');
-    }
-    this._ntfHandlers.set(type, handler);
-  }
+  // REF-1.1 E3b.2b (SEAL): onRequest/onNotification are no longer public
+  // instance methods. The raw dispatch primitives live only in the capability
+  // channel (deposited in the constructor); registerFrame is the one door.
 
   // ─── Liveness & latency ──────────────────────────────────────────────
 

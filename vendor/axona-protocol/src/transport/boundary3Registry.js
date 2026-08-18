@@ -179,6 +179,26 @@ function rowDefs() {
       note: 'trickled ICE candidate. Applied via addIceCandidate once the PC has a remote description, else buffered on the peer entry (pendingCandidates, flushed after the answer). An ICE arriving BEFORE the peer entry exists is DROPPED (mesh.js ice-for-unknown): arrival order changes the outcome and there is no dedup key, so Retry.NONE. `candidate` is an RTCIceCandidateInit object.',
     }),
 
+    // ── DHT-routed mesh-signal carrier (REF-1.1 E2.0) ──
+    // The E0 migration-target onRoutedMessage('mesh:signal') at AxonaPeer.js:729.
+    // DISTINCT from the direct WebRTC `signal` SDP rows above (wire 'signal'): this is
+    // the ROUTED envelope that relays a signalling payload {from, signal} to a targetId
+    // terminus, not the SDP frame itself. Aster ASTER-E2-KEY-SCOPE: add a distinct row
+    // keyed { wire: 'mesh:signal', transportKind: 'routed' }; do not reuse `signal`.
+    ({
+      type: 'mesh:signal-routed', wire: 'mesh:signal', transportKind: 'routed', kind: FrameKind.ONE_WAY,
+      owningService: 'MeshSignalling', versionRange: V,
+      outcome: 'SignalOutcome', terminalOutcome: 'SIGNAL_RELAYED',
+      retry: Retry.NONE,
+      topicProfile: NA, eventIdScheme: NA, replayCursorType: NA, orderingModel: NA,
+      authGuard: NA,   // unauthenticated carrier; the relayed inner signal is bound by mesh:hello-sig downstream
+      admissionGuard: NA, placementGuard: NA,
+      projection: { payload: ['from', 'signal'], meta: ['targetId'] },
+      schema: { require: ['from', 'signal'], types: { from: 'string' } },
+      errorContract: [], traceFields: [], budget: budget(3, 16384),
+      note: 'DHT-routed mesh-signal carrier: onRoutedMessage(mesh:signal) at AxonaPeer.js:729. If meta.targetId === node.id, deliver payload.signal to the local transport via deliverMeshSignal(payload.from, payload.signal); otherwise forward. The E0 migration-target for mesh:signal — DISTINCT from the direct WebRTC signal SDP rows (wire "signal").',
+    }),
+
     // ── mesh base auth: hello (nonce leg) ──
     ({
       type: 'mesh:hello', wire: 'hello', kind: FrameKind.ONE_WAY,
@@ -232,17 +252,22 @@ function frameWiring(defs) {
   const byWire = new Map();
   for (const d of defs) {
     const cur = byWire.get(d.wire);
-    if (!cur) byWire.set(d.wire, { type: d.type, variants: d.variant != null });
+    // transportKind (E2.0): carried on the value so registerFrame can select the
+    // primitive and the coverage gate can read each row's (wire, transportKind).
+    // The existing B3 frames are all onNotification; mesh:signal is 'routed'. Bare
+    // wire keys (composite keying is scoped to Boundary-6 alone).
+    if (!cur) byWire.set(d.wire, { type: d.type, variants: d.variant != null, transportKind: d.transportKind || 'notification' });
     else cur.variants = true;
   }
   const out = new Map();
   for (const [wire, info] of byWire) {
+    const base = { type: info.type, transportKind: info.transportKind };
     if (info.variants) {
       // signal: the observe site passes the frame.payload as the observed body,
       // so `kind` is a top-level leaf; value-gated to the three SDP/ICE variants.
-      out.set(wire, { type: info.type, variantBy: { path: 'kind', valueType: 'string', cases: { 'sdp-offer': 'offer', 'sdp-answer': 'answer', 'ice': 'candidate' } } });
+      out.set(wire, { ...base, variantBy: { path: 'kind', valueType: 'string', cases: { 'sdp-offer': 'offer', 'sdp-answer': 'answer', 'ice': 'candidate' } } });
     } else {
-      out.set(wire, { type: info.type });
+      out.set(wire, base);
     }
   }
   return out;

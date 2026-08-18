@@ -201,28 +201,35 @@ export class AxonaManager {
     // a SEPARATE gate that also needs the signed exp from the envelope flag day.
     this._tombAuthority = tombstoneAuth ? makeTombstoneAuthority() : null;
 
-    // REF-1.1 S2: Boundary-1 frame-contract registry (DEFAULT-OFF). When set, the
-    // 19 routed handlers registered below are shadow-wrapped to OBSERVE a
-    // decoder-certified snapshot beside each handler — no acceptance behavior
-    // changes, and with the runtime shadow flag off the handler runs verbatim
-    // (byte-identical). Traces land in a bounded ring for inspection. Must be
-    // constructed BEFORE _registerHandlers() so the wrap map is available.
+    // REF-1.1 E2.1: the Boundary-1 registry is now the SOLE registration door for
+    // the 19 routed handlers — _registerHandlers() calls registerFrame() at each
+    // site (no raw this.dht.onRoutedMessage). The DISPATCH registry `_frameDoor` is
+    // therefore built UNCONDITIONALLY: the door needs its wiring map, its wrap, and
+    // its registry-owned mintLive certifier. OBSERVATION is still gated by the
+    // runtime shadow flag (shadowEnabled, DEFAULT-OFF): flag-off the wrap runs each
+    // handler verbatim, so the migrated path is byte-identical to the pre-E2.1 raw
+    // registration. Its sink feeds _ingestFrameTrace, a guarded no-op unless the M1
+    // canary is armed. Must be constructed BEFORE _registerHandlers().
+    this._frameDoor = buildBoundary1Registry({
+      enabled: shadowEnabled,
+      sink: (rec) => this._ingestFrameTrace(rec),
+    });
+    // REF-1.1 S2/M1 CANARY INSTRUMENTATION — unchanged, still gated by the per-
+    // manager `frameRegistry` flag (DEFAULT-OFF). `_frameRegistry` is the canary
+    // HANDLE the inspectors (frameRegistryShadow/Summary) read: the SAME registry
+    // object as the door when armed, null when not — so built===false / rows===0
+    // flag-off exactly as the accepted S2/S3/M1 smokes assert. The dispatch door is
+    // a separate always-present concern the canary surface does not report. The
+    // trace ring + MONOTONIC lifetime counters exist only when armed (a fault that
+    // scrolls out of the 1024-entry ring is still counted; `dropped` = evictions);
+    // _ingestFrameTrace guards on their absence, so a stray observation while
+    // unarmed is a safe no-op.
     this._frameTraces = frameRegistry ? [] : null;
-    // REF-1.1 M1a recut (council F1): MONOTONIC lifetime counters, updated at
-    // ingestion BEFORE the bounded ring may evict a trace — so a fault that
-    // scrolls out of the 1024-entry ring is still counted. The canary invariant
-    // reads THESE, not the ring suffix; the ring stays only for the recent sample.
-    // `dropped` counts ring evictions. Null unless the registry is armed.
     this._frameLifetime = frameRegistry
       ? { total: 0, faults: 0, unobserved: 0, dropped: 0,
           faultKinds: Object.create(null), verdicts: Object.create(null), byType: Object.create(null) }
       : null;
-    this._frameRegistry = frameRegistry
-      ? buildBoundary1Registry({
-          enabled: shadowEnabled,
-          sink: (rec) => this._ingestFrameTrace(rec),
-        })
-      : null;
+    this._frameRegistry = frameRegistry ? this._frameDoor : null;
 
     this.renewMs     = renewMs;          // adaptive ceiling
     this.renewFastMs = renewFastMs;      // adaptive floor

@@ -23,58 +23,44 @@ import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
-import { shadowEnabled } from '../registry/index.js';
-import { encode } from '../transport/wire.js';
-import { certifyBigint } from '../registry/snapshotMint.js';
+import { shadowEnabled, registerFrame } from '../registry/index.js';
 
 export const wireHandlersMethods = {
   _registerHandlers() {
-    // REF-1.1 S2: when the Boundary-1 frame registry is built (frameRegistry:true),
-    // each routed handler is shadow-wrapped to OBSERVE a certified snapshot beside
-    // it. `base` is an arrow capturing the manager `this`, so the handler always
-    // receives the manager as `this` and the same (p, m); the wrap runs it verbatim
-    // when the runtime shadow flag is off, so flag-off (and registry-off) is
-    // byte-identical. reg is null unless the construction flag is set.
-    const reg = this._frameRegistry;
-    // REF-1.1 M1c (Decision 1): the LIVE-path certifier. On the routed dispatch
-    // path the handler args are freshly DECODED plain objects, never
-    // decoder-certified — so without this the wrap sees 100% unbranded-source and
-    // exercises no contract (the M1 canary finding). mintLive re-encodes an arg
-    // through the CANONICAL wire codec (bigint-faithful — a plain JSON.stringify
-    // would drop the pubsub BigInt ids Vega flagged) and certifies the TEXT. The
-    // mint still accepts only text; the wrap calls this ONLY on a freshly-decoded
-    // plain arg and GUARDS the call (a throw → no snapshot → unbranded no-op). Same
-    // discipline as B2-B4's certifyPlain(JSON.stringify(body)), with the type-faithful
-    // encoder for the pubsub boundary.
-    const mintLive = (x) => certifyBigint(encode(x));
-    const on = (type, fn) => {
-      const base = (p, m) => fn.call(this, p, m);
-      let h = base;
-      if (reg) {
-        const w = reg.wiring.get(type);
-        if (w) h = reg.wrap(w.type, base, { mintLive, ...(w.variantBy ? { variantBy: w.variantBy } : {}) });
-      }
-      this.dht.onRoutedMessage(type, h);
-    };
-    on(T.SUB,      this._onSub);
-    on(T.UNSUB,    this._onUnsub);
-    on(T.PUB,      this._onPub);
-    on(T.DELIVER,  this._onDeliver);
-    on(T.ADOPT,    this._onAdopt);
-    on(T.PULLUP,   this._onPullUp);
-    on(T.HANDOFFACK, this._onHandoffAck);
-    on(T.REPLAYUP, this._onReplayUp);
-    on(T.HANDOFF,  this._onHandoff);
-    on(T.REPLICATE, this._onReplicate);
-    on(T.KILL,     this._onKill);
-    on(T.INGESTACK, this._onIngestAck);
-    on(T.RECEIPTPROBE, this._onReceiptProbe);
-    on(T.RECEIPTNACK, this._onReceiptNack);
-    on(T.TOUCH,    this._onTouch);   // no-op (peer.touch deprecated v4.3.0); kept for wire compat
-    on(T.PULL,     this._onPull);
-    on(T.PULLRESP, this._onPullResp);
-    on(T.ROOTBEACON, this._onRootBeacon);
-    on(T.METRICSON, this._onMetricsOn);
+    // REF-1.1 E2.1: the 19 routed pub/sub handlers register through the ONE
+    // canonical door — registerFrame — not the raw this.dht.onRoutedMessage
+    // primitive. `_frameDoor` is the always-built Boundary-1 registry (wiring +
+    // shadow wrap + registry-owned mintLive certifier, built in the AxonaManager
+    // ctor). Its wrap runs each handler verbatim unless the runtime shadow flag is
+    // on (DEFAULT-OFF), so this path is byte-identical to the pre-E2.1 raw
+    // registration; the door refuses AT REGISTRATION any wire no Boundary-1 row
+    // declares (exit criterion 4). Each handler is bound to the manager `this` so it
+    // always receives the manager and the same (p, m). The wire literal is passed
+    // DIRECTLY at each site — the [V2] wire-literal gate forbids a variable wire, so
+    // there is no on(type, fn) indirection. The registry is written as the EXPLICIT
+    // canonical reference `this._frameDoor` at every site (not a `const reg` alias),
+    // so the shared migration-aware ownership grammar recognizes each as a B1 door
+    // (E2.1 council 389be28f / eb71240a). transportKind is OMITTED: every Boundary-1
+    // row is a single-primitive bare-keyed routed wire.
+    registerFrame(this.dht, T.SUB,          this._onSub.bind(this),          { registry: this._frameDoor });
+    registerFrame(this.dht, T.UNSUB,        this._onUnsub.bind(this),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.PUB,          this._onPub.bind(this),          { registry: this._frameDoor });
+    registerFrame(this.dht, T.DELIVER,      this._onDeliver.bind(this),      { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPT,        this._onAdopt.bind(this),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.PULLUP,       this._onPullUp.bind(this),       { registry: this._frameDoor });
+    registerFrame(this.dht, T.HANDOFFACK,   this._onHandoffAck.bind(this),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYUP,     this._onReplayUp.bind(this),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.HANDOFF,      this._onHandoff.bind(this),      { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLICATE,    this._onReplicate.bind(this),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.KILL,         this._onKill.bind(this),         { registry: this._frameDoor });
+    registerFrame(this.dht, T.INGESTACK,    this._onIngestAck.bind(this),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.RECEIPTPROBE, this._onReceiptProbe.bind(this), { registry: this._frameDoor });
+    registerFrame(this.dht, T.RECEIPTNACK,  this._onReceiptNack.bind(this),  { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOUCH,        this._onTouch.bind(this),        { registry: this._frameDoor });  // no-op (peer.touch deprecated v4.3.0); kept for wire compat
+    registerFrame(this.dht, T.PULL,         this._onPull.bind(this),         { registry: this._frameDoor });
+    registerFrame(this.dht, T.PULLRESP,     this._onPullResp.bind(this),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.ROOTBEACON,   this._onRootBeacon.bind(this),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.METRICSON,    this._onMetricsOn.bind(this),    { registry: this._frameDoor });
   },
 
   // REF-1.1 S2 inspector: the Boundary-1 registry's shadow state. `built` is
