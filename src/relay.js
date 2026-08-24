@@ -98,11 +98,27 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   // 4.67.1 attempt guard bounds it — proven in the live canary correlation
   // (axona-relay 85d6baa, council-closed unanimous 2026-08-24).
   //
-  // ARMED-CANARY PLUMBING (proposal: axona-docs Axona-Armed-Canary-Proposal-v0.1):
-  // env-driven, DEFAULT OFF, and INERT against a pre-4.65 vendored kernel — an
-  // unknown constructor option is discarded — so this ships ahead of any vendor
-  // change without risk. Constants per the proposal's table; arming any of these
-  // on a fleet or canary relay is David's explicit call, never a default.
+  // ARMED-CANARY PLUMBING (proposal: axona-docs Axona-Armed-Canary-Proposal-v0.1;
+  // hardened per Vega b8a1164d): env-driven, DEFAULT OFF, and VERSION-GATED.
+  // The earlier "inert against an old vendor" claim was FALSE for the one flag
+  // that historically mattered: a pre-4.65 kernel already understands
+  // synaptomeMaintain, so RELAY_SYNAPTOME_MAINTAIN=1 against the 4.62.2 vendor
+  // would run the June storm with no guard. So: ANY arming env against a
+  // vendored kernel below 4.67 REFUSES TO START — fail closed, loud, at launch.
+  // A canary misconfigured against an old vendor must never come up.
+  // Constants per the proposal's table; arming anything is David's explicit
+  // call, never a default.
+  const ARM_ENVS = ['RELAY_SYNAPTOME_MAINTAIN', 'RELAY_ADMISSION_GATE', 'RELAY_ATTEMPT_GUARD', 'RELAY_PRESENCE'];
+  const armedEnvs = ARM_ENVS.filter((e) => process.env[e] === '1');
+  if (armedEnvs.length > 0) {
+    const [maj, min] = String(KERNEL_VERSION).split('.').map(Number);
+    if (!(maj > 4 || (maj === 4 && min >= 67))) {
+      throw new Error(
+        `arming refused: ${armedEnvs.join(',')} set but vendored kernel is ${KERNEL_VERSION} (< 4.67 — ` +
+        `no attempt guard exists there; synaptomeMaintain alone is the 2026-06-29 storm). ` +
+        `Re-vendor 4.67+ (scripts/sync-protocol.sh) or unset the arming envs.`);
+    }
+  }
   const armMaintain = process.env.RELAY_SYNAPTOME_MAINTAIN === '1'
     ? { kNear: 5, intervalMs: 15000, maxPerTick: 3 } : null;
   const armGate = process.env.RELAY_ADMISSION_GATE === '1'
@@ -118,6 +134,40 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
     ...(armGate ? { admissionGate: armGate } : {}),
     ...(armGuard ? { attemptGuard: armGuard } : {}),
     ...(armPresence ? { presence: armPresence } : {}) });
+
+  // Armed-canary ledger (Vega b8a1164d, observation condition (1)): a soak's
+  // "quiet" must be tellable apart from "idle". When any arming env is set,
+  // log a once-per-minute ledger line: guard counters (refills/coalesced +
+  // active/expired candidate entries), presence watermark count, and the
+  // count of maintenance refill passes that actually ATTEMPTED something
+  // (the 'synaptome-refill' log event = a near-quota deficit REOPENED and was
+  // acted on). A 48h soak whose deficitReopens stays 0 has not exercised the
+  // guard and discharges nothing — the ledger is what makes that visible.
+  if (armedEnvs.length > 0) {
+    let deficitReopens = 0;
+    const prevEmit = peer._emitLog?.bind(peer);
+    if (prevEmit) {
+      peer._emitLog = (level, event, ctx) => {
+        if (event === 'synaptome-refill' && (ctx?.attempted ?? 0) > 0) deficitReopens++;
+        return prevEmit(level, event, ctx);
+      };
+    }
+    const ledger = setInterval(() => {
+      const g = peer._attemptGuard;
+      const states = g ? [...g._state.values()] : [];
+      onLog('info', 'armed-ledger', {
+        armed: armedEnvs.join(','),
+        guardRefills: g?.refills ?? 0,
+        guardCoalesced: g?.coalesced ?? 0,
+        guardActive: states.filter((s) => !s.expired).length,
+        guardExpired: states.filter((s) => s.expired).length,
+        presenceWatermarks: peer._presenceWatermarks?.size ?? 0,
+        deficitReopens,
+        synaptome: node.synaptome?.size ?? 0,
+      });
+    }, 60000);
+    if (typeof ledger.unref === 'function') ledger.unref();
+  }
 
   return { peer, transport, node, domain };
 }
