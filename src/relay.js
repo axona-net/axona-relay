@@ -60,6 +60,82 @@ export function regionDescriptor(token = 'eagle') {
  *   arming only; traces still emit only when the runtime gate AXONA_REGISTRY_SHADOW
  *   is also on (kernel shadowEnabled()). Both default-off ⇒ two-part arming.
  */
+// ── armed-canary arming (proposal: axona-docs Axona-Armed-Canary-Proposal;
+//    hardened per Vega b8a1164d + Aster f9b7bd31) ─────────────────────────
+// Three exported, PURE, unit-testable pieces (Aster condition 3: an automated
+// test must prove the env flags reach the peer):
+//   armingFromEnv(env)        env → the exact constructor options (the
+//                             proposal's constants table, verbatim)
+//   assertArmingSupported()   vendored-kernel floor: ANY arming env below
+//                             4.67 throws — a pre-4.65 kernel already
+//                             understands synaptomeMaintain, so that flag
+//                             alone against an old vendor is the 2026-06-29
+//                             storm with no guard (fail closed, at launch)
+//   assertArmedModules()      post-construction, PRE-JOIN proof that every
+//                             requested module actually LANDED on the peer
+//                             (a version string is a claim; the peer's own
+//                             state is the fact) — returns the effective
+//                             constants for the armed-modules log line
+export const ARM_ENVS = ['RELAY_SYNAPTOME_MAINTAIN', 'RELAY_ADMISSION_GATE', 'RELAY_ATTEMPT_GUARD', 'RELAY_PRESENCE'];
+
+export function armingFromEnv(env = process.env) {
+  const armedEnvs = ARM_ENVS.filter((e) => env[e] === '1');
+  return {
+    armedEnvs,
+    armMaintain: env.RELAY_SYNAPTOME_MAINTAIN === '1'
+      ? { kNear: 5, intervalMs: 15000, maxPerTick: 3 } : null,
+    armGate: env.RELAY_ADMISSION_GATE === '1'
+      ? { kNear: 5, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } : null,
+    armGuard: env.RELAY_ATTEMPT_GUARD === '1'
+      ? { maxAttempts: 4, baseMs: 30000, factor: 2, refillWindowMs: 60000,
+          deficitBaseMs: 30000, deficitFactor: 2 } : null,
+    armPresence: env.RELAY_PRESENCE === '1'
+      ? { announceOnStart: true, relayRateMs: 30000 } : null,
+  };
+}
+
+export function assertArmingSupported(kernelVersion, armedEnvs) {
+  if (!armedEnvs || armedEnvs.length === 0) return;
+  const [maj, min] = String(kernelVersion).split('.').map(Number);
+  if (!(maj > 4 || (maj === 4 && min >= 67))) {
+    throw new Error(
+      `arming refused: ${armedEnvs.join(',')} set but vendored kernel is ${kernelVersion} (< 4.67 — ` +
+      `no attempt guard exists there; synaptomeMaintain alone is the 2026-06-29 storm). ` +
+      `Re-vendor 4.67+ (scripts/sync-protocol.sh) or unset the arming envs.`);
+  }
+}
+
+export function assertArmedModules(peer, armedEnvs) {
+  const missing = [];
+  const effective = {};
+  if (armedEnvs.includes('RELAY_SYNAPTOME_MAINTAIN')) {
+    if (!peer._maintainCfg) missing.push('synaptomeMaintain');
+    else effective.synaptomeMaintain = { ...peer._maintainCfg };
+  }
+  if (armedEnvs.includes('RELAY_ADMISSION_GATE')) {
+    if (!peer._gateCfg) missing.push('admissionGate');
+    else effective.admissionGate = { ...peer._gateCfg };
+  }
+  if (armedEnvs.includes('RELAY_ATTEMPT_GUARD')) {
+    if (!peer._attemptGuard) missing.push('attemptGuard');
+    else effective.attemptGuard = {
+      maxAttempts: peer._attemptGuard.maxAttempts, baseMs: peer._attemptGuard.baseMs,
+      factor: peer._attemptGuard.factor, refillWindowMs: peer._attemptGuard.refillWindowMs,
+    };
+  }
+  if (armedEnvs.includes('RELAY_PRESENCE')) {
+    if (!peer._presenceCfg) missing.push('presence');
+    else effective.presence = { ...peer._presenceCfg };
+  }
+  if (missing.length > 0) {
+    throw new Error(
+      `arming refused: requested module(s) did not land on the peer: ${missing.join(', ')}. ` +
+      `The vendored kernel accepted the option name(s) without building the machinery — ` +
+      `do not join the network in this state.`);
+  }
+  return effective;
+}
+
 export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   frameRegistry = process.env.AXONA_FRAME_REGISTRY === '1' }) {
   const transport = webTransport({
@@ -108,32 +184,24 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   // A canary misconfigured against an old vendor must never come up.
   // Constants per the proposal's table; arming anything is David's explicit
   // call, never a default.
-  const ARM_ENVS = ['RELAY_SYNAPTOME_MAINTAIN', 'RELAY_ADMISSION_GATE', 'RELAY_ATTEMPT_GUARD', 'RELAY_PRESENCE'];
-  const armedEnvs = ARM_ENVS.filter((e) => process.env[e] === '1');
-  if (armedEnvs.length > 0) {
-    const [maj, min] = String(KERNEL_VERSION).split('.').map(Number);
-    if (!(maj > 4 || (maj === 4 && min >= 67))) {
-      throw new Error(
-        `arming refused: ${armedEnvs.join(',')} set but vendored kernel is ${KERNEL_VERSION} (< 4.67 — ` +
-        `no attempt guard exists there; synaptomeMaintain alone is the 2026-06-29 storm). ` +
-        `Re-vendor 4.67+ (scripts/sync-protocol.sh) or unset the arming envs.`);
-    }
-  }
-  const armMaintain = process.env.RELAY_SYNAPTOME_MAINTAIN === '1'
-    ? { kNear: 5, intervalMs: 15000, maxPerTick: 3 } : null;
-  const armGate = process.env.RELAY_ADMISSION_GATE === '1'
-    ? { kNear: 5, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } : null;
-  const armGuard = process.env.RELAY_ATTEMPT_GUARD === '1'
-    ? { maxAttempts: 4, baseMs: 30000, factor: 2, refillWindowMs: 60000,
-        deficitBaseMs: 30000, deficitFactor: 2 } : null;
-  const armPresence = process.env.RELAY_PRESENCE === '1'
-    ? { announceOnStart: true, relayRateMs: 30000 } : null;
+  const { armedEnvs, armMaintain, armGate, armGuard, armPresence } = armingFromEnv(process.env);
+  assertArmingSupported(KERNEL_VERSION, armedEnvs);
   const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport,
     ...(frameRegistry === true ? { frameRegistry: true } : {}),
     ...(armMaintain ? { synaptomeMaintain: armMaintain } : {}),
     ...(armGate ? { admissionGate: armGate } : {}),
     ...(armGuard ? { attemptGuard: armGuard } : {}),
     ...(armPresence ? { presence: armPresence } : {}) });
+
+  // JOIN-BLOCKING module assertion (Aster f9b7bd31 condition 2): prove every
+  // requested module LANDED on the peer — createRelay runs before any
+  // network join (startRelay owns transport.start), so a throw here is a
+  // canary that never comes up. On success, log the exact effective
+  // constants: the soak's record of what actually ran.
+  if (armedEnvs.length > 0) {
+    const effective = assertArmedModules(peer, armedEnvs);
+    onLog('info', 'armed-modules', { armed: armedEnvs.join(','), effective });
+  }
 
   // Armed-canary ledger (Vega b8a1164d, observation condition (1)): a soak's
   // "quiet" must be tellable apart from "idle". When any arming env is set,
