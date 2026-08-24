@@ -93,10 +93,31 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   // above keeps `identity:` (it's the same node key, used for the auth hello).
   // Synaptome maintenance: REVERTED to off (2026-06-29) — enabling it on the
   // backbone regressed Howard's suite (0/9/6 failures across 3 runs; connection-count
-  // storm + convergence wedge). Re-enable only behind a fix + Howard gate. Opt back in
-  // via env once fixed: synaptomeMaintain: process.env.RELAY_SYNAPTOME_MAINTAIN==='1' ? {...} : null
+  // storm + convergence wedge). The fix now exists: the 6522f2f storm was root-caused
+  // (never-binding candidates re-probed from churn-reopened deficits) and the kernel
+  // 4.67.1 attempt guard bounds it — proven in the live canary correlation
+  // (axona-relay 85d6baa, council-closed unanimous 2026-08-24).
+  //
+  // ARMED-CANARY PLUMBING (proposal: axona-docs Axona-Armed-Canary-Proposal-v0.1):
+  // env-driven, DEFAULT OFF, and INERT against a pre-4.65 vendored kernel — an
+  // unknown constructor option is discarded — so this ships ahead of any vendor
+  // change without risk. Constants per the proposal's table; arming any of these
+  // on a fleet or canary relay is David's explicit call, never a default.
+  const armMaintain = process.env.RELAY_SYNAPTOME_MAINTAIN === '1'
+    ? { kNear: 5, intervalMs: 15000, maxPerTick: 3 } : null;
+  const armGate = process.env.RELAY_ADMISSION_GATE === '1'
+    ? { kNear: 5, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } : null;
+  const armGuard = process.env.RELAY_ATTEMPT_GUARD === '1'
+    ? { maxAttempts: 4, baseMs: 30000, factor: 2, refillWindowMs: 60000,
+        deficitBaseMs: 30000, deficitFactor: 2 } : null;
+  const armPresence = process.env.RELAY_PRESENCE === '1'
+    ? { announceOnStart: true, relayRateMs: 30000 } : null;
   const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport,
-    ...(frameRegistry === true ? { frameRegistry: true } : {}) });
+    ...(frameRegistry === true ? { frameRegistry: true } : {}),
+    ...(armMaintain ? { synaptomeMaintain: armMaintain } : {}),
+    ...(armGate ? { admissionGate: armGate } : {}),
+    ...(armGuard ? { attemptGuard: armGuard } : {}),
+    ...(armPresence ? { presence: armPresence } : {}) });
 
   return { peer, transport, node, domain };
 }
