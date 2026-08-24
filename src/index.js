@@ -172,7 +172,12 @@ async function main() {
     if (level === 'debug' && !INTERESTING.test(event)) return;
     const tag = level === 'error' ? '{red-fg}ERR{/}'
               : level === 'warn'  ? '{yellow-fg}WRN{/}' : '';
-    const detail = ctx ? ' ' + JSON.stringify(ctx).slice(0, 120) : '';
+    // armed-* events (armed-modules, armed-ledger) are the canary soak's
+    // retained evidence: the runbook's thresholds are read from this JSONL,
+    // and a truncated line is a threshold not evidenced. Full JSON for those;
+    // the 120-char cap stays for everything else (chatty transport events).
+    const json = ctx ? JSON.stringify(ctx) : '';
+    const detail = ctx ? ' ' + (event.startsWith('armed-') ? json : json.slice(0, 120)) : '';
     present.logLine(`${tag ? tag + ' ' : ''}${event}${detail}`);
   };
 
