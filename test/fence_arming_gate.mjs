@@ -45,8 +45,9 @@ console.log('armed-canary arming fence\n');
   check('2 GATE: 4.62.2 + maintenance env THROWS (the June storm, refused at launch)', throws(() => assertArmingSupported('4.62.2', armed)));
   check('2 GATE: 4.63.0 refused too', throws(() => assertArmingSupported('4.63.0', armed)));
   check('2 GATE: 4.66.1 refused (guard did not exist yet)', throws(() => assertArmingSupported('4.66.1', ['RELAY_ATTEMPT_GUARD'])));
-  check('2 GATE: 4.67.0 passes', !throws(() => assertArmingSupported('4.67.0', armed)));
+  check('2 GATE: 4.67.0 refused — floor is the PIN (4.67.0 predates the _laneSeen restore)', throws(() => assertArmingSupported('4.67.0', armed)));
   check('2 GATE: 4.67.1 passes with all four', !throws(() => assertArmingSupported('4.67.1', ARM_ENVS.slice())));
+  check('2 GATE: 4.68.0 passes (later minor clears the floor)', !throws(() => assertArmingSupported('4.68.0', armed)));
   check('2 GATE: nothing armed = no gate, any version', !throws(() => assertArmingSupported('4.62.2', [])));
 }
 

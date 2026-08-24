@@ -96,12 +96,16 @@ export function armingFromEnv(env = process.env) {
 
 export function assertArmingSupported(kernelVersion, armedEnvs) {
   if (!armedEnvs || armedEnvs.length === 0) return;
-  const [maj, min] = String(kernelVersion).split('.').map(Number);
-  if (!(maj > 4 || (maj === 4 && min >= 67))) {
+  // Floor = the PIN, exactly (Vega 523839be): 4.67.0 predates the _laneSeen
+  // restore (5993f79 withdrawn, restored at 7fc3e56 = 4.67.1) — a gate one
+  // patch looser than the pin would let a mis-vendored canary start.
+  const [maj, min, pat] = String(kernelVersion).split('.').map((n) => Number(n) || 0);
+  if (!(maj > 4 || (maj === 4 && (min > 67 || (min === 67 && pat >= 1))))) {
     throw new Error(
-      `arming refused: ${armedEnvs.join(',')} set but vendored kernel is ${kernelVersion} (< 4.67 — ` +
-      `no attempt guard exists there; synaptomeMaintain alone is the 2026-06-29 storm). ` +
-      `Re-vendor 4.67+ (scripts/sync-protocol.sh) or unset the arming envs.`);
+      `arming refused: ${armedEnvs.join(',')} set but vendored kernel is ${kernelVersion} (< 4.67.1 — ` +
+      `below 4.67 no attempt guard exists (synaptomeMaintain alone is the 2026-06-29 storm); ` +
+      `4.67.0 predates the _laneSeen restore. ` +
+      `Re-vendor 4.67.1+ (scripts/sync-protocol.sh from 7fc3e56+) or unset the arming envs.`);
   }
 }
 
@@ -213,6 +217,12 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   // guard and discharges nothing — the ledger is what makes that visible.
   if (armedEnvs.length > 0) {
     let deficitReopens = 0;
+    // Running max of per-candidate attempts (Vega 523839be, ledger gap): the
+    // runbook's "any candidate > 4 aborts" row must be evidenced FROM THE
+    // LEDGER JSONL. Guard entries survive expiry until their refill window
+    // (= the ledger cadence), so the 60s sample holds the max; a guard
+    // defect that keeps counting is sustained and cannot hide between ticks.
+    let guardMaxAttempts = 0;
     const prevEmit = peer._emitLog?.bind(peer);
     if (prevEmit) {
       peer._emitLog = (level, event, ctx) => {
@@ -223,12 +233,14 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
     const ledger = setInterval(() => {
       const g = peer._attemptGuard;
       const states = g ? [...g._state.values()] : [];
+      for (const s of states) if (s.attempts > guardMaxAttempts) guardMaxAttempts = s.attempts;
       onLog('info', 'armed-ledger', {
         armed: armedEnvs.join(','),
         guardRefills: g?.refills ?? 0,
         guardCoalesced: g?.coalesced ?? 0,
         guardActive: states.filter((s) => !s.expired).length,
         guardExpired: states.filter((s) => s.expired).length,
+        guardMaxAttempts,
         presenceWatermarks: peer._presenceWatermarks?.size ?? 0,
         deficitReopens,
         synaptome: node.synaptome?.size ?? 0,
