@@ -121,6 +121,33 @@ try { await peer.integrate?.(); } catch (e) { console.log('integrate() threw:', 
 console.log(`connected: synaptome=${node.synaptome.size} in=${node.incomingSynapses?.size ?? 0} ready=${JSON.stringify(ready ?? {}).slice(0, 120)}`);
 rec({ t: now(), ev: 'connected', guard: GUARD, kernel: KERNEL_VERSION, syn: node.synaptome.size });
 
+// ── phase 2: canary-side induced churn (CHURN_MS > 0) ──
+// Reopen the near-quota deficit against the LIVE mesh: every CHURN_MS, close
+// the canary's CHURN_K nearest bound connections. The far ends are fleet
+// relays — for THEM this is one leaf peer disconnecting, ordinary churn; no
+// relay's behavior or state is modified. For the CANARY it recreates the
+// fleet-wide storm precondition phase 1 showed is required: a deficit that
+// keeps reopening, filled from live candidates ~half of which never bind.
+const CHURN_MS = +(process.env.CHURN_MS || 0);
+const CHURN_K  = +(process.env.CHURN_K || 3);
+let churnRounds = 0, churnDrops = 0;
+let churner = null;
+if (CHURN_MS > 0) {
+  const selfBig = node.id;
+  churner = setInterval(() => {
+    const ids = [...node.synaptome.keys()].filter((k) => typeof k === 'bigint');
+    ids.sort((a, b) => { const da = selfBig ^ a, db = selfBig ^ b; return da < db ? -1 : da > db ? 1 : 0; });
+    const drop = ids.slice(0, CHURN_K);
+    for (const id of drop) {
+      node.synaptome.delete(id);
+      try { const p = transport.closeConnection(id); p?.catch?.(() => {}); } catch { /* */ }
+      churnDrops++;
+    }
+    churnRounds++;
+  }, CHURN_MS);
+  console.log(`induced churn: dropping ${CHURN_K} nearest every ${CHURN_MS}ms (canary-side only)`);
+}
+
 // ── sampling loop ──
 const summary = () => {
   const rows = [...cand.values()];
@@ -134,6 +161,7 @@ const summary = () => {
     attemptsTotal, boundEvents, diedEvents,
     maxAttemptsAnyCand: maxAtt, maxAttemptsNeverBinder: maxNonBindAtt,
     neverBindersOverBudget: overBudget,
+    ...(CHURN_MS > 0 ? { churnRounds, churnDrops } : {}),
     ...(GUARD ? { guardRefills: peer._attemptGuard?.refills ?? 0, guardCoalesced: peer._attemptGuard?.coalesced ?? 0 } : {}),
   };
 };
@@ -146,6 +174,7 @@ const sampler = setInterval(() => {
 // ── run, then report and leave cleanly ──
 await new Promise((r) => setTimeout(r, RUN_SEC * 1000));
 clearInterval(sampler);
+if (churner) clearInterval(churner);
 const fin = summary();
 // per-candidate attempt distribution (never-binders), bucketed
 const nb = [...cand.values()].filter((c) => !c.bound).map((c) => c.attempts).sort((a, b) => a - b);
