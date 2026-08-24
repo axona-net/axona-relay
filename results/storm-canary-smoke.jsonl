@@ -1,0 +1,6 @@
+{"t":1787579231401,"ev":"connected","guard":false,"kernel":"4.67.1","syn":9}
+{"t":1787579251401,"ev":"sample","syn":23,"inSyn":0,"candidates":14,"neverBinders":5,"attemptsTotal":32,"boundEvents":23,"diedEvents":1,"maxAttemptsAnyCand":7,"maxAttemptsNeverBinder":1,"neverBindersOverBudget":0}
+{"t":1787579271401,"ev":"sample","syn":23,"inSyn":0,"candidates":14,"neverBinders":5,"attemptsTotal":32,"boundEvents":23,"diedEvents":1,"maxAttemptsAnyCand":7,"maxAttemptsNeverBinder":1,"neverBindersOverBudget":0}
+{"t":1787579291402,"ev":"sample","syn":23,"inSyn":0,"candidates":14,"neverBinders":5,"attemptsTotal":32,"boundEvents":23,"diedEvents":1,"maxAttemptsAnyCand":7,"maxAttemptsNeverBinder":1,"neverBindersOverBudget":0}
+{"t":1787579311402,"ev":"sample","syn":23,"inSyn":0,"candidates":14,"neverBinders":5,"attemptsTotal":32,"boundEvents":23,"diedEvents":1,"maxAttemptsAnyCand":7,"maxAttemptsNeverBinder":1,"neverBindersOverBudget":0}
+{"t":1787579321402,"ev":"final","guard":false,"syn":23,"inSyn":0,"candidates":14,"neverBinders":5,"attemptsTotal":32,"boundEvents":23,"diedEvents":1,"maxAttemptsAnyCand":7,"maxAttemptsNeverBinder":1,"neverBindersOverBudget":0,"neverBinderAttemptBuckets":{"1":5,"2-4":0,"5-9":0,"10-19":0,"20+":0},"runSec":90,"maintMs":5000}
