@@ -1,0 +1,23 @@
+armed-canary arming fence
+
+  ✓ 1 default: all four off, nothing armed
+  ✓ 1 all four envs recognized
+  ✓ 1 maintenance = the historical configuration, unchanged
+  ✓ 1 gate = council integers + reserve-from-cap lane
+  ✓ 1 guard = live-validated cap + production backoff/pacing
+  ✓ 1 presence = announce-on-start + 30s relay rate
+  ✓ 1 flags are independent
+  ✓ 2 GATE: 4.62.2 + maintenance env THROWS (the June storm, refused at launch)
+  ✓ 2 GATE: 4.63.0 refused too
+  ✓ 2 GATE: 4.66.1 refused (guard did not exist yet)
+  ✓ 2 GATE: 4.67.0 refused — floor is the PIN (4.67.0 predates the _laneSeen restore)
+  ✓ 2 GATE: 4.67.1 passes with all four
+  ✓ 2 GATE: 4.68.0 passes (later minor clears the floor)
+  ✓ 2 GATE: nothing armed = no gate, any version
+  ✓ 3 LANDED: all four modules present → effective constants returned
+  ✓ 3 MISSING: the exact 4.62.2 silent-discard shape (maintenance only) THROWS before join
+  ✓ 3 MISSING: guard alone requested, guard absent → refused
+  ✓ 3 SCOPED: unrequested modules are not required
+  ✓ 3 OFF: nothing armed asserts nothing
+
+Result: 19 passed, 0 failed
