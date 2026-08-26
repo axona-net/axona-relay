@@ -260,10 +260,14 @@ export const rootElectionMethods = {
             }
             this._rootHint.set(topicBig, { via: hex, at: this._now() });
             // Heal (subscribe): subscribed, not yet pinned (no deliver `from`
-            // adopted us), and the true root is someone else → re-home toward it.
+            // adopted us), and the true root is someone else → re-emit GREEDY now
+            // that the lookup has completed and the mesh is warmer. v4.64.0: we do
+            // NOT via-pin the discovered root — the synaptome routes to the
+            // current-best terminal itself, and a stale pin would fight the
+            // neuromorphic restructuring on the very next renewal.
             if (hex && this.mySubscriptions.has(topicBig) &&
                 !(this._upstream.get(topicBig) || []).length) {
-              this._emitSubscribe(topicBig, [hex]);
+              this._emitSubscribe(topicBig, []);
             }
             // Heal (publish/kill): a stranded publish/kill is RE-SENT toward the
             // true root by the persistent retry loop in refreshTick (until the

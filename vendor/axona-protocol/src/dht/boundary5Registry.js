@@ -74,6 +74,9 @@ function rowDefs() {
       'cache a freshly-observed hop for later reuse; shares its handler with lateral_spread.'),
     routing('dht:lateral_spread',   'lateral_spread',   'notification', 'SynaptomeLearning',
       'lateral propagation of a hop observation; same handler as hop_cache.'),
+    // ── presence — the ELEVENTH frame, kernel 4.66.0 (not part of the E0 ten) ──
+    routing('dht:presence',         'presence',         'notification', 'SynaptomeLearning',
+      'self-signed liveness/generation record (Connection-Quality v0.7 "The reset record"): the origin\'s own key attests it is back; receivers verify pubkey→nodeId binding + signature and enforce a per-identity monotonic gen watermark, resetting candidate attempt state and band deficit backoff (slice-3 machinery). NOT a nomination — never inserts a table entry. Relay depth one, sibling `hop` field outside the signed transcript.'),
     // ── peer lifecycle (onNotification) ──
     routing('dht:peer-leaving',     'peer-leaving',     'notification', 'PeerLifecycle',
       'a peer announces departure; we delete its synapse and drop it from the table.'),

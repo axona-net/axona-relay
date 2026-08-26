@@ -41,6 +41,8 @@ import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
 import { Subscription }   from './Subscription.js';
 import { clz264, toHex, fromHex, isHexId, extractS2Prefix, asId, BAD_ID_CODE } from '../utils/hexid.js';
+import { buildPresenceRecord, verifyPresenceRecord } from './presence.js';
+import { AttemptGuard, DeficitBackoff, identitySuffix } from './attemptGuard.js';
 import { resolveTopic, deriveTopicId, deriveTopicIdBig } from '../pubsub/post.js';
 
 /**
@@ -127,7 +129,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -181,6 +183,98 @@ export class AxonaPeer extends DHT {
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
+    // Hold-or-improve admission gate (Connection-Quality definition v0.6,
+    // axona-docs 0e4d75a; council-closed 2026-08-24). Governs the binding-
+    // transport admission path (_seedSynaptomeWithSponsor): below the synaptome
+    // cap every distinct live peer is admitted (hold-all); at the cap a
+    // candidate is admitted only by id-derivable structural improvement, paired
+    // with the eviction of the weakest evictable edge in the densest band, and
+    // a refused candidate's channel is closed (a channel outside the budget
+    // defeats the budget). OPT-IN (default off) — when omitted the peer behaves
+    // exactly as before, including the historical over-cap direct insert.
+    // `{ kNear, sparseFloor }` overrides; constants are matrix parameters.
+    this._gateCfg = (admissionGate && typeof admissionGate === 'object')
+      ? { kNear: admissionGate.kNear ?? 5, sparseFloor: admissionGate.sparseFloor ?? 2,
+          // Join lane (slice 3; v0.6 finding 2, reserve-from-cap per finding 4):
+          // kJoin > 0 reserves the table's LAST kJoin slots for qualified
+          // newcomers — hold-all stops at cap − kJoin, the lane fills the rest,
+          // nothing ever exceeds cap. kJoin 0 (the default) = slice-1 behavior
+          // exactly. Qualification: first-seen per window + a per-lane cooldown
+          // (the sponsor-attested path is defined in the spec and arrives with
+          // an attestation object; not implemented here).
+          kJoin: admissionGate.kJoin ?? 0,
+          laneCooldownMs: admissionGate.laneCooldownMs ?? 1000,
+          laneWindowMs: admissionGate.laneWindowMs ?? 60000,
+          // Deferred refusal-close (v4.68.0, opt-in; default 0 = immediate
+          // close, byte-identical to v4.67.1). closeGraceMs > 0 defers the
+          // gate's refusal-time channel close by that window; at fire time
+          // the close is SKIPPED if the peer was admitted meanwhile (the
+          // rescue — bilateral by construction when both ends run the
+          // policy; against an older peer the far end still closes
+          // immediately, degrading safely to current behavior). Grounded in
+          // the four-arm/grace evidence: immediate closes during the
+          // admission window starve later admissible edges (dht-sim
+          // v0.112.2–5, council record). graceMaxPending bounds the
+          // per-peer pending-close MAP under adversarial churn — overflow
+          // closes OLDEST immediately. The PHYSICAL channel bound is
+          // separate and enforced at defer time (v4.68.1, Aster review
+          // 1c11a94e finding 1): a deferred close keeps a channel open, so
+          // deferral capacity derives from live headroom against
+          // node.maxConnections — no headroom, no deferral. Simultaneous-
+          // expiry races are safe because closeConnection is idempotent.
+          closeGraceMs: admissionGate.closeGraceMs ?? 0,
+          graceMaxPending: admissionGate.graceMaxPending ?? 64 }
+      : (admissionGate === true)
+        ? { kNear: 5, sparseFloor: 2, kJoin: 0, laneCooldownMs: 1000, laneWindowMs: 60000,
+            closeGraceMs: 0, graceMaxPending: 64 }
+        : null;
+    // v4.68.1 (Aster review 1c11a94e finding 3): normalize grace config
+    // BEFORE use — the dormant path must be correct, not merely unarmed.
+    // closeGraceMs: finite and > 0 or the feature is OFF; fractional floors.
+    // graceMaxPending: positive integer or 0; anything else (negative,
+    // fractional, non-finite, non-numeric) fails safe to 0. Zero deferral
+    // capacity means grace OFF (immediate close, 4.67.1 behavior) — the
+    // overflow loop is never entered with an empty map.
+    if (this._gateCfg) {
+      const g = this._gateCfg;
+      g.closeGraceMs = (Number.isFinite(g.closeGraceMs) && g.closeGraceMs > 0)
+        ? Math.floor(g.closeGraceMs) : 0;
+      g.graceMaxPending = (Number.isInteger(g.graceMaxPending) && g.graceMaxPending > 0)
+        ? g.graceMaxPending : 0;
+      if (g.graceMaxPending === 0) g.closeGraceMs = 0;
+    }
+    this._laneSeen = new Map();     // identity suffix -> ts of its one lane admission this window
+    this._laneLastAt = 0;           // last lane admission (cooldown)
+    this._gracePending = new Map(); // sponsor(BigInt) -> timeout handle (deferred refusal-closes; bounded by graceMaxPending)
+    // Candidate attempt guard + deficit backoff (slice 3; v0.7 "Attempt guard,
+    // candidate reset, deficit backoff"). OPT-IN, default off — when omitted,
+    // candidate probing behaves exactly as before (including the storm the
+    // guard exists to kill; arming is a deployment decision). When armed, the
+    // dht:presence hook (slice 2) is the guard's refill valve, paced to one
+    // refill per identity per window, and any verified record resets the
+    // deficit backoff.
+    this._attemptGuard = attemptGuard
+      ? new AttemptGuard(typeof attemptGuard === 'object' ? attemptGuard : {})
+      : null;
+    this._deficitBackoff = attemptGuard
+      ? new DeficitBackoff(typeof attemptGuard === 'object' ? attemptGuard : {})
+      : null;
+    // dht:presence (Connection-Quality v0.7 "The reset record"; slice 2).
+    // RECEIVER side is always live and inert: verify + per-identity watermark
+    // + hooks for the slice-3 attempt-guard/deficit machinery. It emits
+    // nothing. SENDER + RELAY behavior is OPT-IN (default off): announce on
+    // start and relay received origin-sent records one hop, rate-limited per
+    // origin identity. All presence state keys on the 256-bit identity
+    // suffix, never the full nodeId string. `gen` is never persisted.
+    this._presenceCfg = (presence && typeof presence === 'object')
+      ? { announceOnStart: presence.announceOnStart !== false, relayRateMs: presence.relayRateMs ?? 5000 }
+      : (presence === true)
+        ? { announceOnStart: true, relayRateMs: 5000 }
+        : null;
+    this._presenceGen = 0;
+    this._presenceWatermarks = new Map();   // identity suffix (64-hex) -> highest gen seen
+    this._presenceRelayAt = new Map();      // identity suffix -> last relay ts (armed only)
+    this._presenceHooks = new Set();
     // O-5: a publish must be RECEIVABLE by any peer on any browser across any
     // path → default the per-publish limit to the WebRTC-interop floor (16 KiB),
     // never above the absolute ingress cap. Override only for controlled,
@@ -455,6 +549,24 @@ export class AxonaPeer extends DHT {
 
     this._started = true;
 
+    // Presence announce-on-start (opt-in; v0.7 "gen increments at transport
+    // start"). Fire-and-forget: neighbours bound later hear on the next
+    // announce (recovery, restart).
+    if (this._presenceCfg?.announceOnStart) {
+      this.announcePresence().catch(() => { /* best-effort */ });
+    }
+
+    // Slice 3: wire the presence valve into the guard. The hook fires only
+    // on a FRESH gen (watermark enforced upstream in the handler); the guard
+    // paces refills to one per identity per window, and a verified record is
+    // fresh routing evidence — reset the deficit backoff too.
+    if (this._attemptGuard) {
+      this.onPresence((res) => {
+        this._attemptGuard.onFreshRecord(res.identityHex);
+        this._deficitBackoff?.reset();
+      });
+    }
+
     // Synaptome-maintenance tick (opt-in): a deterministic cadence to refill the
     // near-quota, independent of routing traffic (anneal only fires on activity,
     // so an idle node would never refresh). No-op when the flag is off.
@@ -582,6 +694,37 @@ export class AxonaPeer extends DHT {
     };
     registerFrame(transport, 'hop_cache',      hopCacheHandler, { registry: this._b5door });
     registerFrame(transport, 'lateral_spread', hopCacheHandler, { registry: this._b5door });
+
+    // ── presence — self-signed candidate-reset record (v0.7, slice 2) ──
+    // Receiver side always live: verify (binding + signature), enforce the
+    // per-identity monotonic watermark keyed by the 256-bit suffix, fire
+    // hooks (slice-3 guard/deficit machinery consumes them). NOT a
+    // nomination — nothing here touches the synaptome. Relay is armed-only:
+    // at most one hop — only origin-sent records (hop 0) forward, marked
+    // hop 1, rate-limited per origin identity. `hop` is a SIBLING field
+    // outside the signed transcript (the hello's pow-field pattern), so a
+    // relay forwards the signed record unchanged.
+    registerFrame(transport, 'presence', async (_fromId, payload) => {
+      const res = await verifyPresenceRecord(payload);
+      if (!res.ok) return;
+      const key = res.identityHex;
+      const seen = this._presenceWatermarks.get(key) ?? -1;
+      if (!(res.gen > seen)) return;                 // stale or replay: nothing, watermark untouched
+      this._presenceWatermarks.set(key, res.gen);
+      for (const cb of this._presenceHooks) { try { cb(res); } catch { /* hook errors are not ours */ } }
+      if (this._presenceCfg && (payload.hop ?? 0) === 0) {
+        const now = Date.now();
+        const last = this._presenceRelayAt.get(key) ?? -Infinity;
+        if (now - last >= this._presenceCfg.relayRateMs) {
+          this._presenceRelayAt.set(key, now);
+          const fwd = { proto: payload.proto, nodeId: payload.nodeId, pubkey: payload.pubkey,
+                        gen: payload.gen, nonce: payload.nonce, sig: payload.sig, hop: 1 };
+          for (const peerId of this._node?.synaptome?.keys() ?? []) {
+            transport.notify(peerId, 'presence', fwd).catch(() => { /* opportunistic */ });
+          }
+        }
+      }
+    }, { registry: this._b5door });
 
     // ── peer-leaving — graceful-departure fast path ─────────────────
     // A peer (e.g. the bridge on a `systemctl restart`) announces that
@@ -803,8 +946,24 @@ export class AxonaPeer extends DHT {
     return 32 + Math.clz32(lo);
   }
 
+  // v4.68.1 (Aster review 1c11a94e finding 2): grace timers must not survive
+  // peer teardown — a pending callback firing after stop() would call
+  // closeConnection against a stopped transport. One helper, called on both
+  // the abrupt (stop) and graceful (leave) paths: every timer cleared, every
+  // pending channel closed NOW (it was refused; only its reclamation was
+  // deferred), map emptied. Idempotent — the second call sees an empty map.
+  _clearGracePending() {
+    for (const [sponsor, handle] of this._gracePending) {
+      clearTimeout(handle);
+      try { const p = this._node?.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
+      catch { /* best-effort */ }
+    }
+    this._gracePending.clear();
+  }
+
   async stop() {
     if (!this._started) return;
+    this._clearGracePending();
     if (this._engineListenerUnsub) {
       this._engineListenerUnsub();
       this._engineListenerUnsub = null;
@@ -1035,6 +1194,11 @@ export class AxonaPeer extends DHT {
     const node = this._node;
     if (!cfg || this._maintainInflight || !node?.alive) return 0;
     if (typeof node.transport?.openConnection !== 'function') return 0;
+    // Slice 3: deficit backoff (opt-in, rides the attempt guard). A pass that
+    // attempted nothing backs the next search off exponentially — an empty
+    // deficit is usually an unpopulated band, and searching cannot fill it.
+    // Any attempt, or any verified presence record, resets the backoff.
+    if (this._deficitBackoff && !this._deficitBackoff.allow()) return 0;
     this._maintainInflight = true;
     try {
       const self = node.id;
@@ -1059,6 +1223,10 @@ export class AxonaPeer extends DHT {
       }
       if (attempted) {
         this._emitLog?.('info', 'synaptome-refill', { near: cfg.kNear, attempted });
+      }
+      if (this._deficitBackoff) {
+        if (attempted === 0) this._deficitBackoff.onEmpty();
+        else this._deficitBackoff.reset();
       }
       return attempted;
     } finally { this._maintainInflight = false; }
@@ -1102,6 +1270,12 @@ export class AxonaPeer extends DHT {
     // the process past their own resolution.
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const am = this._axonaManager;
+    // v4.68.1: retire deferred refusal-closes before the drain — the pending
+    // channels were refused admission, so closing them now cannot affect the
+    // drain, and a timer surviving into teardown fires against a dead
+    // transport (Aster review 1c11a94e finding 2). stop() repeats the call
+    // harmlessly on an empty map.
+    this._clearGracePending();
 
     // (1) drain FIRST, while the transport is still fully alive: wait for
     // in-flight publishes/kills to CONFIRM (the pendingPub implicit-ack
@@ -1592,6 +1766,75 @@ export class AxonaPeer extends DHT {
     const sponsorHex = toHex(sponsor);
     if (syn.has?.(sponsorHex)) return;
 
+    // Hold-or-improve gate (v0.6, opt-in): when armed, the gate is the sole
+    // decider on this path — engine bookkeeping is the benchmark layer and is
+    // not combined with the gate. Flag-off falls through to the legacy flow
+    // below, byte-identical.
+    if (this._gateCfg) {
+      const admitted = this._admitOrImprove(sponsor);
+      if (!admitted) {
+        // Refused at cap with no admissible swap: close the just-bound
+        // channel. A channel kept outside the budget defeats the budget; the
+        // far end sees the close as a liveness drop and evicts in turn —
+        // edge lifetime is the minimum of the two ends' decisions.
+        //
+        // v4.68.0: with closeGraceMs > 0 the close is DEFERRED by the grace
+        // window — an immediate close during the admission window destroys a
+        // channel a later admissible edge would ride (the measured
+        // shortstop-starvation mechanism). At fire time the close is skipped
+        // if the peer was admitted meanwhile. Pending state is bounded:
+        // over graceMaxPending, the oldest pending close fires immediately.
+        const graceMs = this._gateCfg.closeGraceMs ?? 0;
+        const doClose = () => {
+          try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
+          catch { /* best-effort */ }
+        };
+        // v4.68.1 (Aster review 1c11a94e finding 1): a deferred close KEEPS
+        // a physical channel open, so deferral capacity derives from live
+        // headroom — kept channels (shared synaptome budget members) plus
+        // pending closes plus this one must stay within node.maxConnections.
+        // No headroom: close immediately, exactly 4.67.1. A node whose cap
+        // is unset or Infinity DELIBERATELY declares no physical connection
+        // bound and is constrained only by graceMaxPending.
+        // v4.68.2 (Aster review ASTER-20260826-1727-KERNEL4681-08): an
+        // ALREADY-PENDING sponsor holds no incremental capacity — its open
+        // channel is the very one the existing timer guards — so the dedupe
+        // runs BEFORE headroom. A duplicate refusal retains the existing
+        // timer unchanged (no refresh: the window is measured from the FIRST
+        // refusal) and never closes the graced channel on a fictitious +1.
+        const graceOn = graceMs > 0 && typeof setTimeout === 'function';
+        if (graceOn && this._gracePending.has(sponsor)) {
+          // Duplicate refusal for an already-graced sponsor: retain the
+          // timer; zero incremental capacity; nothing to do.
+        } else {
+          const cap = this._node?.maxConnections;
+          const headroom = !Number.isFinite(cap)
+            || ((this._node?.synaptome?.size ?? 0)
+                + (this._node?.incomingSynapses?.size ?? 0)
+                + this._gracePending.size + 1 <= cap);
+          if (graceOn && headroom) {
+            while (this._gracePending.size >= (this._gateCfg.graceMaxPending ?? 64)) {
+              const [oldSponsor, oldHandle] = this._gracePending.entries().next().value;
+              clearTimeout(oldHandle);
+              this._gracePending.delete(oldSponsor);
+              try { const p = this._node.transport?.closeConnection?.(oldSponsor); p?.catch?.(() => { /* */ }); }
+              catch { /* best-effort */ }
+            }
+            const handle = setTimeout(() => {
+              this._gracePending.delete(sponsor);
+              if (this._node?.synaptome?.has?.(sponsor)) return;   // rescued: admitted meanwhile
+              doClose();
+            }, graceMs);
+            if (typeof handle?.unref === 'function') handle.unref();
+            this._gracePending.set(sponsor, handle);
+          } else {
+            doClose();
+          }
+        }
+      }
+      return;
+    }
+
     // Engine-managed path: if the engine exposes addSynapse, use it
     // so its bookkeeping (stratum, decay, anneal pool) stays consistent.
     const engine = this._engine;
@@ -1600,9 +1843,19 @@ export class AxonaPeer extends DHT {
       catch { /* fall through to direct insert */ }
     }
 
-    // Direct insert: real Synapse instance with the BigInt peerId.
-    // Stratum = number of leading zero bits in (self ^ peer), matching
-    // axona-peer/src/axona_node.js's _completeHandshake.
+    this._seedInsert(sponsor, 'bootstrap');
+  }
+
+  /**
+   * Direct insert: real Synapse instance with the BigInt peerId.
+   * Stratum = number of leading zero bits in (self ^ peer), matching
+   * axona-peer/src/axona_node.js's _completeHandshake. Extracted from the
+   * legacy seed body verbatim (v4.65.0) so the gate and the legacy flow
+   * insert identically; `addedBy` is diagnostic metadata only.
+   */
+  _seedInsert(sponsor, addedBy) {
+    const syn = this._node?.synaptome;
+    if (!syn) return;
     const selfId = this._node.id;
     const stratum = (typeof selfId === 'bigint')
       ? this._clz(selfId ^ sponsor)
@@ -1616,8 +1869,172 @@ export class AxonaPeer extends DHT {
     if (inserted) {
       inserted.weight   = 0.5;
       inserted.inertia  = 0;
-      inserted._addedBy = 'bootstrap';
+      inserted._addedBy = addedBy;
     }
+  }
+
+  /**
+   * Hold-or-improve admission (Connection-Quality v0.6, axona-docs 0e4d75a;
+   * margin boundaries per council review b41e2a88 / 70f85cc7 / 3b2cf359).
+   * Below cap: hold-all — admit any distinct live peer. At cap: id-derivable
+   * compare-and-swap. Bands are anneal groups (stratum >> 2, STRATA_GROUPS);
+   * protection is condition-based and RE-VERIFIED HERE, at the decision:
+   * the kNear XOR-nearest successors, and every member of a band holding
+   * sparseFloor or fewer edges (the r >= 2 sparse-band floor — the canPrune
+   * survival rule, widened per the definition).
+   *
+   * The victim is the lowest-vitality evictable edge in the densest band, and
+   * the operative bound is the ANTI-OSCILLATION INTEGER MARGIN
+   * (victimCount >= candCount + 2), with these boundary semantics:
+   *   V = C+1  REFUSED  — admitting would let the evicted edge immediately
+   *                       reverse the swap (structural ping-pong);
+   *   V = C+2  ADMITTED — the post-swap bands TIE (both C+1); the evicted
+   *                       edge is NOT re-admissible against the candidate;
+   *   V = C+3  ADMITTED — the candidate's band stays strictly sparser.
+   *
+   * LEGACY KEYS: the seed path accommodates hex-string synaptome keys from
+   * older sessions, so structural math NORMALIZES every key to BigInt for
+   * XOR/grouping while table operations (delete, closeConnection) use the
+   * original map key. A key that is neither BigInt nor valid hex id is
+   * structurally unreadable: it is skipped — never counted, never a victim.
+   *
+   * Eviction is not death: the victim leaves the table and its channel
+   * closes, but it is NOT dead-marked — it re-admits on a future bind.
+   * Returns true when the candidate entered the table.
+   */
+  _admitOrImprove(sponsor) {
+    const node = this._node;
+    const domain = this._domain;
+    const cfg = this._gateCfg;
+    const syn = node.synaptome;
+    const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
+
+    if (syn.size < cap) {
+      // Join lane (slice 3): with kJoin > 0 the table's LAST kJoin slots are
+      // reserved for qualified newcomers — the operational table is
+      // cap − kJoin (reserve-from-cap; the lane never takes the table over
+      // cap because it IS part of the cap). Qualification: one lane
+      // admission per identity per window (first-seen), plus a per-lane
+      // cooldown. A refused lane candidate's channel closes at the caller.
+      const kJoin = cfg.kJoin ?? 0;
+      if (kJoin > 0 && syn.size >= cap - kJoin) {
+        const key = identitySuffix(sponsor);
+        if (key === null) return false;
+        const t = Date.now();
+        // Prune expired entries at the decision point (Aster de1e46a3): an
+        // entry older than the window is useless — qualification only looks
+        // within-window — and without the sweep, qualified identity churn
+        // grows the map for the process lifetime. Post-sweep the map holds
+        // only in-window admissions, bounded by laneWindowMs/laneCooldownMs
+        // (entries are written on ADMISSION only, and admissions are
+        // cooldown-limited). O(live entries) per decision, and decisions are
+        // themselves cooldown-paced.
+        for (const [k, at] of this._laneSeen) {
+          if (t - at >= cfg.laneWindowMs) this._laneSeen.delete(k);
+        }
+        const seenAt = this._laneSeen.get(key);
+        if (seenAt !== undefined && t - seenAt < cfg.laneWindowMs) return false;  // one per id per window
+        if (t - this._laneLastAt < cfg.laneCooldownMs) return false;              // lane rate limit
+        this._laneSeen.set(key, t);
+        this._laneLastAt = t;
+        this._seedInsert(sponsor, 'gate-lane');
+        return true;
+      }
+      this._seedInsert(sponsor, 'gate-admit');
+      return true;
+    }
+
+    const selfId = node.id;
+    const groups = domain.STRATA_GROUPS;
+    // Band math uses clz264 DIRECTLY — the definition's per-bit distance —
+    // not the width-adaptive _clz, whose legacy-64-bit path collapses all
+    // far bands to one value and would blind the density comparison.
+    const groupOf = (peerBig) => Math.min(groups - 1, clz264(selfId ^ peerBig) >>> 2);
+
+    // Normalize keys for structural math; keep the original key for table ops.
+    const entries = [];
+    for (const [key, s] of syn) {
+      let big = null;
+      if (typeof key === 'bigint') big = key;
+      else if (typeof key === 'string' && isHexId(key)) {
+        try { big = fromHex(key); } catch { big = null; }
+      }
+      if (big === null) continue;               // unreadable key: not counted, never a victim
+      entries.push({ key, big, s });
+    }
+
+    // Band occupancy over the (readable) table.
+    const counts = new Map();
+    for (const e of entries) {
+      const g = groupOf(e.big);
+      counts.set(g, (counts.get(g) ?? 0) + 1);
+    }
+
+    // Condition-based protection, re-verified now (no leases, no grandfathering).
+    const byDist = [...entries].sort((a, b) => {
+      const da = selfId ^ a.big, db = selfId ^ b.big;
+      return da < db ? -1 : da > db ? 1 : 0;
+    });
+    const protectedKeys = new Set(byDist.slice(0, cfg.kNear).map(e => e.key));   // last-hop quota
+    for (const e of entries) {
+      if ((counts.get(groupOf(e.big)) ?? 0) <= cfg.sparseFloor) protectedKeys.add(e.key);  // sparse-band floor
+    }
+
+    // Victim: lowest-vitality evictable edge in the densest band that clears
+    // the anti-oscillation margin (see boundary semantics above).
+    const candCount = counts.get(groupOf(sponsor)) ?? 0;
+    let victimKey = null, victimVit = Infinity, victimCount = -1;
+    for (const e of entries) {
+      if (protectedKeys.has(e.key)) continue;
+      const c = counts.get(groupOf(e.big)) ?? 0;
+      if (c < candCount + 2) continue;                                  // under the margin: refuse this pairing
+      const v = this._vitality(e.s);
+      if (c > victimCount || (c === victimCount && v < victimVit)) {
+        victimKey = e.key; victimVit = v; victimCount = c;
+      }
+    }
+    if (victimKey === null) return false;                               // refuse: no admissible swap
+
+    syn.delete(victimKey);
+    node.connections?.delete(victimKey);
+    try { const p = node.transport?.closeConnection?.(victimKey); p?.catch?.(() => { /* best-effort */ }); }
+    catch { /* best-effort */ }
+    this._seedInsert(sponsor, 'gate-swap');
+    return true;
+  }
+
+  /**
+   * Subscribe to VERIFIED presence records ({identityHex, nodeId, gen}).
+   * Fires only on a fresh gen (watermark advanced) — the slice-3 attempt
+   * guard and deficit backoff consume this. Returns an unsubscribe.
+   */
+  onPresence(cb) {
+    if (typeof cb === 'function') this._presenceHooks.add(cb);
+    return () => this._presenceHooks.delete(cb);
+  }
+
+  /**
+   * Announce this node's presence to its current neighbours (armed only —
+   * inert without the `presence` ctor option). Increments the per-identity
+   * generation and sends the self-signed record (hop 0) to every synaptome
+   * peer. Called on start when `announceOnStart`; call again on recovery.
+   * Returns the number of neighbours notified.
+   */
+  async announcePresence() {
+    if (!this._presenceCfg) return 0;
+    const id = this._identity;
+    if (!id || typeof id.sign !== 'function' || typeof id.pubkeyHex !== 'string') return 0;
+    const gen = ++this._presenceGen;
+    let record;
+    try { record = await buildPresenceRecord({ identity: id, gen }); }
+    catch { return 0; }
+    const payload = { ...record, hop: 0 };
+    let sent = 0;
+    for (const peerId of this._node?.synaptome?.keys() ?? []) {
+      sent++;
+      this._node.transport.notify(peerId, 'presence', payload).catch(() => { /* opportunistic */ });
+    }
+    return sent;
   }
 
   // ─── DHT operations ────────────────────────────────────────────────
@@ -2057,13 +2474,12 @@ export class AxonaPeer extends DHT {
     this._subscriptions.get(topicIdBig).add(sub);
     this._installDeliveryHook(am);
 
-    // Lookup-assisted subscribe (v4.3.1): warm the true-root hint so the SUBSCRIBE
-    // routes straight to the topic's emergent root (and replay lands), instead of
-    // relying solely on the post-strand background heal. Bounded; no-op once warm.
-    if (typeof am.warmRootHint === 'function') {
-      try { await am.warmRootHint(topicIdBig); } catch { /* proceed greedy + heal */ }
-    }
-
+    // v4.64.0: NO lookup-assisted warm on subscribe. The SUBSCRIBE routes greedily
+    // toward the topic id and every hop routes by its own synaptome; a pre-warmed
+    // root hint would only pin a waypoint the neuromorphic layer may have already
+    // restructured around, turning an optimal path into a poor one on resubscribe.
+    // (The PUBLISH path still warms — see peer.pub — because a one-shot PUB has no
+    // renewal to re-route it.)
     am.pubsubSubscribe(topicIdBig, { replayLatest: opts.since === 'latest' });
 
     // Demand-driven metrics: subscribing to a metricTopic(dataId) turns metrics ON
@@ -3744,11 +4160,23 @@ export class AxonaPeer extends DHT {
       // Budgeted probe: trigger a connection; the handshake binds identity
       // and onPeerBound admits on success. Never binds ⇒ never admitted.
       if ((this._verifyProbes ?? 0) >= MAX_VERIFY_PROBES) return;
+      // Slice 3: the attempt guard (opt-in). Without it, a never-binding
+      // candidate is re-probed on every nomination forever — the c16d12b
+      // storm. With it: in-flight dedup, bounded retry with backoff, expiry
+      // on exhaustion; the dht:presence record is the release valve.
+      if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return;
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
+      this._attemptGuard?.begin(peerId);
       let opened = false;
       try { opened = await t.openConnection(peerId); }
       catch { /* unverifiable → not admitted */ }
-      finally { this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1); }
+      finally {
+        this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
+        // The relay fallback below is fire-and-forget signaling on the SAME
+        // attempt — its eventual bind clears the entry via expiry-on-bind
+        // when the candidate is re-nominated bound.
+        this._attemptGuard?.end(peerId, opened);
+      }
       // AUTONOMOUS BRIDGELESS CONNECT.  openConnection only succeeds for a
       // peer the transport already has a (bridge-assigned) binding for; a peer
       // discovered purely peer-to-peer (triadic_introduce / hop_cache /

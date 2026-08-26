@@ -845,13 +845,19 @@ export class AxonaManager {
   }
 
   // Subscribe — always sent SYNCHRONOUSLY and immediately (fast path, never blocked
-  // on the network). Pinned (steady state) → via the relay. Unpinned → the warm
-  // root hint if we have one, else greedy ([]) toward the bare topic id; the
-  // background lookup in _rootHint_ heals a greedy strand shortly after.
+  // on the network). Pinned (steady state) → via the relay. Unpinned → greedy ([])
+  // toward the bare topic id, every hop routing by its own synaptome.
+  //
+  // NO root-hint via on the unpinned path (v4.64.0). A cached hint pins a waypoint
+  // that was the closest root at ELECTION time; the neuromorphic layer restructures
+  // the mesh continuously, so on resubscribe that waypoint can go from the optimal
+  // path to a poor one — the SUB forced through a node the synaptome has already
+  // routed around. Greedy + synaptome finds the current-best terminal on its own;
+  // trust that. (_rootHint_ still runs its background lookup to warm the WRITE-path
+  // cache — pub/kill/pull/metrics/repair — which is unchanged.)
   _sendSubscribe(topicBig) {
     const pinned = this._upstream.get(topicBig) || [];
-    let via = pinned;
-    if (!via.length) { const hint = this._rootHint_(topicBig); via = hint ? [hint] : []; }
+    const via = pinned;   // [] when unpinned → greedy toward the topic id
     const sent = this._emitSubscribe(topicBig, via.slice(0, MAX_VIA));
     // Only a PINNED renewal can teach us the pin is dead. An unpinned SUB routes
     // toward the topic id itself, and its failure says the mesh is unreachable,
