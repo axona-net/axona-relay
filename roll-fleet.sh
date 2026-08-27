@@ -101,8 +101,18 @@ for old in "${OLD_PIDS[@]}"; do
   slot=$((slot + 1))
   log="relay-logs/relay-$GEN-$slot.log"
 
-  RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
-    caffeinate -i nohup node src/index.js >> "$log" 2>&1 &
+  # CAFFEINATE toggle (same contract as start-fleet.sh), auto-defaulted by
+  # host: caffeinate is macOS-only, so on Linux (axona-linux) the wrapper is
+  # skipped and nohup alone carries the detach — a plugged-in Linux host has
+  # no sleep to fight. macOS behavior is byte-identical (caffeinate present
+  # → default 1 → same launch line as before).
+  if [ "${CAFFEINATE:-$(command -v caffeinate >/dev/null 2>&1 && echo 1 || echo 0)}" = "1" ]; then
+    RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
+      caffeinate -i nohup node src/index.js >> "$log" 2>&1 &
+  else
+    RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
+      nohup node src/index.js >> "$log" 2>&1 &
+  fi
   newpid=$!
 
   # The replacement is proven by ITS OWN LOG: banner with the kernel we expect,
