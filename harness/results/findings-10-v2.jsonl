@@ -1,0 +1,18 @@
+{"detector":"churn-event","severity":"info","kind":"churn:done","atCw":1787887143596,"detail":{}}
+{"detector":"churn-event","severity":"info","kind":"churn:killed","atCw":1787887133592,"detail":{"peerIdx":0}}
+{"detector":"churn-event","severity":"info","kind":"churn:plan","atCw":1787886833525,"detail":{"actions":1}}
+{"detector":"churn-event","severity":"info","kind":"churn:sidecar-kill","atCw":1787887133563,"detail":{"peerIdx":0}}
+{"detector":"churn-event","severity":"info","kind":"churn:sidecar-restart","atCw":1787887143595,"detail":{"peerIdx":0,"pid":21551,"downMs":10000}}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":1,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":2,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":3,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":4,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":1,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":2,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":3,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"replay-gap","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":4,"note":"reader down at publish; backlog never replayed by ledger end"}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":2,"sawSeq":1,"hadSeq":3}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":4,"sawSeq":1,"hadSeq":4}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":4,"sawSeq":1,"hadSeq":4}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":5,"sawSeq":1,"hadSeq":4}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":6,"sawSeq":1,"hadSeq":4}

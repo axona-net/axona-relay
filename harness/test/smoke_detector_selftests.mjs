@@ -187,5 +187,60 @@ check('percentiles reported, never averages alone',
 }
 rmSync(DIR, { recursive: true, force: true });
 
+// ── §5 availability windows: its own fixture, three cases ────────────
+// (a) reader DOWN at publish, observes in its next life → eventual-replay
+//     sample, not late, not stranded; (b) reader DOWN at publish, never
+//     observes → replay-gap finding, not stranded-write; (c) reader UP at
+//     publish but first observation lands in a LATER life (cross-interval)
+//     → eventual, and its huge apparent latency stays OUT of the live pool.
+{
+  const ADIR = `${tmpdir()}/selftest-avail-${process.pid}`;
+  mkdirSync(ADIR, { recursive: true });
+  const aemit = (peerIdx, rec, atMs) => appendFileSync(`${ADIR}/sidecar-${SEED}-${peerIdx}.jsonl`,
+    JSON.stringify({ ...rec, host: 'm4', os: 'darwin', peerIdx, wall: iso(atMs), mono: (mono += 0.1) }) + '\n');
+  const life = (peerIdx, kind, atMs) => aemit(peerIdx, { t: 'event', kind, detail: {} }, atMs);
+  const publisher = 0; const t = T(open0);
+  const rs = t.requiredReaders.filter((p) => p !== publisher);   // two readers with nodes=3
+  const A = rs[0], B = rs[1];
+
+  // Reader A: up 0–60s, down, second life from 120s. Reader B: up 0–60s only.
+  life(A, 'start', 0); life(A, 'end', 60_000); life(A, 'start', 120_000);
+  life(B, 'start', 0); life(B, 'end', 60_000);
+
+  // op seq 0: published at 70s — BOTH readers down at publish.
+  aemit(publisher, { t: 'intent', topic: t.name, topicSeq: 0, nonce: 'a0', payloadHash: 'ah0', author: 'A'.repeat(64) }, 70_000);
+  aemit(publisher, { t: 'api', topic: t.name, topicSeq: 0, nonce: 'a0', confirmed: true, msgId: 'am0' }, 70_100);
+  aemit(A, { t: 'observe', topic: t.name, topicSeq: 0, nonce: 'a0', msgId: 'am0', via: 'replay', payloadHash: 'ah0' }, 125_000);
+  // B never observes seq 0.
+
+  // op seq 1: published at 30s (A up); A's first observation at 130s — in
+  // its SECOND life. Cross-interval → eventual; 100s latency must not
+  // enter the live pool.
+  aemit(publisher, { t: 'intent', topic: t.name, topicSeq: 1, nonce: 'a1', payloadHash: 'ah1', author: 'A'.repeat(64) }, 30_000);
+  aemit(publisher, { t: 'api', topic: t.name, topicSeq: 1, nonce: 'a1', confirmed: true, msgId: 'am1' }, 30_100);
+  aemit(A, { t: 'observe', topic: t.name, topicSeq: 1, nonce: 'a1', msgId: 'am1', via: 'watch', payloadHash: 'ah1' }, 130_000);
+  aemit(B, { t: 'observe', topic: t.name, topicSeq: 1, nonce: 'a1', msgId: 'am1', via: 'watch', payloadHash: 'ah1' }, 31_000);
+
+  let out = ''; let code = 0;
+  try {
+    out = execFileSync('node', ['harness/analyze.mjs', '--dir', ADIR, '--seed', String(SEED),
+      '--nodes', String(NODES), '--open-n', String(OPEN_N), '--owned-n', String(OWNED_N),
+      '--duration-ms', String(DURATION), '--slo-ms', '60000', '--reconcile-ms', '300000',
+      '--offsets', '{"m4":0}', '--out', `${ADIR}/f.jsonl`]).toString();
+  } catch (e) { out = e.stdout?.toString() ?? ''; code = e.status ?? 1; }
+  const s = JSON.parse(out);
+  const rows = readFileSync(`${ADIR}/f.jsonl`, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  check('§5(a): down-at-publish observation → eventual-replay, not stranded', s.eventualReplay >= 1
+    && !rows.some((r) => r.detector === 'stranded-write' && r.seq === 0 && r.reader === A));
+  check('§5(a): eventual sample excluded from late-propagation', !rows.some((r) => r.detector === 'late-propagation' && r.seq === 0));
+  check('§5(b): down-at-publish never-observed → replay-gap, not stranded', s.replayGapMissing >= 1
+    && rows.some((r) => r.detector === 'replay-gap' && r.seq === 0 && r.reader === B)
+    && !rows.some((r) => r.detector === 'stranded-write' && r.seq === 0 && r.reader === B));
+  check('§5(c): cross-interval observation → eventual, latency out of live pool',
+    s.eventualReplay >= 2 && (s.latencyMs.max === null || s.latencyMs.max < 60_000));
+  check('§5: up-at-publish same-interval observation still live', s.deliveredLive >= 1);
+  rmSync(ADIR, { recursive: true, force: true });
+}
+
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);
