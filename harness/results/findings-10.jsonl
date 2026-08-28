@@ -1,0 +1,19 @@
+{"detector":"churn-event","severity":"info","kind":"churn:done","atCw":1787887143596,"detail":{}}
+{"detector":"churn-event","severity":"info","kind":"churn:killed","atCw":1787887133592,"detail":{"peerIdx":0}}
+{"detector":"churn-event","severity":"info","kind":"churn:plan","atCw":1787886833525,"detail":{"actions":1}}
+{"detector":"churn-event","severity":"info","kind":"churn:sidecar-kill","atCw":1787887133563,"detail":{"peerIdx":0}}
+{"detector":"churn-event","severity":"info","kind":"churn:sidecar-restart","atCw":1787887143595,"detail":{"peerIdx":0,"pid":21551,"downMs":10000}}
+{"detector":"late-propagation","severity":"warn","topic":"harness/owned-10-0","seq":0,"reader":7,"latencyMs":74986,"note":"late, within reconciliation"}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":2,"sawSeq":1,"hadSeq":3}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":4,"sawSeq":1,"hadSeq":4}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":4,"sawSeq":1,"hadSeq":4}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":5,"sawSeq":1,"hadSeq":4}
+{"detector":"stale-pull","severity":"fail","topic":"harness/open-10-1","reader":6,"sawSeq":1,"hadSeq":4}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":1,"publisher":0,"msgId":"5732a6ced28c11c08233fa9b0b6c1144bc180e0d019c1ed6adb3b47a590a122f","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":2,"publisher":0,"msgId":"5732a6ced28c11c08233fa9b0b6c1144bc180e0d019c1ed6adb3b47a590a122f","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":3,"publisher":0,"msgId":"5732a6ced28c11c08233fa9b0b6c1144bc180e0d019c1ed6adb3b47a590a122f","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-1","seq":2,"reader":4,"publisher":0,"msgId":"5732a6ced28c11c08233fa9b0b6c1144bc180e0d019c1ed6adb3b47a590a122f","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":1,"publisher":6,"msgId":"a64cee3a60be35fac6fd377c3e9aef7ac56039bb853a737322e9cdd0389cc438","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":2,"publisher":6,"msgId":"a64cee3a60be35fac6fd377c3e9aef7ac56039bb853a737322e9cdd0389cc438","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":3,"publisher":6,"msgId":"a64cee3a60be35fac6fd377c3e9aef7ac56039bb853a737322e9cdd0389cc438","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-10-3","seq":5,"reader":4,"publisher":6,"msgId":"a64cee3a60be35fac6fd377c3e9aef7ac56039bb853a737322e9cdd0389cc438","note":"confirmed publish never observed by required reader"}

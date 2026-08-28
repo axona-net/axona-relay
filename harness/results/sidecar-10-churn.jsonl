@@ -1,0 +1,5 @@
+{"t":"event","kind":"churn:plan","detail":{"actions":1},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T03:13:53.525Z","mono":0.792}
+{"t":"event","kind":"churn:sidecar-kill","detail":{"peerIdx":0},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T03:18:53.563Z","mono":300001.152}
+{"t":"event","kind":"churn:killed","detail":{"peerIdx":0},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T03:18:53.592Z","mono":300030.217}
+{"t":"event","kind":"churn:sidecar-restart","detail":{"peerIdx":0,"pid":21551,"downMs":10000},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T03:19:03.595Z","mono":310033.228}
+{"t":"event","kind":"churn:done","detail":{},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T03:19:03.596Z","mono":310033.412}
