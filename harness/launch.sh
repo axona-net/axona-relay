@@ -61,12 +61,13 @@ launch_win() {  # peerIdx...
   # stdin is /dev/null — the seed-8 launches read EOF and did nothing. The
   # remote bash exits after nohup-backgrounding node (all fds redirected to
   # files), so the channel closes promptly; ConnectTimeout guards the dial.
-  # cd on its OWN line: MSYS bash from a piped -s never ran the backgrounded
-  # `cd X && nohup …` compound (probed 2026-08-28); the multi-line form runs.
+  # The windows-fleet.sh shape — ssh -lc invoking a REPO SCRIPT that nohups
+  # node — is the only launch form proven to outlive its session on this box
+  # (its relays run a day later; two stdin-script forms died with theirs).
+  # The channel may hang holding children: the watchdog kills the LOCAL ssh
+  # only, which windows-fleet proved the children survive.
   for i in "$@"; do
-    printf 'cd /c/Users/david/github/axona-relay\nnohup env HOST=axona-win OS=win32 PEER_IDX=%s %s node harness/sidecar.mjs --peer %s > harness/results/sidecar-%s-%s.out 2>&1 &\necho axona-win-peer-%s-launched\nexit 0\n' \
-      "$i" "$COMMON" "$i" "$SEED" "$i" "$i" \
-      | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s'
+    remote axona-win "\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc \"cd /c/Users/david/github/axona-relay && bash harness/win-spawn.sh $i $SEED $NODES $DURATION_MS $OPEN_N $OWNED_N $REGION $BRIDGE\""
   done
 }
 
