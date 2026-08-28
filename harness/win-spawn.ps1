@@ -1,17 +1,16 @@
 # =============================================================================
-# harness/win-spawn.ps1 — spawn one sidecar on Windows, detached from the
-# ssh session's job object.
+# harness/win-spawn.ps1 — spawn one sidecar on Windows via a one-shot
+# scheduled task, the only launch that survives ssh disconnect on this box.
 #
-# Every bash-shaped launch tried on this box died with its ssh session
-# (job-object teardown; seeds 8, 9, 98). Start-Process creates the child
-# through CreateProcess outside the caller's console session, which is the
-# documented way out. Env is set on THIS process and inherited by the child.
-# stdout/stderr must be different files on Windows; the sidecar's phase
-# markers ride stderr.
+# Direct shapes all died with their session: bash nohup (three variants,
+# seeds 8/9/98) and Start-Process (seed 97) — Windows OpenSSH tears down
+# the session's process tree on disconnect. schtasks runs the payload in
+# its OWN logon session; /SC ONCE with a past /ST plus an explicit /Run
+# fires it immediately. The task name is unique per (seed, peer) and /F
+# overwrites any prior definition.
 #
 #   powershell -ExecutionPolicy Bypass -File harness\win-spawn.ps1 `
-#     -Peer 0 -Seed 98 -Nodes 3 -DurationMs 90000 -OpenN 2 -OwnedN 1 `
-#     -Region eagle -Bridge wss://testnet.axona.net
+#     -Peer 6 -Seed 10 -Nodes 8 -DurationMs 600000 -OpenN 4 -OwnedN 2
 # =============================================================================
 param(
   [Parameter(Mandatory)][int]$Peer,
@@ -23,16 +22,8 @@ param(
   [string]$Bridge = 'wss://testnet.axona.net'
 )
 $repo = 'C:\Users\david\github\axona-relay'
-$env:HOST = 'axona-win'; $env:OS_TAG = 'win32'
-$env:PEER_IDX = "$Peer"; $env:NODES = "$Nodes"; $env:SEED = "$Seed"
-$env:DURATION_MS = "$DurationMs"; $env:REGION = $Region; $env:BRIDGE = $Bridge
-$env:LEDGER_DIR = 'harness/results'
-if ($OpenN -gt 0) { $env:OPEN_N = "$OpenN" }
-if ($OwnedN -gt 0) { $env:OWNED_N = "$OwnedN" }
-New-Item -ItemType Directory -Force -Path "$repo\harness\results" | Out-Null
-$p = Start-Process -FilePath 'node' `
-  -ArgumentList 'harness/sidecar.mjs', '--peer', "$Peer" `
-  -WorkingDirectory $repo -WindowStyle Hidden -PassThru `
-  -RedirectStandardOutput "$repo\harness\results\sidecar-$Seed-$Peer.stdout.log" `
-  -RedirectStandardError  "$repo\harness\results\sidecar-$Seed-$Peer.out"
-Write-Output "win-spawn.ps1: peer $Peer pid $($p.Id)"
+$name = "axona-harness-$Seed-$Peer"
+$tr = "powershell -ExecutionPolicy Bypass -File $repo\harness\win-run-sidecar.ps1 -Peer $Peer -Seed $Seed -Nodes $Nodes -DurationMs $DurationMs -OpenN $OpenN -OwnedN $OwnedN -Region $Region -Bridge $Bridge"
+schtasks /Create /F /TN $name /SC ONCE /ST 00:00 /TR $tr | Out-Null
+schtasks /Run /TN $name | Out-Null
+Write-Output "win-spawn: task $name started"
