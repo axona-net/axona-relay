@@ -57,18 +57,24 @@ launch_win() {  # peerIdx...
   # which eats nested quotes before git-bash sees them (the seed-7 run's
   # "system cannot find the path specified"). Ship the payload as a SCRIPT
   # over stdin instead — bash -s reads it verbatim, no cmd parsing at all.
+  # FOREGROUND ssh: it reads the script from stdin, and a backgrounded job's
+  # stdin is /dev/null — the seed-8 launches read EOF and did nothing. The
+  # remote bash exits after nohup-backgrounding node (all fds redirected to
+  # files), so the channel closes promptly; ConnectTimeout guards the dial.
+  # cd on its OWN line: MSYS bash from a piped -s never ran the backgrounded
+  # `cd X && nohup …` compound (probed 2026-08-28); the multi-line form runs.
   for i in "$@"; do
-    printf 'cd /c/Users/david/github/axona-relay && nohup env HOST=axona-win OS=win32 PEER_IDX=%s %s node harness/sidecar.mjs --peer %s > harness/results/sidecar-%s-%s.out 2>&1 & echo axona-win-peer-%s-launched\n' \
+    printf 'cd /c/Users/david/github/axona-relay\nnohup env HOST=axona-win OS=win32 PEER_IDX=%s %s node harness/sidecar.mjs --peer %s > harness/results/sidecar-%s-%s.out 2>&1 &\necho axona-win-peer-%s-launched\nexit 0\n' \
       "$i" "$COMMON" "$i" "$SEED" "$i" "$i" \
-      | ( ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' & local sp=$!
-          ( sleep 40; kill "$sp" 2>/dev/null ) & wait "$sp" 2>/dev/null )
+      | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s'
   done
 }
 
 echo "── updating remote checkouts"
 remote m1 'cd ~/Documents/claude/axona-relay && git fetch -q origin && git reset -q --hard origin/testnet && git log --oneline -1'
 remote axona-linux 'cd ~/Documents/claude/axona-relay && git fetch -q origin && git reset -q --hard origin/testnet && git log --oneline -1'
-remote axona-win "\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc 'cd /c/Users/david/github/axona-relay && git fetch -q origin && git reset -q --hard origin/testnet && git log --oneline -1'"
+echo 'cd /c/Users/david/github/axona-relay && git fetch -q origin && git reset -q --hard origin/testnet && git log --oneline -1' \
+  | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s'
 
 echo "── launching $NODES sidecars (seed $SEED, $(( DURATION_MS / 60000 ))min window)"
 launch_local 0 1
