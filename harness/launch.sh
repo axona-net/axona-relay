@@ -81,10 +81,20 @@ launch_ssh_unix m1 "/opt/homebrew/Cellar/node/26.6.0/bin:/opt/homebrew/bin" darw
 launch_ssh_unix axona-linux "\$HOME/bin" linux 4 5
 launch_win 6 7
 
-echo "── churn driver (validation plan: restart local peer 0 mid-window)"
-SEED=$SEED HOST=m4 LEDGER_DIR=$RESULTS \
-  PLAN="[{\"atMs\":$(( DURATION_MS / 2 )),\"kind\":\"sidecar-restart\",\"peerIdx\":0,\"env\":{\"HOST\":\"m4\",\"OS\":\"darwin\",\"NODES\":\"$NODES\",\"SEED\":\"$SEED\",\"DURATION_MS\":\"$(( DURATION_MS / 2 - 20000 ))\",\"OPEN_N\":\"$OPEN_N\",\"OWNED_N\":\"$OWNED_N\",\"REGION\":\"$REGION\",\"BRIDGE\":\"$BRIDGE\",\"LEDGER_DIR\":\"harness/results\"}}]" \
-  node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
+# Churn: ARM_RELAY=1 runs the §6 relay-churn schedule (Arm A/B); otherwise the
+# validation plan (one local sidecar restart). The relay actions are gated
+# inside churn.mjs on ARM_RELAY too — belt and braces.
+if [ "${ARM_RELAY:-0}" = "1" ]; then
+  echo "── churn driver: §6 RELAY CHURN SCHEDULE (Arm run, ARM_RELAY=1)"
+  ARM_PLAN=$(node harness/gen-arm-plan.mjs "$DURATION_MS")
+  ARM_RELAY=1 SEED=$SEED HOST=m4 REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=$RESULTS \
+    PLAN="$ARM_PLAN" node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
+else
+  echo "── churn driver (validation plan: restart local peer 0 mid-window)"
+  SEED=$SEED HOST=m4 LEDGER_DIR=$RESULTS \
+    PLAN="[{\"atMs\":$(( DURATION_MS / 2 )),\"kind\":\"sidecar-restart\",\"peerIdx\":0,\"env\":{\"HOST\":\"m4\",\"OS\":\"darwin\",\"NODES\":\"$NODES\",\"SEED\":\"$SEED\",\"DURATION_MS\":\"$(( DURATION_MS / 2 - 20000 ))\",\"OPEN_N\":\"$OPEN_N\",\"OWNED_N\":\"$OWNED_N\",\"REGION\":\"$REGION\",\"BRIDGE\":\"$BRIDGE\",\"LEDGER_DIR\":\"harness/results\"}}]" \
+    node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
+fi
 echo "  churn driver pid $!"
 
 SETTLE=$(( DURATION_MS / 1000 + 120 ))
