@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# =============================================================================
+# harness/win-relay.sh — RELAY-AWARE census/start/stop for the Windows fleet.
+# Runs NATIVELY on axona-win (git-bash), invoked as:
+#     ssh axona-win '"C:\Program Files\Git\bin\bash.exe" harness/win-relay.sh <cmd>'
+#
+# Why a file and not an inline ssh command: the WMI filter needs
+# Name='node.exe' with its quotes intact, and passing that through
+# ssh→cmd→git-bash strips a quoting layer every hop (the v2 "Invalid query").
+# On disk, bash reads it verbatim — one layer, done.
+#
+# RELAY-AWARE: filters node.exe by command line (src\index.js) so the harness
+# sidecars that also run as node.exe are NEVER counted or killed. start uses a
+# one-shot schtasks task — the only start that survives an ssh-initiated launch
+# on this box (own logon session; a plain nohup dies with the ssh channel).
+# =============================================================================
+set -uo pipefail
+cd /c/Users/david/github/axona-relay || exit 1
+REGION="${RELAY_REGION:-eagle}"
+BRIDGE="${BRIDGE_URL:-wss://testnet.axona.net}"
+
+# node.exe processes whose command line is the relay entrypoint, oldest first.
+RELAY_FILTER="Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { \$_.CommandLine -match 'src.index.js' }"
+
+relay_pids() {   # ProcessIds, oldest (earliest CreationDate) first, one per line
+  powershell -NoProfile -Command "$RELAY_FILTER | Sort-Object CreationDate | ForEach-Object { \$_.ProcessId }" | tr -d '\r'
+}
+
+case "${1:-}" in
+  census)
+    powershell -NoProfile -Command "@($RELAY_FILTER).Count" | tr -d '[:space:]'
+    ;;
+  start)
+    mkdir -p relay-logs
+    ts=$(date +%s)
+    # schtasks /TR runs a cmd that cd's, sets env, and starts the relay,
+    # redirecting all output to a per-start log. Runs in its own logon session.
+    tr="cmd /c cd /d C:\\Users\\david\\github\\axona-relay & set RELAY_REGION=$REGION& set BRIDGE_URL=$BRIDGE& set RELAY_TUI=0& node src\\index.js >> relay-logs\\relay-churn-$ts.log 2>&1"
+    powershell -NoProfile -Command "schtasks /Create /F /TN axona-relay-churn-$ts /SC ONCE /ST 00:00 /TR '$tr' | Out-Null; schtasks /Run /TN axona-relay-churn-$ts | Out-Null"
+    echo started
+    ;;
+  stop)   # kill the OLDEST relay (first by CreationDate)
+    p=$(relay_pids | head -1 | tr -cd '0-9')
+    [ -n "$p" ] && powershell -NoProfile -Command "Stop-Process -Id $p -Force"
+    echo stopped
+    ;;
+  *) echo "usage: win-relay.sh census|start|stop" >&2; exit 1 ;;
+esac

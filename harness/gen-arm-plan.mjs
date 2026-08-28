@@ -20,13 +20,22 @@
 const DURATION = Number(process.argv[2]);
 if (!Number.isInteger(DURATION) || DURATION <= 0) { console.error('gen-arm-plan: durationMs required'); process.exit(1); }
 
-// host, fleet size (for the 95% floor)
+// FROZEN fleet census, measured 2026-08-28 (relay-only, sidecars excluded).
+// Both arms generate from the same duration → byte-identical churn plans (§7);
+// the runtime floor guard in churn.mjs re-measures actual census before every
+// action, so a mid-run drift is refused, never forced past the floor.
+const FLOOR_PCT = 95;
 const HOSTS = [
-  { host: 'm4', size: 26, killable: true },
-  { host: 'm1', size: 12, killable: false },
-  { host: 'axona-linux', size: 4, killable: false },
-  { host: 'axona-win', size: 20, killable: true },
-];
+  { host: 'm4', size: 26 },
+  { host: 'm1', size: 24 },
+  { host: 'axona-linux', size: 8 },
+  { host: 'axona-win', size: 20 },
+].map((h) => ({
+  ...h,
+  // killable = an abrupt single-relay kill keeps the host at/above its 95%
+  // floor. m4 25/26, m1 23/24, win 19/20 clear it; linux 7/8 (87.5%) does not.
+  killable: (h.size - 1) >= Math.ceil((FLOOR_PCT / 100) * h.size),
+}));
 let s = (DURATION % 2147483647) || 1;
 const rnd = () => (s = (s * 48271) % 2147483647) / 2147483647;
 

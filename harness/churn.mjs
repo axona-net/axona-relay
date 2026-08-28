@@ -30,7 +30,9 @@ const HOST_CENSUS = {
   m4:   'COUNT=0; for p in $(pgrep -f "src/index.js"); do [ "$(ps -o comm= -p $p | xargs basename 2>/dev/null)" = node ] && COUNT=$((COUNT+1)); done; echo $COUNT',
   m1:   'ssh -o ConnectTimeout=10 m1 \'pgrep -f "src/index.js" | wc -l\'',
   'axona-linux': 'ssh -o ConnectTimeout=10 axona-linux \'pgrep -fc "node src/index.js"\'',
-  'axona-win':   'printf \'tasklist //FI "IMAGENAME eq node.exe" | grep -c node.exe\\n\' | ssh -o ConnectTimeout=15 axona-win \'"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe" -s\'',
+  // relay-filtered via the committed helper — never counts the harness sidecars
+  // that also run as node.exe (a plain tasklist node.exe count would over-read).
+  'axona-win':   'printf \'/c/Users/david/github/axona-relay/harness/win-relay.sh census\\n\' | ssh -o ConnectTimeout=15 axona-win \'"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe" -s\'',
 };
 const censusOf = (host) => {
   try { return Number(execSync(HOST_CENSUS[host], { shell: '/bin/bash' }).toString().trim()); }
