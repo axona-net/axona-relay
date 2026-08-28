@@ -33,7 +33,7 @@ COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=
 
 launch_local() {  # peerIdx...
   for i in "$@"; do
-    env HOST=m4 OS=darwin PEER_IDX="$i" $COMMON node harness/sidecar.mjs \
+    env HOST=m4 OS=darwin PEER_IDX="$i" $COMMON node harness/sidecar.mjs --peer "$i" \
       > "$RESULTS/sidecar-$SEED-$i.out" 2>&1 &
     echo "  m4 peer $i pid $!"
   done
@@ -48,13 +48,20 @@ remote() {  # host cmd — with a local watchdog so a held channel can't wedge u
 launch_ssh_unix() {  # host node_prefix os peerIdx...
   local host="$1" prefix="$2" os="$3"; shift 3
   for i in "$@"; do
-    remote "$host" "cd ~/Documents/claude/axona-relay && nohup env PATH=\"$prefix:\$PATH\" HOST=$host OS=$os PEER_IDX=$i $COMMON node harness/sidecar.mjs > harness/results/sidecar-$SEED-$i.out 2>&1 & echo \"  $host peer $i launched\""
+    remote "$host" "cd ~/Documents/claude/axona-relay && nohup env PATH=\"$prefix:\$PATH\" HOST=$host OS=$os PEER_IDX=$i $COMMON node harness/sidecar.mjs --peer $i > harness/results/sidecar-$SEED-$i.out 2>&1 & echo \"  $host peer $i launched\""
   done
 }
 
 launch_win() {  # peerIdx...
+  # Windows quoting is the graveyard: ssh hands the command to cmd.exe FIRST,
+  # which eats nested quotes before git-bash sees them (the seed-7 run's
+  # "system cannot find the path specified"). Ship the payload as a SCRIPT
+  # over stdin instead — bash -s reads it verbatim, no cmd parsing at all.
   for i in "$@"; do
-    remote axona-win "\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc 'cd /c/Users/david/github/axona-relay && nohup env HOST=axona-win OS=win32 PEER_IDX=$i $COMMON node harness/sidecar.mjs > harness/results/sidecar-$SEED-$i.out 2>&1 & echo \"  axona-win peer $i launched\"'"
+    printf 'cd /c/Users/david/github/axona-relay && nohup env HOST=axona-win OS=win32 PEER_IDX=%s %s node harness/sidecar.mjs --peer %s > harness/results/sidecar-%s-%s.out 2>&1 & echo axona-win-peer-%s-launched\n' \
+      "$i" "$COMMON" "$i" "$SEED" "$i" "$i" \
+      | ( ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' & local sp=$!
+          ( sleep 40; kill "$sp" 2>/dev/null ) & wait "$sp" 2>/dev/null )
   done
 }
 

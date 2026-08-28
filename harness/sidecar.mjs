@@ -24,8 +24,13 @@ import { generatePlan, planCanonical } from './lib/workload.mjs';
 import { Ledger, sha256 } from './lib/ledger.mjs';
 
 const env = (k, d) => process.env[k] ?? d;
+// --peer N in argv mirrors PEER_IDX and — the real point — puts the peer
+// identity ON THE COMMAND LINE, so a churn kill can target one sidecar by
+// exact pattern. Env vars are invisible to pkill -f; argv is not. The
+// under-scoped fallback kill that took out a whole host's sidecars is why.
+const argPeer = (() => { const i = process.argv.indexOf('--peer'); return i >= 0 ? Number(process.argv[i + 1]) : undefined; })();
 const HOST = env('HOST'); const OS = env('OS', process.platform);
-const PEER_IDX = Number(env('PEER_IDX')); const NODES = Number(env('NODES'));
+const PEER_IDX = argPeer ?? Number(env('PEER_IDX')); const NODES = Number(env('NODES'));
 const SEED = Number(env('SEED')); const DURATION_MS = Number(env('DURATION_MS'));
 const REGION = env('REGION', 'eagle'); const BRIDGE = env('BRIDGE', 'wss://testnet.axona.net');
 const LEDGER_DIR = env('LEDGER_DIR', 'harness/results');

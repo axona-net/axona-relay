@@ -32,12 +32,18 @@ for (const a of PLAN.sort((x, y) => x.atMs - y.atMs)) {
   if (wait > 0) await sleep(wait);
   if (a.kind === 'sidecar-restart') {
     led.event({ kind: 'churn:sidecar-kill', detail: { peerIdx: a.peerIdx } });
+    // EXACT-pattern kill on the argv peer tag; NO broad fallback — a missed
+    // kill is ledgered and visible in the artifacts, while the previous
+    // broad fallback killed every sidecar on the host and destroyed a run.
+    let killed = false;
     try {
-      execSync(`pkill -f "PEER_IDX=${a.peerIdx} .*sidecar.mjs" 2>/dev/null || pkill -f "sidecar.mjs" -n 2>/dev/null || true`, { shell: '/bin/bash' });
-    } catch { /* dead already is fine */ }
+      execSync(`pkill -f "sidecar.mjs --peer ${a.peerIdx}$"`, { shell: '/bin/bash' });
+      killed = true;
+    } catch { /* no match — ledger it below */ }
+    led.event({ kind: killed ? 'churn:killed' : 'churn:kill-missed', detail: { peerIdx: a.peerIdx } });
     await sleep(a.downMs ?? 10_000);
     const env = { ...process.env, ...a.env, PEER_IDX: String(a.peerIdx) };
-    const child = spawn('node', ['harness/sidecar.mjs'], { env, detached: true,
+    const child = spawn('node', ['harness/sidecar.mjs', '--peer', String(a.peerIdx)], { env, detached: true,
       stdio: ['ignore', 'ignore', 'ignore'] });
     child.unref();
     led.event({ kind: 'churn:sidecar-restart', detail: { peerIdx: a.peerIdx, pid: child.pid, downMs: a.downMs ?? 10_000 } });

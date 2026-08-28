@@ -1,0 +1,4 @@
+{"t":"event","kind":"churn:plan","detail":{"actions":1},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T01:20:34.536Z","mono":1.726}
+{"t":"event","kind":"churn:sidecar-kill","detail":{"peerIdx":0},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T01:25:34.539Z","mono":300001.848}
+{"t":"event","kind":"churn:sidecar-restart","detail":{"peerIdx":0,"pid":99007,"downMs":10000},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T01:25:45.091Z","mono":310553.249}
+{"t":"event","kind":"churn:done","detail":{},"host":"m4","os":"darwin","peerIdx":999,"wall":"2026-08-28T01:25:45.091Z","mono":310553.403}

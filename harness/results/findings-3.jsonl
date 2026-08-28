@@ -1,0 +1,2 @@
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-3-1","seq":0,"reader":1,"publisher":0,"msgId":"708b4419570e6d785f85508579bf7f10d63abfccf01f06244980376c8ab43ae0","note":"confirmed publish never observed by required reader"}
+{"detector":"stranded-write","severity":"fail","topic":"harness/open-3-1","seq":0,"reader":2,"publisher":0,"msgId":"708b4419570e6d785f85508579bf7f10d63abfccf01f06244980376c8ab43ae0","note":"confirmed publish never observed by required reader"}
