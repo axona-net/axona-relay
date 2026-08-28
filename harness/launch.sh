@@ -61,13 +61,11 @@ launch_win() {  # peerIdx...
   # stdin is /dev/null — the seed-8 launches read EOF and did nothing. The
   # remote bash exits after nohup-backgrounding node (all fds redirected to
   # files), so the channel closes promptly; ConnectTimeout guards the dial.
-  # The windows-fleet.sh shape — ssh -lc invoking a REPO SCRIPT that nohups
-  # node — is the only launch form proven to outlive its session on this box
-  # (its relays run a day later; two stdin-script forms died with theirs).
-  # The channel may hang holding children: the watchdog kills the LOCAL ssh
-  # only, which windows-fleet proved the children survive.
+  # One-shot scheduled task per peer — the ONLY launch proven to survive ssh
+  # disconnect on this box (schtasks runs in its own logon session; every
+  # direct shape, bash and Start-Process alike, died with the session).
   for i in "$@"; do
-    remote axona-win "\"C:\\Program Files\\Git\\bin\\bash.exe\" -lc \"cd /c/Users/david/github/axona-relay && bash harness/win-spawn.sh $i $SEED $NODES $DURATION_MS $OPEN_N $OWNED_N $REGION $BRIDGE\""
+    remote axona-win "powershell -ExecutionPolicy Bypass -File C:\\Users\\david\\github\\axona-relay\\harness\\win-spawn.ps1 -Peer $i -Seed $SEED -Nodes $NODES -DurationMs $DURATION_MS -OpenN $OPEN_N -OwnedN $OWNED_N -Region $REGION -Bridge $BRIDGE"
   done
 }
 
@@ -96,7 +94,14 @@ sleep "$SETTLE"
 echo "── collecting remote ledgers"
 scp -q "m1:~/Documents/claude/axona-relay/harness/results/sidecar-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || echo "  m1: none collected"
 scp -q "axona-linux:~/Documents/claude/axona-relay/harness/results/sidecar-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || echo "  axona-linux: none collected"
-scp -q "axona-win:C:/Users/david/github/axona-relay/harness/results/sidecar-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || echo "  axona-win: none collected"
+# Windows collection by ssh-cat — scp chokes on the drive-letter colon.
+for i in $(seq 0 $(( NODES - 1 ))); do
+  f="sidecar-$SEED-$i.jsonl"
+  [ -f "$RESULTS/$f" ] && continue
+  printf 'cat /c/Users/david/github/axona-relay/harness/results/%s 2>/dev/null\n' "$f" \
+    | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' > "$RESULTS/$f" 2>/dev/null
+  [ -s "$RESULTS/$f" ] || rm -f "$RESULTS/$f"
+done
 ls "$RESULTS"/sidecar-$SEED-*.jsonl 2>/dev/null | sed 's/^/  /'
 
 echo "── analyzer"

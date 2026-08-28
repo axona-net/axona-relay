@@ -1,0 +1,5 @@
+[sidecar 1] plan
+[sidecar 1] connecting wss://testnet.axona.net
+[sidecar 1] connected; author e2f8d71d4336
+[sidecar 1] coord bootstrap
+[sidecar 1] subscribed to 6 topics; entering publish loop

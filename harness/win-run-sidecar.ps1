@@ -26,6 +26,8 @@ $env:LEDGER_DIR = 'harness/results'
 if ($OpenN -gt 0) { $env:OPEN_N = "$OpenN" }
 if ($OwnedN -gt 0) { $env:OWNED_N = "$OwnedN" }
 New-Item -ItemType Directory -Force -Path "$repo\harness\results" | Out-Null
-# Synchronous: the task session owns node for the whole window.
-& node harness/sidecar.mjs --peer $Peer 2> "$repo\harness\results\sidecar-$Seed-$Peer.out" 1> "$repo\harness\results\sidecar-$Seed-$Peer.stdout.log"
+# Synchronous: the task session owns node for the whole window. Redirects go
+# through cmd for RAW BYTES — PowerShell's own 2> writes UTF-16 and doubles
+# every artifact's size while breaking naive greps.
+cmd /c "node harness\sidecar.mjs --peer $Peer 2> harness\results\sidecar-$Seed-$Peer.out 1> harness\results\sidecar-$Seed-$Peer.stdout.log"
 exit 0
