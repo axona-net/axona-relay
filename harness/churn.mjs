@@ -28,8 +28,12 @@ const ARM_RELAY = process.env.ARM_RELAY === '1';
 // remote unix hosts are driven over ssh with the proven launch shapes.
 const HOST_CENSUS = {
   m4:   'COUNT=0; for p in $(pgrep -f "src/index.js"); do [ "$(ps -o comm= -p $p | xargs basename 2>/dev/null)" = node ] && COUNT=$((COUNT+1)); done; echo $COUNT',
-  m1:   'ssh -o ConnectTimeout=10 m1 \'pgrep -f "src/index.js" | wc -l\'',
-  'axona-linux': 'ssh -o ConnectTimeout=10 axona-linux \'pgrep -fc "node src/index.js"\'',
+  // m1 is an Apple-silicon Mac: relays run under caffeinate, so a plain
+  // pgrep|wc DOUBLE-counts (node + its caffeinate twin). Count comm=node only.
+  m1:   'ssh -o ConnectTimeout=10 m1 \'c=0; for p in $(pgrep -f "src/index.js"); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] && c=$((c+1)); done; echo $c\'',
+  // linux has no caffeinate; node\'s comm reads as its thread name, so match
+  // the exe via /proc/PID/exe rather than comm.
+  'axona-linux': 'ssh -o ConnectTimeout=10 axona-linux \'n=0; for p in $(pgrep -f "src/index.js"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) n=$((n+1));; esac; done; echo $n\'',
   // relay-filtered via the committed helper — never counts the harness sidecars
   // that also run as node.exe (a plain tasklist node.exe count would over-read).
   'axona-win':   'printf \'/c/Users/david/github/axona-relay/harness/win-relay.sh census\\n\' | ssh -o ConnectTimeout=15 axona-win \'"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe" -s\'',

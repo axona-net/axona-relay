@@ -117,6 +117,6 @@ ls "$RESULTS"/sidecar-$SEED-*.jsonl 2>/dev/null | sed 's/^/  /'
 echo "── analyzer"
 node harness/analyze.mjs --dir "$RESULTS" --seed "$SEED" --nodes "$NODES" \
   --open-n "$OPEN_N" --owned-n "$OWNED_N" --duration-ms "$DURATION_MS" \
-  --offsets '{"m4":0,"m1":108,"axona-linux":102,"axona-win":104}' \
+  --offsets '{"m4":0,"m1":136,"axona-linux":182,"axona-win":89}' \
   --out "$RESULTS/findings-$SEED.jsonl"
 echo "── done (analyzer exit $?)"

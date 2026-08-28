@@ -57,10 +57,12 @@ case "$HOST" in
   m4)
     RELAY_DIR="/Users/croqueteer/Documents/claude/axona-relay"
     NODE_BIN="$(command -v node)"
-    census() {   # live relay nodes = src/index.js procs whose comm is NOT caffeinate
+    census() {   # live relays = src/index.js procs whose comm is exactly `node`.
+      # NOT "!= caffeinate": that also counts the caffeinate WRAPPER's twin and
+      # transient ssh/bash procs whose args contain src/index.js (the v3 +1 bug).
       local c=0 p
       for p in $(pgrep -f "src/index.js" 2>/dev/null); do
-        [ "$(ps -p "$p" -o comm= 2>/dev/null)" != caffeinate ] && c=$((c+1))
+        [ "$(basename "$(ps -p "$p" -o comm= 2>/dev/null)" 2>/dev/null)" = node ] && c=$((c+1))
       done
       echo "$c"
     }
@@ -71,29 +73,39 @@ case "$HOST" in
             >> "relay-logs/relay-churn-$(date +%s)-$$.log" 2>&1 </dev/null &
         disown )
     }
-    stop_one() {   # kill the OLDEST relay node (lowest-pid src/index.js, comm=node)
+    stop_one() {   # kill the OLDEST relay node (lowest-pid comm=node src/index.js)
       local p pick=""
       for p in $(pgrep -f "src/index.js" 2>/dev/null | sort -n); do
-        [ "$(ps -p "$p" -o comm= 2>/dev/null)" = caffeinate ] && continue
-        pick="$p"; break
+        [ "$(basename "$(ps -p "$p" -o comm= 2>/dev/null)" 2>/dev/null)" = node ] && { pick="$p"; break; }
       done
       [ -n "$pick" ] && kill "$pick" 2>/dev/null
       return 0
     }
     ;;
 
-  m1|axona-linux)
-    if [ "$HOST" = m1 ]; then
-      NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
-    else
-      NODE_BIN='$HOME/bin/node'   # expanded remote-side, single-quoted here
-    fi
-    census() { sshw 15 "$HOST" 'pgrep -f "src/index.js" | wc -l' | tr -d '[:space:]'; }
+  m1)
+    # Apple-silicon Mac → relays run under caffeinate, so a naive
+    # `pgrep|wc` DOUBLE-counts (node + its caffeinate twin). Count comm=node.
+    NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
+    census() { sshw 15 m1 'c=0; for p in $(pgrep -f "src/index.js"); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] && c=$((c+1)); done; echo $c' | tr -d '[:space:]'; }
     start_one() {
-      sshw 25 "$HOST" "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo started" >/dev/null
+      sshw 25 m1 "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 caffeinate -i nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo ok" >/dev/null
     }
     stop_one() {
-      sshw 15 "$HOST" 'p=$(pgrep -f "src/index.js" | sort -n | head -1); [ -n "$p" ] && kill $p 2>/dev/null; echo stopped' >/dev/null
+      sshw 15 m1 'for p in $(pgrep -f "src/index.js" | sort -n); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] && { kill $p 2>/dev/null; break; }; done; echo ok' >/dev/null
+    }
+    ;;
+
+  axona-linux)
+    # Linux Mint → no caffeinate; identify relays by their exe (comm reads as
+    # the node thread name "MainThread", so match on /proc/PID/exe → node).
+    NODE_BIN='$HOME/bin/node'   # expanded remote-side, single-quoted here
+    census() { sshw 15 axona-linux 'n=0; for p in $(pgrep -f "src/index.js"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) n=$((n+1));; esac; done; echo $n' | tr -d '[:space:]'; }
+    start_one() {
+      sshw 25 axona-linux "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo ok" >/dev/null
+    }
+    stop_one() {
+      sshw 15 axona-linux 'for p in $(pgrep -f "src/index.js" | sort -n); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) kill $p 2>/dev/null; break;; esac; done; echo ok' >/dev/null
     }
     ;;
 

@@ -26,14 +26,15 @@ if (!Number.isInteger(DURATION) || DURATION <= 0) { console.error('gen-arm-plan:
 // action, so a mid-run drift is refused, never forced past the floor.
 const FLOOR_PCT = 95;
 const HOSTS = [
-  { host: 'm4', size: 26 },
-  { host: 'm1', size: 24 },
-  { host: 'axona-linux', size: 8 },
+  { host: 'm4', size: 25 },
+  { host: 'm1', size: 12 },
+  { host: 'axona-linux', size: 5 },
   { host: 'axona-win', size: 20 },
 ].map((h) => ({
   ...h,
   // killable = an abrupt single-relay kill keeps the host at/above its 95%
-  // floor. m4 25/26, m1 23/24, win 19/20 clear it; linux 7/8 (87.5%) does not.
+  // floor. Only m4 (24/25 = 96%) and win (19/20 = 95%) clear it; m1 (11/12 =
+  // 91.7%) and linux (4/5 = 80%) cannot lose one — rolls only on those two.
   killable: (h.size - 1) >= Math.ceil((FLOOR_PCT / 100) * h.size),
 }));
 let s = (DURATION % 2147483647) || 1;
