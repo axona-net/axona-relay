@@ -6,16 +6,36 @@
 //   sidecar-restart  — kill a LOCAL sidecar process and relaunch it with the
 //                      same env; its since:'all' resubscription then exercises
 //                      the replay / eventual-delivery path. Validation-safe.
-//   relay-kill / relay-roll — Arm A/B ONLY. Refused here by design: touching
-//                      a relay is fleet churn under the §6 schedule and runs
-//                      inside an arm with David's gate-3/4 sanction, never in
-//                      a build validation.
+//   relay-roll  — §6 rolling restart: replace ONE relay on a host, heir-
+//                 preserving (start-then-stop; census never drops). macOS/
+//                 Linux via roll-fleet's one-slot form; Windows relays are
+//                 windows-fleet's, respawned by schtasks. Gated: ARM_RELAY=1.
+//   relay-kill  — §6 abrupt kill+restart of one relay per host, ≥3min heir
+//                 window. Gated: ARM_RELAY=1.
+// Both are REFUSED unless ARM_RELAY=1 (David's gate-3 Arm-A sanction), and
+// BOTH verify the host census would stay ≥ the §6 floor (95%) before acting;
+// a floor breach is refused-and-ledgered, never forced.
 //
 //   SEED=7 PLAN='[{"atMs":300000,"kind":"sidecar-restart","peerIdx":0,"env":{...}}]' \
 //     LEDGER_DIR=harness/results node harness/churn.mjs
 // =============================================================================
 import { Ledger } from './lib/ledger.mjs';
 import { execSync, spawn } from 'node:child_process';
+
+const ARM_RELAY = process.env.ARM_RELAY === '1';
+// Per-host relay census + one-relay roll/kill, dispatched by host kind. Each
+// returns { ok, census, note }. NONE force past the §6 floor. Windows and the
+// remote unix hosts are driven over ssh with the proven launch shapes.
+const HOST_CENSUS = {
+  m4:   'COUNT=0; for p in $(pgrep -f "src/index.js"); do [ "$(ps -o comm= -p $p | xargs basename 2>/dev/null)" = node ] && COUNT=$((COUNT+1)); done; echo $COUNT',
+  m1:   'ssh -o ConnectTimeout=10 m1 \'pgrep -f "src/index.js" | wc -l\'',
+  'axona-linux': 'ssh -o ConnectTimeout=10 axona-linux \'pgrep -fc "node src/index.js"\'',
+  'axona-win':   'printf \'tasklist //FI "IMAGENAME eq node.exe" | grep -c node.exe\\n\' | ssh -o ConnectTimeout=15 axona-win \'"C:\\\\Program Files\\\\Git\\\\bin\\\\bash.exe" -s\'',
+};
+const censusOf = (host) => {
+  try { return Number(execSync(HOST_CENSUS[host], { shell: '/bin/bash' }).toString().trim()); }
+  catch { return NaN; }
+};
 
 const SEED = Number(process.env.SEED);
 const PLAN = JSON.parse(process.env.PLAN ?? '[]');
@@ -47,9 +67,44 @@ for (const a of PLAN.sort((x, y) => x.atMs - y.atMs)) {
       stdio: ['ignore', 'ignore', 'ignore'] });
     child.unref();
     led.event({ kind: 'churn:sidecar-restart', detail: { peerIdx: a.peerIdx, pid: child.pid, downMs: a.downMs ?? 10_000 } });
+  } else if (a.kind === 'relay-kill' || a.kind === 'relay-roll') {
+    if (!ARM_RELAY) {
+      led.event({ kind: 'churn:refused', detail: { kind: a.kind,
+        note: 'relay churn needs ARM_RELAY=1 (David gate-3 Arm-A sanction)' } });
+      continue;
+    }
+    const host = a.host ?? 'm4';
+    const before = censusOf(host);
+    const floor = Math.ceil((a.floorPct ?? 95) / 100 * (a.hostSize ?? before));
+    // §6 floor guard: refuse if removing one would drop this host below the
+    // 95% census floor. A relay-roll (start replacement FIRST) never dips, so
+    // it is floor-safe by construction; a relay-kill (remove first) must have
+    // headroom. Either way the census is measured, never assumed.
+    if (!Number.isFinite(before)) {
+      led.event({ kind: 'churn:relay-skip', detail: { host, kind: a.kind, note: 'census unreadable' } });
+      continue;
+    }
+    if (a.kind === 'relay-kill' && before - 1 < floor) {
+      led.event({ kind: 'churn:relay-refused-floor', detail: { host, before, floor, note: 'kill would breach §6 census floor' } });
+      continue;
+    }
+    led.event({ kind: `churn:${a.kind}-begin`, detail: { host, census: before, floor, heirMs: a.heirMs ?? 180_000 } });
+    // The live relay roll/kill mechanics per host live in harness/relay-churn.sh
+    // (roll-fleet one-slot on macOS/linux; schtasks respawn on windows). It is
+    // invoked ONLY here, ONLY under ARM_RELAY, and prints the post-action
+    // census as its last line. This driver never SIGKILLs a relay directly —
+    // it delegates to the ritual script, preserving fleet discipline.
+    let after = before;
+    try {
+      const out = execSync(`bash harness/relay-churn.sh ${a.kind} ${host} ${a.heirMs ?? 180_000}`,
+        { shell: '/bin/bash', timeout: (a.heirMs ?? 180_000) + 120_000 }).toString().trim();
+      after = Number(out.split('\n').pop()) || before;
+    } catch (e) {
+      led.event({ kind: 'churn:relay-error', detail: { host, kind: a.kind, err: String(e.message).slice(0, 120) } });
+    }
+    led.event({ kind: `churn:${a.kind}-done`, detail: { host, censusBefore: before, censusAfter: after } });
   } else {
-    led.event({ kind: 'churn:refused', detail: { kind: a.kind,
-      note: 'relay actions run only inside an arm under David gate-3/4 sanction' } });
+    led.event({ kind: 'churn:refused', detail: { kind: a.kind, note: 'unknown action' } });
   }
 }
 led.event({ kind: 'churn:done', detail: {} });
