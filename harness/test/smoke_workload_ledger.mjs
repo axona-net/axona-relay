@@ -49,6 +49,15 @@ console.log('harness workload + ledger smoke\n');
   check('every event inside the window', p.schedule.every((e) => e.atMs < p.durationMs));
 }
 
+// ── regression: tiny node counts must terminate (the nodes=3 spin) ───
+{
+  const p3 = generatePlan({ seed: 9, nodes: 3, durationMs: 600_000, openN: 2, ownedN: 2 });
+  check('nodes=3 generates (no group-builder spin)', p3.topics.length === 4);
+  check('nodes=3 owned groups fit the universe',
+    p3.topics.filter((t) => t.kind === 'owned')
+      .every((t) => t.requiredReaders.length <= 2 && t.requiredReaders.length >= 1));
+}
+
 // ── ledger: three truths, monotonic time, truncation rule ────────────
 {
   const path = `${tmpdir()}/harness-ledger-smoke-${process.pid}.jsonl`;

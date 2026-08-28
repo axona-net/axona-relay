@@ -63,7 +63,13 @@ export function generatePlan({ seed, nodes, openN, ownedN, durationMs }) {
   // Owned topics: one publisher, a seeded subscriber group of >= 3.
   for (let i = 0; i < nOwned; i++) {
     const publisher = pick(r, 0, nodes - 1);
-    const groupSize = pick(r, 3, Math.max(3, Math.floor(nodes / 2)));
+    // Group size is bounded by the universe: at most nodes-1 subscribers
+    // exist besides the publisher. Unbounded, nodes=3 demanded 4 distinct
+    // indices from 3 and the builder spun forever — caught by a probe whose
+    // phase marker showed 'plan' and never 'connecting'.
+    const maxGroup = Math.min(Math.max(3, Math.floor(nodes / 2)), nodes - 1);
+    const minGroup = Math.min(3, nodes - 1);
+    const groupSize = pick(r, minGroup, Math.max(minGroup, maxGroup));
     const group = new Set([publisher]);
     while (group.size < groupSize + 1) group.add(pick(r, 0, nodes - 1));
     group.delete(publisher);
