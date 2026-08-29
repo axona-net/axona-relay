@@ -126,7 +126,7 @@ plan.topics.forEach((t, ti) => {
   myTopics.push({ ti, t, desc, lastSeqSeen: -1, watchLastMono: 0 });
 });
 for (const m of myTopics) {
-  await peer.sub(m.desc, (envp) => {
+  const sh = await peer.sub(m.desc, (envp) => {
     const msg = envp?.message;
     if (msg?.k !== 'load') return;
     m.watchLastMono = Date.now();
@@ -134,6 +134,10 @@ for (const m of myTopics) {
     led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: envp.msgId,
       via: 'watch', payloadHash: sha256(JSON.stringify(msg)) });
   }, { since: 'all' });
+  // topicId <-> (name, kind) map — lets the analyzer group relay-log root events
+  // (which key on the 12-hex topicId) by open vs owned, to test whether owned
+  // topics form more empty sub-terminal roots (the cold-hint hypothesis).
+  led.event({ kind: 'topicmap', detail: { name: m.t.name, kind: m.t.kind, topicId: sh?.topicId ?? null } });
 }
 led.event({ kind: 'subscribed', detail: { topics: myTopics.length } });
 phase(`subscribed to ${myTopics.length} topics; entering publish loop`);
