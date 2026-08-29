@@ -40,8 +40,12 @@ trap 'rm -f "$LOCK"' EXIT
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "── probe $TS  seed=$SEED arm=$ARM  $((DURATION_MS/60000))min workload, churn-free"
 
+# COORD_WAIT_MS must outlast the slowest host's connect+announce, or readers
+# fall back to a wrong owner and manufacture #393 strands (the 30s window did
+# exactly that — the Windows box announced late). READINESS_MS can be forced to
+# 0 (PROBE_READINESS_MS=0) for the barrier-off discriminator run.
 NO_CHURN=1 SEED="$SEED" NODES="$NODES" DURATION_MS="$DURATION_MS" OPEN_N="$OPEN_N" OWNED_N="$OWNED_N" \
-  HEAD_SWEEP_MS=30000 READINESS_MS=20000 COORD_WAIT_MS=30000 \
+  HEAD_SWEEP_MS=30000 READINESS_MS="${PROBE_READINESS_MS:-20000}" COORD_WAIT_MS="${PROBE_COORD_WAIT_MS:-90000}" \
   bash harness/launch.sh > "$RESULTS/probe-$SEED.out" 2>&1
 
 if [ ! -f "$RESULTS/summary-$SEED.json" ]; then

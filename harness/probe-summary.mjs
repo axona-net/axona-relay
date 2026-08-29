@@ -12,6 +12,7 @@ const line = {
   ts, arm,
   ops: s.ops, owed,
   stranded: s.missing, strandedSteady: s.missingSteady, strandedStartup: s.missingStartup,
+  ownerUnresolved: s.ownerUnresolved,
   strandedPct: owed ? +((100 * s.missing) / owed).toFixed(1) : null,
   fullSetPct: s.ops ? +((100 * s.fullSetComplete) / s.ops).toFixed(1) : null,
   splitRoot: f['split-root'] || 0,
