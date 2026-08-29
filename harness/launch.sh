@@ -89,7 +89,10 @@ if [ "${NO_CHURN:-0}" = "1" ]; then
 elif [ "${ARM_RELAY:-0}" = "1" ]; then
   echo "── churn driver: §6 RELAY CHURN SCHEDULE (Arm run, ARM_RELAY=1)"
   ARM_PLAN=$(node harness/gen-arm-plan.mjs "$DURATION_MS")
-  ARM_RELAY=1 SEED=$SEED HOST=m4 REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=$RESULTS \
+  # ARM_STACK flows through churn.mjs → relay-churn.sh so every churn-replacement
+  # relay comes up stack-ON (Arm B). In Arm A it is 0 and replacements are
+  # byte-identical stack-off relays. execSync inherits this env into relay-churn.sh.
+  ARM_RELAY=1 ARM_STACK=${ARM_STACK:-0} SEED=$SEED HOST=m4 REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=$RESULTS \
     PLAN="$ARM_PLAN" node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
   echo "  churn driver pid $!"
 else
