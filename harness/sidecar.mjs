@@ -22,6 +22,7 @@ import '../src/polyfill.js';
 import { connectPeer } from '../src/ops.js';
 import { generatePlan, planCanonical } from './lib/workload.mjs';
 import { Ledger, sha256 } from './lib/ledger.mjs';
+import { appendFileSync } from 'node:fs';
 
 const env = (k, d) => process.env[k] ?? d;
 // --peer N in argv mirrors PEER_IDX and — the real point — puts the peer
@@ -51,6 +52,24 @@ const { peer, author } = await connectPeer({ region: REGION, bridge: BRIDGE });
 phase(`connected; author ${author.authorId.slice(0, 12)}`);
 const led = new Ledger(`${LEDGER_DIR}/sidecar-${SEED}-${PEER_IDX}.jsonl`,
   { host: HOST, os: OS, peerIdx: PEER_IDX, author: author.authorId });
+
+// TRACE=1: capture the smoking-gun kernel events for the owned-topic install
+// trace — undeliverable, replay drops, root instability — filtered so the file
+// stays small. Kernel log API is peer.onLog(level, handler), registered here.
+if (env('TRACE') === '1') {
+  const KLOG = `${LEDGER_DIR}/klog-${SEED}-${PEER_IDX}.jsonl`;
+  const K = /undeliver|replayup|root-formed|root-transition|root-evicted|root-claimed|singleton-root|empty-root|upstream-unpinned/i;
+  const kt0 = Date.now();
+  for (const lvl of ['info', 'warn', 'error']) {
+    try {
+      peer.onLog(lvl, (...a) => {
+        let s; try { s = JSON.stringify(a); } catch { return; }
+        if (K.test(s)) { try { appendFileSync(KLOG, JSON.stringify({ ms: Date.now() - kt0, lvl, a }) + '\n'); } catch { /* */ } }
+      });
+    } catch { /* older kernel */ }
+  }
+  phase('TRACE on');
+}
 led.event({ kind: 'start', detail: { planHash, seed: SEED, nodes: NODES, durationMs: DURATION_MS, bridge: BRIDGE } });
 
 const D = (name) => ({ region: REGION, name });

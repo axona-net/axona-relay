@@ -42,7 +42,7 @@ export function regionToDescriptor(region = 'eagle') {
  * The returned `ctx` carries `regionName` (the structured-topic region) and a
  * fresh ephemeral `author` to sign publishes with.
  */
-export async function connectPeer({ region = 'eagle', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor } = {}) {
+export async function connectPeer({ region = 'eagle', bridge = DEFAULT_BRIDGE, readyTimeoutSec = 30, onError, author: providedAuthor, onLog } = {}) {
   const { name: regionName, center } = regionToDescriptor(region);
   // A caller may supply a DURABLE author (stable Author ID); it defaults to a
   // throwaway. There is deliberately NO way to supply a transport identity —
@@ -51,7 +51,7 @@ export async function connectPeer({ region = 'eagle', bridge = DEFAULT_BRIDGE, r
   // which made the peer correlatable across every restart. Removed 2026-07-25.
   const identity = await createEphemeralIdentity({ lat: center.lat, lng: center.lng });
   const author   = providedAuthor   || await createEphemeralAuthor();
-  const { peer, transport } = createRelay({ bridgeUrl: bridge, identity, region: center, onLog: () => {} });
+  const { peer, transport } = createRelay({ bridgeUrl: bridge, identity, region: center, onLog: onLog ?? (() => {}) });
   if (onError) peer.onError?.((e) => onError(e));
   await startRelay({ peer, transport });
   const readyBy = Date.now() + readyTimeoutSec * 1000;
