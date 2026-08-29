@@ -40,6 +40,16 @@ trap 'rm -f "$LOCK"' EXIT
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 echo "── probe $TS  seed=$SEED arm=$ARM  $((DURATION_MS/60000))min workload, churn-free"
 
+# Clear this seed's ledgers on EVERY host first. The ledger APPENDS, so a re-run
+# with the same seed concatenates onto the previous run and corrupts the join
+# (the same topic/seq from two runs, observations bleeding across). Fixed-seed
+# comparability REQUIRES a clean slate each cycle — local and remote.
+rm -f "$RESULTS"/sidecar-"$SEED"-*.jsonl "$RESULTS"/findings-"$SEED".jsonl "$RESULTS"/summary-"$SEED".json 2>/dev/null
+ssh -o ConnectTimeout=8 m1 "rm -f ~/Documents/claude/axona-relay/harness/results/sidecar-$SEED-*.jsonl" 2>/dev/null || true
+ssh -o ConnectTimeout=8 axona-linux "rm -f ~/Documents/claude/axona-relay/harness/results/sidecar-$SEED-*.jsonl" 2>/dev/null || true
+printf 'rm -f /c/Users/david/github/axona-relay/harness/results/sidecar-%s-*.jsonl\n' "$SEED" \
+  | ssh -o ConnectTimeout=10 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' 2>/dev/null || true
+
 # COORD_WAIT_MS must outlast the slowest host's connect+announce, or readers
 # fall back to a wrong owner and manufacture #393 strands (the 30s window did
 # exactly that — the Windows box announced late). READINESS_MS can be forced to
