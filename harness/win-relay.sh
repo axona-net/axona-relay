@@ -33,9 +33,14 @@ case "${1:-}" in
   start)
     mkdir -p relay-logs
     ts=$(date +%s)
+    # Arm B (ARM_STACK=1): bake the four connection-quality env vars into the
+    # schtasks cmd so the relay comes up stack-on. Empty in Arm A. Each `set`
+    # needs its own trailing `&` in cmd's serial syntax.
+    arm=""
+    [ "${ARM_STACK:-0}" = 1 ] && arm="set RELAY_SYNAPTOME_MAINTAIN=1& set RELAY_ADMISSION_GATE=1& set RELAY_ATTEMPT_GUARD=1& set RELAY_PRESENCE=1& "
     # schtasks /TR runs a cmd that cd's, sets env, and starts the relay,
     # redirecting all output to a per-start log. Runs in its own logon session.
-    tr="cmd /c cd /d C:\\Users\\david\\github\\axona-relay & set RELAY_REGION=$REGION& set BRIDGE_URL=$BRIDGE& set RELAY_TUI=0& node src\\index.js >> relay-logs\\relay-churn-$ts.log 2>&1"
+    tr="cmd /c cd /d C:\\Users\\david\\github\\axona-relay & set RELAY_REGION=$REGION& set BRIDGE_URL=$BRIDGE& set RELAY_TUI=0& ${arm}node src\\index.js >> relay-logs\\relay-churn-$ts.log 2>&1"
     powershell -NoProfile -Command "schtasks /Create /F /TN axona-relay-churn-$ts /SC ONCE /ST 00:00 /TR '$tr' | Out-Null; schtasks /Run /TN axona-relay-churn-$ts | Out-Null"
     echo started
     ;;

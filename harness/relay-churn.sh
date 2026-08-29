@@ -34,6 +34,20 @@ HEIR_MS="${3:-180000}"
 REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 
+# Arm B (ARM_STACK=1): every replacement relay comes up with the four
+# connection-quality env vars set (relay.js ARM_ENVS). Empty in Arm A, so a
+# stack-off replacement is byte-identical to a cold-started stack-off relay.
+# assertArmedModules() makes this self-proving: a relay whose requested module
+# fails to land CRASHES on boot rather than joining half-armed, so a mis-arm
+# aborts the roll instead of silently confounding the run. The unix start_one
+# forms leave ARM_ENV unquoted on purpose (word-splitting into env assignments);
+# Windows carries ARM_STACK through to win-relay.sh, which bakes the `set` lines.
+if [ "${ARM_STACK:-0}" = 1 ]; then
+  ARM_ENV='RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 RELAY_PRESENCE=1'
+else
+  ARM_ENV=''
+fi
+
 # ssh with a hard local watchdog: run in the background, kill it if it outlives
 # the budget, always return. Guarantees this script cannot wedge the driver.
 sshw() {  # <timeoutSec> <host> <remote-command-string>
@@ -68,7 +82,7 @@ case "$HOST" in
     }
     start_one() {
       ( cd "$RELAY_DIR" && mkdir -p relay-logs
-        RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
+        env $ARM_ENV RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
           caffeinate -i nohup "$NODE_BIN" src/index.js \
             >> "relay-logs/relay-churn-$(date +%s)-$$.log" 2>&1 </dev/null &
         disown )
@@ -89,7 +103,7 @@ case "$HOST" in
     NODE_BIN="/opt/homebrew/Cellar/node/26.6.0/bin/node"
     census() { sshw 15 m1 'c=0; for p in $(pgrep -f "src/index.js"); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] && c=$((c+1)); done; echo $c' | tr -d '[:space:]'; }
     start_one() {
-      sshw 25 m1 "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 caffeinate -i nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo ok" >/dev/null
+      sshw 25 m1 "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && $ARM_ENV RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 caffeinate -i nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo ok" >/dev/null
     }
     stop_one() {
       sshw 15 m1 'for p in $(pgrep -f "src/index.js" | sort -n); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] && { kill $p 2>/dev/null; break; }; done; echo ok' >/dev/null
@@ -102,7 +116,7 @@ case "$HOST" in
     NODE_BIN='$HOME/bin/node'   # expanded remote-side, single-quoted here
     census() { sshw 15 axona-linux 'n=0; for p in $(pgrep -f "src/index.js"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) n=$((n+1));; esac; done; echo $n' | tr -d '[:space:]'; }
     start_one() {
-      sshw 25 axona-linux "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo ok" >/dev/null
+      sshw 25 axona-linux "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && $ARM_ENV RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 nohup $NODE_BIN src/index.js >> relay-logs/relay-churn-\$(date +%s).log 2>&1 </dev/null & echo ok" >/dev/null
     }
     stop_one() {
       sshw 15 axona-linux 'for p in $(pgrep -f "src/index.js" | sort -n); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) kill $p 2>/dev/null; break;; esac; done; echo ok' >/dev/null
@@ -114,7 +128,7 @@ case "$HOST" in
     # harness sidecars out of census/stop; schtasks start survives ssh).
     WR='/c/Users/david/github/axona-relay/harness/win-relay.sh'
     census()   { winw 15 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR census" | tr -d '[:space:]'; }
-    start_one(){ winw 20 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR start" >/dev/null; }
+    start_one(){ winw 20 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=${ARM_STACK:-0} $WR start" >/dev/null; }
     stop_one() { winw 15 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR stop"  >/dev/null; }
     ;;
 
