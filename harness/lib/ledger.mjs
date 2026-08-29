@@ -38,9 +38,13 @@ export class Ledger {
     }) + '\n');
   }
 
-  /** Truth 1 — written BEFORE the publish API call. */
-  intent({ topic, topicSeq, nonce, payloadHash }) {
-    this._emit({ t: 'intent', topic, topicSeq, nonce, payloadHash, author: this.id.author });
+  /** Truth 1 — written BEFORE the publish API call. `descriptor` records the
+   *  exact { region, name, owner, write } passed to pub, so a silent
+   *  mis-addressing (wrong owner => different topicId, confirmed api — the #393
+   *  class) is caught before it reads as a strand. */
+  intent({ topic, topicSeq, nonce, payloadHash, descriptor }) {
+    this._emit({ t: 'intent', topic, topicSeq, nonce, payloadHash,
+      descriptor: descriptor ?? null, author: this.id.author });
   }
 
   /** Truth 2 — the kernel's answer, written on API completion (or throw). */
@@ -63,9 +67,31 @@ export class Ledger {
     this._emit({ t: 'pullHead', topic, headSeq: headSeq ?? null, headMsgId: headMsgId ?? null });
   }
 
-  /** Watch liveness sample (wedged-watch detector input). */
-  watchState({ topic, buffered, total, lastArrivalMono }) {
-    this._emit({ t: 'watchState', topic, buffered, total, lastArrivalMono: lastArrivalMono ?? null });
+  /** Watch liveness sample (wedged-watch detector input). `buffered` is the
+   *  kernel watch-buffer depth if the peer exposes it, else null — NEVER a
+   *  fake 0. `silentMs` is elapsed since the last watch arrival: the real
+   *  wedged-watch signal on a peer whose sub is a direct callback. */
+  watchState({ topic, buffered, total, lastArrivalMono, silentMs }) {
+    this._emit({ t: 'watchState', topic, buffered: buffered ?? null, total,
+      lastArrivalMono: lastArrivalMono ?? null, silentMs: silentMs ?? null });
+  }
+
+  /** Participant connection set + per-topic role snapshot (the null this run
+   *  left, resolved). mesh = { synaptomeSize, peers, state }; roles is the raw
+   *  axonRoles array [{ topic, isRoot }] keyed on topicId — count is usable now,
+   *  a name join waits on a kernel topicId export. */
+  connSnapshot({ mesh, roles }) {
+    this._emit({ t: 'conn', mesh: mesh ?? null,
+      roles: Array.isArray(roles) ? roles.length : null,
+      rootCount: Array.isArray(roles) ? roles.filter((r) => r?.isRoot).length : null });
+  }
+
+  /** Cross-reader head sample (splitHead detector input): the newest seq +
+   *  msgId this reader sees for the topic, taken in a synchronized full sweep
+   *  so two readers' heads for the same topic are comparable. */
+  head({ topic, descriptor, headSeq, headMsgId }) {
+    this._emit({ t: 'head', topic, descriptor: descriptor ?? null,
+      headSeq: headSeq ?? null, headMsgId: headMsgId ?? null });
   }
 
   /** Clock-offset sample against a reference (calibration + analyzer join). */

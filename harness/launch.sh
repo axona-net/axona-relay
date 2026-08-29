@@ -29,7 +29,7 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 RESULTS=harness/results
 mkdir -p "$RESULTS"
 
-COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results"
+COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-60000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000}"
 
 launch_local() {  # peerIdx...
   for i in "$@"; do
@@ -84,18 +84,21 @@ launch_win 6 7
 # Churn: ARM_RELAY=1 runs the §6 relay-churn schedule (Arm A/B); otherwise the
 # validation plan (one local sidecar restart). The relay actions are gated
 # inside churn.mjs on ARM_RELAY too — belt and braces.
-if [ "${ARM_RELAY:-0}" = "1" ]; then
+if [ "${NO_CHURN:-0}" = "1" ]; then
+  echo "── no churn (probe mode: pure pub/sub on the stable fleet)"
+elif [ "${ARM_RELAY:-0}" = "1" ]; then
   echo "── churn driver: §6 RELAY CHURN SCHEDULE (Arm run, ARM_RELAY=1)"
   ARM_PLAN=$(node harness/gen-arm-plan.mjs "$DURATION_MS")
   ARM_RELAY=1 SEED=$SEED HOST=m4 REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=$RESULTS \
     PLAN="$ARM_PLAN" node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
+  echo "  churn driver pid $!"
 else
   echo "── churn driver (validation plan: restart local peer 0 mid-window)"
   SEED=$SEED HOST=m4 LEDGER_DIR=$RESULTS \
     PLAN="[{\"atMs\":$(( DURATION_MS / 2 )),\"kind\":\"sidecar-restart\",\"peerIdx\":0,\"env\":{\"HOST\":\"m4\",\"OS\":\"darwin\",\"NODES\":\"$NODES\",\"SEED\":\"$SEED\",\"DURATION_MS\":\"$(( DURATION_MS / 2 - 20000 ))\",\"OPEN_N\":\"$OPEN_N\",\"OWNED_N\":\"$OWNED_N\",\"REGION\":\"$REGION\",\"BRIDGE\":\"$BRIDGE\",\"LEDGER_DIR\":\"harness/results\"}}]" \
     node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
+  echo "  churn driver pid $!"
 fi
-echo "  churn driver pid $!"
 
 SETTLE=$(( DURATION_MS / 1000 + 120 ))
 echo "── waiting ${SETTLE}s (window + settle)"
@@ -118,5 +121,6 @@ echo "── analyzer"
 node harness/analyze.mjs --dir "$RESULTS" --seed "$SEED" --nodes "$NODES" \
   --open-n "$OPEN_N" --owned-n "$OWNED_N" --duration-ms "$DURATION_MS" \
   --offsets '{"m4":0,"m1":136,"axona-linux":182,"axona-win":89}' \
-  --out "$RESULTS/findings-$SEED.jsonl"
+  --out "$RESULTS/findings-$SEED.jsonl" \
+  --summary-out "$RESULTS/summary-$SEED.json"
 echo "── done (analyzer exit $?)"

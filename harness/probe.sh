@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+# =============================================================================
+# harness/probe.sh — ONE instrumented pub/sub probe cycle.
+#
+# A short, churn-free, FIXED-workload run of the instrumented harness, then a
+# compact health line appended to harness/results/probe-log.jsonl. Fired every
+# ~15 minutes by the cadence; it measures whatever the fleet is currently armed
+# to. The seed is fixed so the workload (topic map + schedule) is identical
+# every cycle — only the network's health varies, which is the whole point.
+#
+#   ARM=A bash harness/probe.sh        # A = connection-quality stack OFF
+#   ARM=B bash harness/probe.sh        # B = stack ON (after the fleet is armed)
+#
+# A lock skips a cycle if the previous one is still running (a 15-min cadence
+# over an ~12-min probe leaves little overlap margin).
+# =============================================================================
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+SEED="${PROBE_SEED:-700}"                    # FIXED — identical workload each cycle
+NODES="${PROBE_NODES:-8}"
+DURATION_MS="${PROBE_DURATION_MS:-480000}"   # 8-min workload (+~2min settle, fits 15)
+OPEN_N="${PROBE_OPEN_N:-15}"
+OWNED_N="${PROBE_OWNED_N:-8}"
+ARM="${ARM:-A}"                              # label only; the fleet's arm is what it is
+RESULTS=harness/results
+LOG="$RESULTS/probe-log.jsonl"
+LOCK="$RESULTS/.probe.lock"
+mkdir -p "$RESULTS"
+
+# Lock: skip if a probe is still running (stale lock > 20min is reaped).
+if [ -f "$LOCK" ]; then
+  if [ "$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || echo 0) ))" -lt 1200 ]; then
+    echo "probe: previous cycle still running (lock held) — skipping"; exit 0
+  fi
+fi
+echo $$ > "$LOCK"
+trap 'rm -f "$LOCK"' EXIT
+
+TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+echo "── probe $TS  seed=$SEED arm=$ARM  $((DURATION_MS/60000))min workload, churn-free"
+
+NO_CHURN=1 SEED="$SEED" NODES="$NODES" DURATION_MS="$DURATION_MS" OPEN_N="$OPEN_N" OWNED_N="$OWNED_N" \
+  HEAD_SWEEP_MS=30000 READINESS_MS=20000 COORD_WAIT_MS=30000 \
+  bash harness/launch.sh > "$RESULTS/probe-$SEED.out" 2>&1
+
+if [ ! -f "$RESULTS/summary-$SEED.json" ]; then
+  echo "probe: analyzer produced no summary — see $RESULTS/probe-$SEED.out" >&2
+  exit 1
+fi
+node harness/probe-summary.mjs "$RESULTS/summary-$SEED.json" "$TS" "$ARM" "$LOG"

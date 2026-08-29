@@ -119,6 +119,17 @@ for (const m of myTopics) {
 led.event({ kind: 'subscribed', detail: { topics: myTopics.length } });
 phase(`subscribed to ${myTopics.length} topics; entering publish loop`);
 
+// ── readiness barrier (Aster) ────────────────────────────────────────
+// Settle so subscriptions install before the measured window opens, then mark
+// the boundary. Publishes and observations before measure-start are STARTUP and
+// the analyzer keeps them separate from steady-state losses, so a startup
+// control-plane race is not masked into the headline number. A full
+// authoritative-root install confirmation needs kernel introspection we do not
+// have yet; this time-boxed settle is the honest proxy.
+const READINESS_MS = Number(env('READINESS_MS', 15_000));
+await sleep(READINESS_MS);
+led.event({ kind: 'measure-start', detail: { readinessMs: READINESS_MS } });
+
 // ── publish loop: my slice of the schedule ───────────────────────────
 const mine = plan.schedule.filter((e) => e.publisher === PEER_IDX);
 led.event({ kind: 'plan-slice', detail: { events: mine.length } });
@@ -131,7 +142,7 @@ const t0 = Date.now();
     const desc = t.kind === 'owned' ? { ...D(t.name), owner: author.authorId, write: 'owner' } : D(t.name);
     const nonce = nonceFor(e.topic, e.seq);
     const body = { v: 1, k: 'load', seed: SEED, topic: t.name, seq: e.seq, nonce, from: PEER_IDX };
-    led.intent({ topic: t.name, topicSeq: e.seq, nonce, payloadHash: sha256(JSON.stringify(body)) });
+    led.intent({ topic: t.name, topicSeq: e.seq, nonce, payloadHash: sha256(JSON.stringify(body)), descriptor: desc });
     try {
       const msgId = await peer.pub(desc, body, { signWith: author });
       led.api({ topic: t.name, topicSeq: e.seq, nonce, confirmed: true, msgId });
@@ -141,26 +152,48 @@ const t0 = Date.now();
   }
 })();
 
-// ── samplers: pull heads, watch state, resources ─────────────────────
+// ── samplers ─────────────────────────────────────────────────────────
 const samplers = [];
+const SWEEP_CAP = 6;   // concurrent pulls per head-sweep batch
+// Head sweep (splitHead detector input): every reader pulls the head of EVERY
+// topic it holds, so two readers' heads for the same topic land in one window
+// and are comparable. The old sampler pulled ONE RANDOM topic per tick, so
+// readers never lined up and split-root was unobservable — that is why Arm A
+// had zero split-root rows. Also feeds delivery accounting via observe(pull).
 samplers.push(setInterval(async () => {
-  const m = myTopics[Math.floor(Math.random() * myTopics.length)];
-  if (!m) return;
-  try {
-    const head = await peer.pull(null, { topic: m.desc, timeoutMs: 15_000 });
-    const msg = head?.message;
-    led.pullHead({ topic: m.t.name, headSeq: Number.isInteger(msg?.seq) ? msg.seq : null, headMsgId: head?.msgId ?? null });
-    if (Number.isInteger(msg?.seq)) {
-      led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: head.msgId,
-        via: 'pull', payloadHash: sha256(JSON.stringify(msg)) });
-    }
-  } catch { led.pullHead({ topic: m.t.name, headSeq: null, headMsgId: null }); }
-}, 20_000));
-samplers.push(setInterval(() => {
-  for (const m of myTopics) {
-    led.watchState({ topic: m.t.name, buffered: 0, total: m.lastSeqSeen + 1,
-      lastArrivalMono: m.watchLastMono ? m.watchLastMono - t0 : null });
+  for (let i = 0; i < myTopics.length; i += SWEEP_CAP) {
+    await Promise.all(myTopics.slice(i, i + SWEEP_CAP).map(async (m) => {
+      try {
+        const head = await peer.pull(null, { topic: m.desc, timeoutMs: 8_000 });
+        const msg = head?.message;
+        led.head({ topic: m.t.name, descriptor: m.desc,
+          headSeq: Number.isInteger(msg?.seq) ? msg.seq : null, headMsgId: head?.msgId ?? null });
+        if (Number.isInteger(msg?.seq)) {
+          led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: head.msgId,
+            via: 'pull', payloadHash: sha256(JSON.stringify(msg)) });
+        }
+      } catch { led.head({ topic: m.t.name, descriptor: m.desc, headSeq: null, headMsgId: null }); }
+    }));
   }
+}, Number(env('HEAD_SWEEP_MS', 60_000))));
+// State sweep: honest watch liveness + the participant connection set + roles.
+samplers.push(setInterval(() => {
+  const nowMs = Date.now();
+  for (const m of myTopics) {
+    led.watchState({ topic: m.t.name, buffered: null, total: m.lastSeqSeen + 1,
+      lastArrivalMono: m.watchLastMono ? m.watchLastMono - t0 : null,
+      silentMs: m.watchLastMono ? nowMs - m.watchLastMono : null });
+  }
+  let mesh = null, roles = null;
+  try {
+    const h = peer.health?.();
+    if (h) {
+      mesh = { synaptomeSize: h.synaptomeSize ?? null,
+        peers: Array.isArray(h.peers) ? h.peers.length : (h.peers ?? null), state: h.state ?? null };
+      roles = h.axonRoles ?? null;
+    }
+  } catch { /* health unavailable this tick */ }
+  led.connSnapshot({ mesh, roles });
   led.resources({ rssMb: +(process.memoryUsage().rss / 1048576).toFixed(1) });
 }, 30_000));
 
