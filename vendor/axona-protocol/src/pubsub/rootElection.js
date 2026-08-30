@@ -128,6 +128,27 @@ export const rootElectionMethods = {
         this._rootClaim.demote(tBig, lc(payload.root),
           supersedesMine && !closer ? 'epoch-superseded' : 'beacon-closer');
       }
+      // Branch reattachment (David 2026-08-30, gated). A node SUBSCRIBED to this
+      // topic (not its root) that hears a beacon for a NEWER seat generation
+      // (epoch above the newest we'd seen) naming a root DIFFERENT from its
+      // current upstream re-subscribes toward it NOW — reattaching this branch,
+      // and the whole subtree beneath it, to the migrated root instead of waiting
+      // for the slow renewal. Epoch is the supersede signal (prevEpoch = the
+      // pre-beacon high-water); renewal stays the backstop for branches the
+      // bounded beacon never reaches. Pin-free: drop the stale upstream so the
+      // re-subscribe routes fresh toward the true root (the terminal-verify fix
+      // reaches it) rather than re-pinning a waypoint (the v4.64.0 concern).
+      if (this._subTerminalVerify && this.mySubscriptions.has(tBig) && !(this.axonRoles.get(tBig)?.isRoot)) {
+        const beaconRootHex = lc(payload.root);
+        const curUp = (this._upstream.get(tBig) || [])[0] || null;
+        const prevEpoch = (prev && Number.isInteger(prev.epoch)) ? prev.epoch : 0;
+        if (beaconRootHex !== lc(idHex(this.nodeId)) && beaconRootHex !== curUp && epoch > prevEpoch) {
+          this._upstream.delete(tBig);                       // drop stale pin → SUB routes fresh toward the topic
+          const s = this.mySubscriptions.get(tBig); if (s) s.interval = this.renewFastMs;
+          this._sendSubscribe(tBig);
+          this._disc?.(tBig, 'branch-reattach', { from: curUp, root: beaconRootHex, epoch });
+        }
+      }
     }
     if (payload.layer > 1 && typeof this.dht.neighbors === 'function') {
       let from = null; try { if (meta && meta.fromId != null) from = idBig(meta.fromId); } catch { /* */ }
