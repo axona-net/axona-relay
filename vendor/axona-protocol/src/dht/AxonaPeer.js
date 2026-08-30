@@ -135,6 +135,12 @@ export class AxonaPeer extends DHT {
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
     // Set 0 to disable (A/B diagnostics, or deployments that don't want backup roots).
     this._rootReplicas = rootReplicas;
+    // findKClosest hop/density telemetry (diagnostic, David 2026-08-30). No-op
+    // unless ROUTE_TRACE=1. Emits one route-lookup summary per findKClosest:
+    // seed-pool density, closer-in-seed, rounds, probes, fulfilled/rejected
+    // (dead-peer waits), elapsed, terminus — to separate "sparse table → 0ms
+    // self" from "slow convergence → timeout" local minima.
+    this._routeTrace = (typeof process !== 'undefined' && process.env && process.env.ROUTE_TRACE === '1');
     // REF-1.1 M1: DEFAULT-OFF Boundary-1 frame-contract registry. When true, the
     // default AxonaManager arms the shadow registry over its 19 routed handlers
     // (observe-only; byte-identical flag-off; the runtime AXONA_REGISTRY_SHADOW env
@@ -4449,11 +4455,21 @@ export class AxonaPeer extends DHT {
     for (const syn of src.synaptome.values())         addCandidate(syn.peerId);
     for (const syn of src.incomingSynapses.values())  addCandidate(syn.peerId);
 
+    // ROUTE_TRACE telemetry (no-op off): density of the seed pool + how much of
+    // it is already closer than self (0 → sparse-table local minimum).
+    const _rt = this._routeTrace ? {
+      t0: (globalThis.performance?.now?.() ?? Date.now()),
+      seedPool: distances.size, synCount: src.synaptome?.size ?? 0, inCount: src.incomingSynapses?.size ?? 0,
+      selfDist: src.id ^ targetBig, probes: 0, fulfilled: 0, rejected: 0, roundsRun: 0,
+    } : null;
+    if (_rt) { let c = 0; for (const d of distances.values()) if (d < _rt.selfDist) c++; _rt.closerInSeed = c; }
+
     const visited = new Set();
     let lastPoolSize = 0;
     let stableRounds = 0;
 
     for (let round = 0; round < maxRounds; round++) {
+      if (_rt) _rt.roundsRun = round + 1;
       const sorted = [...distances.entries()]
         .sort((a, b) => a[1] < b[1] ? -1 : 1)
         .map(([peerId]) => peerId);
@@ -4484,6 +4500,7 @@ export class AxonaPeer extends DHT {
           if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
           for (const peerId of r.value) addCandidate(peerId);
         }
+        if (_rt) { _rt.probes += probes.length; for (const r of settled) { if (r.status === 'fulfilled') _rt.fulfilled++; else _rt.rejected++; } }
       }
 
       const grew = distances.size > lastPoolSize;
@@ -4492,10 +4509,21 @@ export class AxonaPeer extends DHT {
       if (topKAllVisited && stableRounds >= 1) break;
     }
 
-    return [...distances.entries()]
+    const _result = [...distances.entries()]
       .sort((a, b) => a[1] < b[1] ? -1 : 1)
       .slice(0, K)
       .map(([peerId]) => peerId);
+    if (_rt) {
+      const term = _result[0] ?? null;
+      this._emitLog('info', 'route-lookup', {
+        target: (typeof targetBig === 'bigint' ? targetBig.toString(16).slice(0, 12) : null),
+        seedPool: _rt.seedPool, synCount: _rt.synCount, inCount: _rt.inCount, closerInSeed: _rt.closerInSeed,
+        rounds: _rt.roundsRun, probes: _rt.probes, fulfilled: _rt.fulfilled, rejected: _rt.rejected,
+        elapsedMs: Math.round((globalThis.performance?.now?.() ?? Date.now()) - _rt.t0),
+        terminus: (term != null ? term.toString(16).slice(0, 12) : null), terminusIsSelf: (term != null && term === src.id),
+      });
+    }
+    return _result;
   }
 
   /**
