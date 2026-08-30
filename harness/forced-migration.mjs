@@ -8,9 +8,10 @@
 //                keyspace address rule and roots the topic at epoch e.
 //   S  sub     — subscribes, settles → installed on R's live fanout, pinned to R.
 //   P  pub     — publishes throughout, before and across the migration.
-// Then R is CLOSED. A new root R' emerges among the survivors (almost always a
-// fleet relay — S and P are far from the grinded-near id, and 62 relays sit
-// between them and the topic). R' beacons at epoch e+1. S must:
+// Then R is CLOSED. A single WINNING root R' emerges among the survivors (almost
+// always a fleet relay — S and P are far from the grinded-near id, and 62 relays
+// sit between them and the topic; if a third seat wins it is recorded as R', there
+// is no separate R''). R' beacons at epoch e+1. S must reattach to R''s tree:
 //   (a) invalidate the old pin (drop upstream=R),
 //   (b) attach to R''s tree (new non-R upstream) and resume delivery,
 //   (c) show NO false still-installed interval (renewFast re-probe during the gap),
@@ -23,6 +24,8 @@
 //     node harness/forced-migration.mjs
 import '../src/polyfill.js';
 process.env.LAT_TRACE = '1';                          // MUST precede kernel construction
+process.env.SUB_TERMINAL_VERIFY = '1';                // arm S exactly as the fleet: the
+process.env.FINDK_SKIP_DEAD = '1';                    // reattach guard is gated on _subTerminalVerify
 import { connectPeer } from '../src/ops.js';
 import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
 import { idBig } from '../vendor/axona-protocol/src/pubsub/ids.js';
@@ -40,7 +43,7 @@ const now = () => Date.now();
 
 // disc + delivery capture ---------------------------------------------------
 const disc = [];                                      // { peer, t, ev, ... }
-const rec = (tag) => (msg, ctx) => { if (msg === 'pubsub:disc' && ctx) disc.push({ peer: tag, t: now(), ...ctx }); };
+const rec = (tag) => (msg, ctx) => { if (msg === 'pubsub:disc' && ctx) disc.push({ peer: tag, ...ctx, t: now() }); };
 const delivered = new Map();                           // msgId -> wall ms of first arrival at S
 const dupCount = new Map();                            // msgId -> arrivals (>1 = duplicate)
 
@@ -67,7 +70,7 @@ const grindNear = async (nodeBig, label) => {
 };
 const topic = await grindNear(idBig(R.nodeId), S(R.author.authorId));
 const desc = { region: REGION, name: topic };
-const topicBig = await deriveTopicIdBig({ region: REGION, name: topic });
+let topicBig = await deriveTopicIdBig({ region: REGION, name: topic });
 console.error('topic', topic, ' topicId', S(topicBig));
 
 // R roots it ----------------------------------------------------------------
@@ -83,9 +86,28 @@ await Sp.peer.sub(desc, (env) => {
 console.error(`settling ${SETTLE_MS}ms`);
 await sleep(SETTLE_MS);
 
-const rootEpoch = rAm?.axonRoles?.get(topicBig)?.epoch;
-const rIsRoot   = !!rAm?.axonRoles?.has(topicBig);
-const sPinPre   = S(sAm?._upstream?.get(topicBig)?.[0]);
+// The manager keys its Maps by the DECIMAL STRING of the topicId, not the BigInt.
+// Resolve the live key from S's own subscription/upstream map (fall back to the
+// stringified derived id) so every introspection lookup hits.
+const K = String(topicBig);
+const keyFor = (am) => {
+  const pools = [am?.mySubscriptions, am?._upstream, am?.axonRoles];
+  for (const m of pools) for (const k of (m?.keys?.() || [])) if (String(k) === K || String(k).startsWith(K.slice(0, 12))) return String(k);
+  for (const m of pools) { const ks = [...(m?.keys?.() || [])]; if (ks.length) return String(ks[0]); }
+  return K;
+};
+const kS = keyFor(sAm), kR = keyFor(rAm);
+console.error('key check  derive=', S(topicBig), ' S.subs=', [...(sAm?.mySubscriptions?.keys()||[])].map(S), ' S.up=', [...(sAm?._upstream?.keys()||[])].map(S), ' R.roles=', [...(rAm?.axonRoles?.keys()||[])].map(S));
+
+// where does the subscription actually live? (guard target check)
+console.error('LOCATE sub  peer._subscriptions=', (Sp.peer?._subscriptions?.size ?? '?'),
+  ' mgr.mySubscriptions=', (sAm?.mySubscriptions?.size ?? '?'),
+  ' mgr._upstream=', (sAm?._upstream?.size ?? '?'),
+  ' mgr.axonRoles=', (sAm?.axonRoles?.size ?? '?'),
+  ' mgr._rootBeacons=', (sAm?._rootBeacons?.size ?? '?'));
+const rootEpoch = rAm?.axonRoles?.get(kR)?.epoch;
+const rIsRoot   = !!rAm?.axonRoles?.has(kR);
+const sPinPre   = S(sAm?._upstream?.get(kS)?.[0]);
 const renewFast = sAm?.renewFastMs ?? sAm?._renewFastMs ?? 5000;
 console.error(`pre-migration: R.isRoot=${rIsRoot} epoch=${rootEpoch}  S.pin=${sPinPre}  renewFast=${renewFast}ms`);
 
@@ -109,9 +131,9 @@ const t0 = now();
 while (now() - t0 < POST_MS) {
   const id = await P.peer.pub(desc, { v: 1, k: 'post', i: postIds.length }, { signWith: P.author });
   postIds.push({ id, t: now() });
-  const pin = S(sAm?._upstream?.get(topicBig)?.[0]);
-  const interval = sAm?.mySubscriptions?.get(topicBig)?.interval;
-  const hasRole = !!sAm?.axonRoles?.has(topicBig);
+  const pin = S(sAm?._upstream?.get(kS)?.[0]);
+  const interval = sAm?.mySubscriptions?.get(kS)?.interval;
+  const hasRole = !!sAm?.axonRoles?.has(kS);
   pinTimeline.push({ dt: now() - killT, pin, interval, hasRole });
   if (firstPostDelivery === null) {
     for (const pi of postIds) if (delivered.has(pi.id)) { firstPostDelivery = delivered.get(pi.id) - killT; break; }
@@ -123,9 +145,31 @@ await sleep(6000);
 // ── evaluate ────────────────────────────────────────────────────────────
 const reattaches = disc.filter((d) => d.peer === 'S' && d.ev === 'branch-reattach');
 const sBecameRoot = disc.filter((d) => d.peer === 'S' && d.ev === 'became-root');
-const pinAfter = S(sAm?._upstream?.get(topicBig)?.[0]);
+const pinAfter = S(sAm?._upstream?.get(kS)?.[0]);
 const postDelivered = postIds.filter((pi) => delivered.has(pi.id)).length;
-const dups = [...dupCount.entries()].filter(([, n]) => n > 1);
+// duplicate = ORTHOGONAL count of EXCESS arrivals per msgId (Aster fd800620), not a boolean
+const dups = [...dupCount.entries()].filter(([, n]) => n > 1).map(([id, n]) => ({ id: S(id), excess: n - 1 }));
+const dupExcess = dups.reduce((a, d) => a + d.excess, 0);
+
+// ── IDENTITY RECORD (Aster condition 1): who was root, who won, epochs, beacon
+// source, attachment target, and the exact event that ends the false-installed
+// interval. Computed from S's disc events after the kill (disc fires reliably; the
+// _upstream introspection is best-effort on an ephemeral peer).
+const sPost = disc.filter((d) => d.peer === 'S' && (d.t - killT) >= -500);
+const reAtt = reattaches[0] || null;
+const lastResolve = [...sPost].reverse().find((d) => d.ev === 'sub-root' || d.ev === 'branch-reattach');
+const identity = {
+  oldRoot: S(R.nodeId),
+  oldEpoch: rootEpoch ?? '(unread)',
+  winningRoot: reAtt ? S(reAtt.root) : (lastResolve ? S(lastResolve.root) : (pinAfter || '(none)')),
+  newEpoch: reAtt ? reAtt.epoch : '(no reattach event; recovery via sub-root re-resolution)',
+  beaconSource: reAtt ? `beacon root ${S(reAtt.root)} (superseded pin ${S(reAtt.from)})` : '(none — no branch-reattach fired)',
+  attachmentTarget: pinAfter || (lastResolve ? S(lastResolve.root) : '(unread)'),
+  falseInstalledEndEvent: (() => {
+    const first = sPost.find((d) => (d.t - killT) > 0 && (d.ev === 'sub-root' || d.ev === 'branch-reattach' || d.ev === 'became-root'));
+    return first ? `${first.ev} @${first.t - killT}ms → root ${S(first.root)}` : '(no post-kill re-resolution observed)';
+  })(),
+};
 
 // per-epoch reattach grouping (idempotence: ≤1 per distinct epoch)
 const byEpoch = new Map();
@@ -161,8 +205,12 @@ console.log('pre delivered      ', `${preDelivered}/${PRE_N}`);
 console.log('post delivered     ', `${postDelivered}/${postIds.length}`);
 console.log('first post-kill delivery', firstPostDelivery != null ? `${firstPostDelivery}ms` : 'NONE in window');
 console.log('reattach events (S)', reattaches.length, reattaches.map((r) => `epoch=${r.epoch} from=${S(r.from)} root=${S(r.root)} @${r.t - killT}ms`).join(' | ') || '(none)');
+console.log('\n-- all S disc events (dt from kill) --');
+for (const d of disc.filter((d) => d.peer === 'S')) console.log(`  @${String(d.t - killT).padStart(7)}ms  ${d.ev}` + (d.why ? ` why=${d.why}` : '') + (d.root !== undefined ? ` root=${S(d.root)}` : '') + (d.from !== undefined ? ` from=${S(d.from)}` : '') + (d.epoch !== undefined ? ` epoch=${d.epoch}` : '') + (d.kind !== undefined ? ` kind=${d.kind}` : ''));
 console.log('reattach per epoch ', JSON.stringify([...byEpoch.entries()]), `max=${maxPerEpoch}`);
-console.log('duplicates         ', dups.length, dups.map(([id, n]) => `${S(id)}×${n}`).join(' '));
+console.log('duplicates         ', `${dups.length} msgIds, ${dupExcess} excess arrivals`, dups.map((d) => `${d.id}+${d.excess}`).join(' '));
+console.log('\n-- IDENTITY (Aster condition 1) --');
+for (const [k, v] of Object.entries(identity)) console.log(`  ${k.padEnd(24)} ${v}`);
 console.log('\n-- pin timeline (dt ms : pin : interval : selfRole) --');
 let last = null;
 for (const s of pinTimeline) {

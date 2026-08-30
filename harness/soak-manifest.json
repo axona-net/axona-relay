@@ -1,0 +1,77 @@
+{
+  "manifest": "axona pub/sub 3h churn soak — frozen measurement contract",
+  "frozenAt": "2026-08-30",
+  "authority": "council-ratified pre-run: Orion bba2095f, Vega a88fe61f, Aster (David-relayed) fd80062069; axona.bot spec 2ff246b9. Freezes Aster's four corrections before launch. Approves MEASUREMENT only — Gates 4/6 remain David's.",
+
+  "fleet": {
+    "relays": 62,
+    "hosts": { "m4": 25, "m1": 12, "axona-linux": 5, "axona-win": 20 },
+    "kernel": "f19cc32 (v4.68.2) — FINDK_SKIP_DEAD + SUB_TERMINAL_VERIFY + beacon epoch reattach (rootElection.js)",
+    "armed": "every relay: RELAY_SYNAPTOME_MAINTAIN+ADMISSION_GATE+ATTEMPT_GUARD+PRESENCE (stack) + FINDK_SKIP_DEAD + SUB_TERMINAL_VERIFY; churn replacements inherit ARM_FIX so the fleet does not de-arm over the window"
+  },
+
+  "workload": {
+    "sidecars": 6,
+    "hosts": "m4 0-1, m1 2-3, axona-linux 4-5 (unix only; armed + LAT_TRACE + disc). The 20 windows RELAYS remain in the fleet under test; only the client workload is unix, because win-spawn.ps1 cannot forward the flags/trace",
+    "durationMs": 10800000,
+    "churn": "ARM_RELAY=1 §6 schedule (relay-roll + relay-kill), replacements come up stack+fix armed",
+    "seedDiscipline": "single seed, plan regenerated from seed at analyze time — requiredReaders come from the plan, never from who answered"
+  },
+
+  "denominator": {
+    "unit": "one accepted publish = one trial",
+    "rule": "api.confirmed === true with an assigned msgId. Intent without api-confirm never enters the trial set. msgId is preserved across every delivery path so a message is followed, not re-counted"
+  },
+
+  "classification": {
+    "exactlyOnce": "each (trial, requiredReader) lands in exactly one of live | repair | missing at the deadline",
+    "live": "first observation of the msgId arrived via 'watch' (root live-fanout forward push) within MISSING_DEADLINE_MS",
+    "repair": "first observation arrived via 'pull' (renewal replay / recovery), not the live push, within MISSING_DEADLINE_MS",
+    "missing": "no observation of the msgId by MISSING_DEADLINE_MS after api-confirm",
+    "delivered": "live + repair, and only those",
+    "duplicate": "ORTHOGONAL count of EXCESS arrivals per (msgId, reader) = max(0, arrivals - 1). Reported on its own line, never folded into live or repair. A duplicate is not a delivery"
+  },
+
+  "bounds": {
+    "MISSING_DEADLINE_MS": 120000,
+    "MISSING_DEADLINE_basis": "2 x RENEW_MS (60s steady ceiling) — the council-ratified recovery-plane ceiling. Delivery beyond one two-cycle recovery window is a real loss, not slow success",
+    "MIGRATION_GAP_BOUND_MS": 120000,
+    "MIGRATION_GAP_BOUND_basis": "2 x RENEW_MS — the allowed delivery gap for a settled subscriber while its root migrates; a gap past this is a migration-tail failure",
+    "endOfWindowDrain_MS": 120000,
+    "endOfWindowDrain_basis": "the launcher settles 120s after the window so a publish in the final 120s still has its full deadline before analysis"
+  },
+
+  "latency": {
+    "anchor": "start = origin api-confirm (confirmed msgId assigned, api row wall); end = first app delivery (observe row wall). Per message",
+    "clock": "per-origin wall clock; cross-host corrected by the calibration offsets below. Monotonic clocks are used ONLY within a single process (the lat-probe / forced-migration probes), never across hosts",
+    "offsetsMs": { "m4": 0, "m1": 136, "axona-linux": 182, "axona-win": 89 },
+    "perClass": "p50/p95/p99 and sample count for live and for repair, SEPARATELY — never averaged into one number",
+    "phases": "cold (publish before the reader's measure-start settle boundary) and converged (after) reported apart, with per-phase counts"
+  },
+
+  "segmentation": {
+    "source": "disc-<seed>-<peer>.jsonl (pubsub:disc events, each carrying topicId hex prefix `t`)",
+    "tags": [
+      "root-migration: the topic's root changed (became-root / sub-root to a new node) during the trial's delivery window",
+      "reattach-fired: a branch-reattach event on the reader's topic in the window",
+      "dead-peer-skip: FINDK_SKIP_DEAD active on the lookup (kernel-armed; reported fleet-wide)",
+      "terminal-verify-outcome: self | closer(deferred) | inconclusive"
+    ],
+    "rationale": "a clean aggregate must not bury a migration-tail failure; the migration-tagged trials get their own cut"
+  },
+
+  "terminalVerifyAttribution": {
+    "attempts": "count of pubsub:disc term-verify events (each an invocation)",
+    "outcomes": "self | closer | inconclusive, counted separately — deferred/inconclusive retries are retained and never absorbed into an eventual-success bucket",
+    "lookupMs": "distribution of the term-verify lookup duration (disc.ms), to show ~0.8s findKClosest is off the subscribe critical path with data, not assertion"
+  },
+
+  "forcedMigration": {
+    "note": "deterministic, run APART from the stochastic soak (harness/forced-migration.mjs)",
+    "identity": "install a subscriber S on the initial root R at epoch e. Take R down. The WINNING root R' claims the topic at epoch e+1 (a single successor; if a third seat wins, it is recorded as the winner — there is no separate R''). S must reattach to R''s tree",
+    "record": ["oldRoot R", "winningRoot R'", "oldEpoch e", "newEpoch e+1", "beaconSource (who S heard the superseding epoch from)", "attachmentTarget (S's new upstream)", "falseInstalledEndEvent (the exact event that ends the stale still-installed interval — pin invalidation)"],
+    "criteria": ["old pin invalidated", "reattached to R''s tree + delivery resumed", "no false still-installed interval", "no delivery gap past MIGRATION_GAP_BOUND_MS", "idempotent: <=1 reattach per epoch under duplicate same-epoch beacons; renewal backstop covers a dropped beacon"]
+  },
+
+  "reproducibility": "analyzer prints its own sha256 and sorts output deterministically; a second pass over the immutable ledgers reproduces the disposition byte-for-byte. Buckets are not reinterpreted after the run (Vega a88fe61f)"
+}
