@@ -25,7 +25,7 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 echo "[$HOST] arm-roll START target=$EXPECT $(date -u +%H:%M:%SZ)"
 for i in $(seq 1 "$EXPECT"); do
   echo "[$HOST] --- armed roll $i/$EXPECT $(date -u +%H:%M:%SZ) ---"
-  c=$(ARM_STACK=1 REGION="$REGION" BRIDGE="$BRIDGE" bash harness/relay-churn.sh relay-roll "$HOST" 20000)
+  c=$(ARM_STACK=1 ARM_FIX="${ARM_FIX:-1}" REGION="$REGION" BRIDGE="$BRIDGE" bash harness/relay-churn.sh relay-roll "$HOST" 20000)
   echo "[$HOST]   post-roll census=$c (want $EXPECT)"
 done
 echo "[$HOST] arm-roll DONE $(date -u +%H:%M:%SZ)"
