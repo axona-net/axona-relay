@@ -29,7 +29,7 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 RESULTS=harness/results
 mkdir -p "$RESULTS"
 
-COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-60000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000} TRACE=${TRACE:-0} LAT_TRACE=${LAT_TRACE:-0}"
+COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-60000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000} TRACE=${TRACE:-0} LAT_TRACE=${LAT_TRACE:-0} SUB_TERMINAL_VERIFY=${SUB_TERMINAL_VERIFY:-1} FINDK_SKIP_DEAD=${FINDK_SKIP_DEAD:-1}"
 
 launch_local() {  # peerIdx...
   for i in "$@"; do
@@ -79,7 +79,11 @@ echo "── launching $NODES sidecars (seed $SEED, $(( DURATION_MS / 60000 ))mi
 launch_local 0 1
 launch_ssh_unix m1 "/opt/homebrew/Cellar/node/26.6.0/bin:/opt/homebrew/bin" darwin 2 3
 launch_ssh_unix axona-linux "\$HOME/bin" linux 4 5
-launch_win 6 7
+# Windows sidecars carry neither LAT_TRACE nor the fix flags (win-spawn.ps1 forwards
+# a fixed arg list), so they cannot join an armed+traced measurement. Default them
+# OFF: the 20 win RELAYS stay in the armed fleet under test, only the client
+# workload is unix (uniform armed+traced). WIN_SIDECARS=1 restores peers 6-7.
+if [ "${WIN_SIDECARS:-0}" = 1 ]; then launch_win 6 7; fi
 
 # Churn: ARM_RELAY=1 runs the §6 relay-churn schedule (Arm A/B); otherwise the
 # validation plan (one local sidecar restart). The relay actions are gated
@@ -92,7 +96,7 @@ elif [ "${ARM_RELAY:-0}" = "1" ]; then
   # ARM_STACK flows through churn.mjs → relay-churn.sh so every churn-replacement
   # relay comes up stack-ON (Arm B). In Arm A it is 0 and replacements are
   # byte-identical stack-off relays. execSync inherits this env into relay-churn.sh.
-  ARM_RELAY=1 ARM_STACK=${ARM_STACK:-0} SEED=$SEED HOST=m4 REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=$RESULTS \
+  ARM_RELAY=1 ARM_STACK=${ARM_STACK:-0} ARM_FIX=${ARM_FIX:-1} SEED=$SEED HOST=m4 REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=$RESULTS \
     PLAN="$ARM_PLAN" node harness/churn.mjs > "$RESULTS/churn-$SEED.out" 2>&1 &
   echo "  churn driver pid $!"
 else

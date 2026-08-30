@@ -82,7 +82,17 @@ if (env('LAT_TRACE') === '1') {
     try { appendFileSync(LSF, JSON.stringify({ msgId: ctx.msgId, stage: ctx.stage, t: ctx.t, mono: ctx.mono, peerIdx: PEER_IDX, host: HOST }) + '\n'); } catch { /* */ }
   };
   try { peer.onLog('info', onStage); } catch { /* older kernel */ }
-  phase('LAT_TRACE on');
+  // disc events (became-root / sub-root / pub-root / root-members / term-verify /
+  // branch-reattach) → disc-<seed>-<peer>.jsonl. Each carries `t` (topicId hex
+  // prefix) so the analyzer segments delivery/latency by what the mesh was doing
+  // under each topic: root migration, reattach fire, dead-skip, term-verify verdict.
+  const DSF = `${LEDGER_DIR}/disc-${SEED}-${PEER_IDX}.jsonl`;
+  const onDisc = (msg, ctx) => {
+    if (msg !== 'pubsub:disc' || !ctx) return;
+    try { appendFileSync(DSF, JSON.stringify({ wall: Date.now(), peerIdx: PEER_IDX, host: HOST, ...ctx }) + '\n'); } catch { /* */ }
+  };
+  try { peer.onLog('info', onDisc); } catch { /* older kernel */ }
+  phase('LAT_TRACE on (+disc)');
 }
 led.event({ kind: 'start', detail: { planHash, seed: SEED, nodes: NODES, durationMs: DURATION_MS, bridge: BRIDGE } });
 
