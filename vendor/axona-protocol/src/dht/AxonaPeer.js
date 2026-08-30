@@ -141,6 +141,13 @@ export class AxonaPeer extends DHT {
     // (dead-peer waits), elapsed, terminus — to separate "sparse table → 0ms
     // self" from "slow convergence → timeout" local minima.
     this._routeTrace = (typeof process !== 'undefined' && process.env && process.env.ROUTE_TRACE === '1');
+    // findKClosest dead-peer skip (routing fix, David 2026-08-30). ROLLOUT GATE,
+    // default OFF. ON: findKClosest never PROBES a known-dead or unconnected peer
+    // (exactly the guard _greedyNextHopToward already applies), so a round can no
+    // longer stall on a dead peer's transport timeout — the 4-5s lookup that
+    // blocked synchronous terminal verification. Candidates are unaffected; only
+    // the outbound probe set is filtered. Remove the gate once armed + validated.
+    this._findkSkipDead = (typeof process !== 'undefined' && process.env && process.env.FINDK_SKIP_DEAD === '1');
     // REF-1.1 M1: DEFAULT-OFF Boundary-1 frame-contract registry. When true, the
     // default AxonaManager arms the shadow registry over its 19 routed handlers
     // (observe-only; byte-identical flag-off; the runtime AXONA_REGISTRY_SHADOW env
@@ -4486,8 +4493,20 @@ export class AxonaPeer extends DHT {
       }
       if (toQuery.length === 0) break;
 
-      const probes = toQuery.filter(p => p !== src.id);
-      for (const p of toQuery) visited.add(p);
+      // Never PROBE a known-dead or unconnected peer (the guard greedy already
+      // applies): a dead peer's transport.send only rejects after its timeout,
+      // and Promise.allSettled below waits for the slowest in the batch. Gated;
+      // flag-off is the prior behaviour. Candidates are untouched — only probes.
+      const probes = toQuery.filter(p => {
+        if (p === src.id) return false;
+        if (this._findkSkipDead) {
+          if (src._deadPeers && src._deadPeers.has(p)) return false;
+          const tr = src.transport;
+          if (tr && typeof tr.isConnected === 'function' && !tr.isConnected(p)) return false;
+        }
+        return true;
+      });
+      for (const p of toQuery) visited.add(p);   // mark all considered (incl. skipped) so we don't reselect them
 
       if (probes.length > 0) {
         const settled = await Promise.allSettled(
