@@ -70,6 +70,20 @@ if (env('TRACE') === '1') {
   }
   phase('TRACE on');
 }
+
+// LAT_TRACE=1: capture the kernel's per-stage delivery-latency stamps (David
+// 2026-08-30). The kernel emits `pubsub:lat-stage` via onLog with { msgId, stage,
+// t, mono }; one row per stage per peer into latstage-<seed>-<peer>.jsonl. The
+// analyzer joins these by msgId across peers to locate where the 1.7s median is.
+if (env('LAT_TRACE') === '1') {
+  const LSF = `${LEDGER_DIR}/latstage-${SEED}-${PEER_IDX}.jsonl`;
+  const onStage = (msg, ctx) => {
+    if (msg !== 'pubsub:lat-stage' || !ctx) return;
+    try { appendFileSync(LSF, JSON.stringify({ msgId: ctx.msgId, stage: ctx.stage, t: ctx.t, mono: ctx.mono, peerIdx: PEER_IDX, host: HOST }) + '\n'); } catch { /* */ }
+  };
+  try { peer.onLog('info', onStage); } catch { /* older kernel */ }
+  phase('LAT_TRACE on');
+}
 led.event({ kind: 'start', detail: { planHash, seed: SEED, nodes: NODES, durationMs: DURATION_MS, bridge: BRIDGE } });
 
 const D = (name) => ({ region: REGION, name });

@@ -183,6 +183,7 @@ export class AxonaManager {
     // the latch findable in the first place.
     this._tickLagPeak = 0;
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
+    this._latTrace = (typeof process !== 'undefined' && process.env && process.env.LAT_TRACE === '1'); // per-stage latency trace (diagnostic, no-op off)
 
     // DURABILITY — the second state machine (Aster, council 2026-08-01). Kept in
     // its own module with its own vocabulary because the defect it replaces was
@@ -988,6 +989,7 @@ export class AxonaManager {
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
     if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0 });
     this._send(T.PUB, { topicId: idHex(topicId), via: hint ? [hint] : [], json });
+    this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
     // (not yet integrated) front-loads burst waves while its table warms; a WARM
     // first publish to a topic gets one quick re-send so a just-formed tree still
@@ -1201,6 +1203,17 @@ export class AxonaManager {
 
   _log(level, event, ctx) {
     if (this._logSink) { try { this._logSink(level, 'pubsub:' + event, ctx); } catch { /* sink threw */ } }
+  }
+
+  // Per-stage delivery-latency trace (diagnostic, David 2026-08-30). NO-OP unless
+  // LAT_TRACE=1, so the live fleet's behaviour is unchanged. Emits one log per
+  // stage keyed by msgId: t = wall (Date.now, joined across hosts by the harness
+  // offsets), mono = process-local monotonic (exact same-process deltas). The
+  // analyzer reconstructs, per msgId, pub:built → pub:send → root:recv/fanout →
+  // sub:recv → deliver:app → deliver:cb to locate where the 1.7s median lives.
+  _latStage(msgId, stage) {
+    if (!this._latTrace || !msgId) return;
+    this._log('info', 'lat-stage', { msgId, stage, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
   }
 }
 

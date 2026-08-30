@@ -2299,6 +2299,8 @@ export class AxonaPeer extends DHT {
         { context: { topic: desc.name, size: json.length, max: this._maxPublishBytes } });
     }
 
+    if (typeof am._latStage === 'function') am._latStage(envelope.msgId, 'pub:built');
+
     // Lookup-assisted publish (v4.3.1): warm the true-root hint before the first
     // publish so the PUB routes straight to the topic's emergent root instead of
     // stranding on the single-pass greedy walk (a one-shot publish never re-routes,

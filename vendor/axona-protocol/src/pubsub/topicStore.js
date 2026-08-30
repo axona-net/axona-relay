@@ -134,8 +134,10 @@ export const topicStoreMethods = {
     if (publishTs > prev) this._lastSeenTsByTopic.set(topicBig, publishTs);
     this._confirmPending(topicBig, msgId);             // a subscribed publisher saw its own msg → stop retrying
     if (this._deliveryCallback) {
+      this._latStage(msgId, 'deliver:app');
       try { this._deliveryCallback(topicBig, json, msgId, publishTs, seq); }
       catch (e) { this._log('warn', 'delivery-callback-threw', { err: e?.message }); }
+      this._latStage(msgId, 'deliver:cb');
     }
   },
 
