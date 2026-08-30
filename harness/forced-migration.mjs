@@ -36,7 +36,7 @@ const SETTLE_MS = Number(process.env.SETTLE_MS || 30000);
 const PRE_N     = Number(process.env.PRE_N || 5);      // publishes before the migration
 const POST_MS   = Number(process.env.POST_MS || 180000); // watch window after R dies
 const GAP_MS    = Number(process.env.GAP_MS || 3000);  // publish cadence across the window
-const RECOVERY_BOUND_MS = Number(process.env.RECOVERY_BOUND_MS || 120000); // 2×RENEW_MS
+const RECOVERY_BOUND_MS = Number(process.env.RECOVERY_BOUND_MS || 10000); // MIGRATION_GAP_SLO (Orion 62512171, ≤10s)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (x) => (x == null ? null : String(x).slice(0, 12));
 const now = () => Date.now();
@@ -158,17 +158,18 @@ const dupExcess = dups.reduce((a, d) => a + d.excess, 0);
 const sPost = disc.filter((d) => d.peer === 'S' && (d.t - killT) >= -500);
 const reAtt = reattaches[0] || null;
 const lastResolve = [...sPost].reverse().find((d) => d.ev === 'sub-root' || d.ev === 'branch-reattach');
+// Orion's ratified tuple (62512171): { oldRootId, winningRootId, oldEpoch,
+// newEpoch, beaconSource, attachmentTarget, falseInstalledDurationMs }.
+const falseInstalledEnd = sPost.find((d) => (d.t - killT) > 0 && (d.ev === 'sub-root' || d.ev === 'branch-reattach' || d.ev === 'became-root'));
 const identity = {
-  oldRoot: S(R.nodeId),
+  oldRootId: S(R.nodeId),
+  winningRootId: reAtt ? S(reAtt.root) : (lastResolve ? S(lastResolve.root) : (pinAfter || '(none)')),
   oldEpoch: rootEpoch ?? '(unread)',
-  winningRoot: reAtt ? S(reAtt.root) : (lastResolve ? S(lastResolve.root) : (pinAfter || '(none)')),
   newEpoch: reAtt ? reAtt.epoch : '(no reattach event; recovery via sub-root re-resolution)',
   beaconSource: reAtt ? `beacon root ${S(reAtt.root)} (superseded pin ${S(reAtt.from)})` : '(none — no branch-reattach fired)',
   attachmentTarget: pinAfter || (lastResolve ? S(lastResolve.root) : '(unread)'),
-  falseInstalledEndEvent: (() => {
-    const first = sPost.find((d) => (d.t - killT) > 0 && (d.ev === 'sub-root' || d.ev === 'branch-reattach' || d.ev === 'became-root'));
-    return first ? `${first.ev} @${first.t - killT}ms → root ${S(first.root)}` : '(no post-kill re-resolution observed)';
-  })(),
+  falseInstalledDurationMs: falseInstalledEnd ? (falseInstalledEnd.t - killT) : null,
+  falseInstalledEndEvent: falseInstalledEnd ? `${falseInstalledEnd.ev} → root ${S(falseInstalledEnd.root)}` : '(no post-kill re-resolution observed)',
 };
 
 // per-epoch reattach grouping (idempotence: ≤1 per distinct epoch)

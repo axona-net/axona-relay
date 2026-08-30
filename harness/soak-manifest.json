@@ -33,12 +33,13 @@
   },
 
   "bounds": {
+    "note": "TWO DISTINCT bounds, per Aster/Orion (8ddefd56 / 62512171). They are not the same number and are never conflated: the completeness DEADLINE decides missing vs delivered; the migration-gap SLO is the pass/fail bar for the migration tail.",
     "MISSING_DEADLINE_MS": 120000,
-    "MISSING_DEADLINE_basis": "2 x RENEW_MS (60s steady ceiling) — the council-ratified recovery-plane ceiling. Delivery beyond one two-cycle recovery window is a real loss, not slow success",
-    "MIGRATION_GAP_BOUND_MS": 120000,
-    "MIGRATION_GAP_BOUND_basis": "2 x RENEW_MS — the allowed delivery gap for a settled subscriber while its root migrates; a gap past this is a migration-tail failure",
+    "MISSING_DEADLINE_role": "COMPLETENESS classification ceiling. A publish not delivered to a required reader within 120s of origin acceptance is permanently classified missing. Basis: 2 x RENEW_MS (60s steady ceiling) — the recovery-plane ceiling.",
+    "MIGRATION_GAP_SLO_MS": 10000,
+    "MIGRATION_GAP_SLO_role": "PASS/FAIL SLO for a settled subscriber's delivery gap during an active root transition, as Orion ratified (62512171, <=10.0s). This is NOT relaxed to 120s; 120s is only the completeness deadline above. A migration-window delivery gap over 10s is a migration-tail SLO failure even though the message may still count as delivered (repair) if it arrives before the 120s deadline.",
     "endOfWindowDrain_MS": 120000,
-    "endOfWindowDrain_basis": "the launcher settles 120s after the window so a publish in the final 120s still has its full deadline before analysis"
+    "endOfWindowDrain_basis": "the launcher settles 120s after the window so a publish in the final 120s still has its full completeness deadline before analysis"
   },
 
   "latency": {
@@ -61,16 +62,18 @@
   },
 
   "terminalVerifyAttribution": {
-    "attempts": "count of pubsub:disc term-verify events (each an invocation)",
-    "outcomes": "self | closer | inconclusive, counted separately — deferred/inconclusive retries are retained and never absorbed into an eventual-success bucket",
+    "note": "TWO DISTINCT dimensions, per Aster/Orion (8ddefd56 / 62512171): the lookup outcome (what the verify lookup returned) and the final installation/readiness state (what the subscription ended up as). They are reported separately so a deferred or inconclusive retry cannot hide behind eventual success.",
+    "attempts": "verifyAttempts — count of pubsub:disc term-verify events (each an invocation)",
+    "lookupOutcome": "per attempt, one of self | closer | inconclusive — the term-verify lookup result (disc.kind). 'closer' means the lookup found a strictly-closer root",
+    "finalVerifyState": "per subscription that invoked verify, one of self | attached | deferred | inconclusive — derived from the disc sequence on the topic: term-verify(self)+became-root => self; term-verify(closer)+a following sub-root to the deferred root within the window => attached; verify but no attach within the window => deferred; fail-closed with no attach and no closer target => inconclusive",
     "lookupMs": "distribution of the term-verify lookup duration (disc.ms), to show ~0.8s findKClosest is off the subscribe critical path with data, not assertion"
   },
 
   "forcedMigration": {
     "note": "deterministic, run APART from the stochastic soak (harness/forced-migration.mjs)",
     "identity": "install a subscriber S on the initial root R at epoch e. Take R down. The WINNING root R' claims the topic at epoch e+1 (a single successor; if a third seat wins, it is recorded as the winner — there is no separate R''). S must reattach to R''s tree",
-    "record": ["oldRoot R", "winningRoot R'", "oldEpoch e", "newEpoch e+1", "beaconSource (who S heard the superseding epoch from)", "attachmentTarget (S's new upstream)", "falseInstalledEndEvent (the exact event that ends the stale still-installed interval — pin invalidation)"],
-    "criteria": ["old pin invalidated", "reattached to R''s tree + delivery resumed", "no false still-installed interval", "no delivery gap past MIGRATION_GAP_BOUND_MS", "idempotent: <=1 reattach per epoch under duplicate same-epoch beacons; renewal backstop covers a dropped beacon"]
+    "record": "the tuple Orion ratified (62512171): { oldRootId, winningRootId, oldEpoch, newEpoch, beaconSource, attachmentTarget, falseInstalledDurationMs } — falseInstalledDurationMs is the elapsed time from root-kill to the exact event that ends the stale still-installed interval (pin invalidation)",
+    "criteria": ["old pin invalidated", "reattached to R''s tree + delivery resumed", "no false still-installed interval", "delivery gap <= MIGRATION_GAP_SLO_MS (10s)", "idempotent: <=1 reattach per epoch under duplicate same-epoch beacons; renewal backstop covers a dropped beacon"]
   },
 
   "reproducibility": "analyzer prints its own sha256 and sorts output deterministically; a second pass over the immutable ledgers reproduces the disposition byte-for-byte. Buckets are not reinterpreted after the run (Vega a88fe61f)"

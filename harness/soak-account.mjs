@@ -1,0 +1,220 @@
+// =============================================================================
+// harness/soak-account.mjs — the FROZEN measurement contract, executable.
+//
+// Implements harness/soak-manifest.json exactly, so the contract and the tool
+// cannot diverge (Aster's inconsistency, 2026-08-30). Reads the same immutable
+// ledgers analyze.mjs reads, plus the disc traces, and emits ONLY the frozen
+// schema: denominator, exactly-once live/repair/missing, duplicate as an excess-
+// arrival count, per-class latency percentiles, cold/converged apart,
+// segmentation by migration/reattach/dead-skip/term-verify, and terminal-verify
+// attribution. Buckets are defined here once, from the manifest, and never
+// reinterpreted after the run (Vega a88fe61f).
+//
+//   node harness/soak-account.mjs --dir harness/results --seed 30 --nodes 6 \
+//     --region eagle --open-n 4 --owned-n 2 --duration-ms 10800000 \
+//     --offsets '{"m4":0,"m1":136,"axona-linux":182,"axona-win":89}' \
+//     --manifest harness/soak-manifest.json --out harness/results/account-30.json
+// =============================================================================
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { generatePlan } from './lib/workload.mjs';
+import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
+
+const arg = (n, d) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
+const DIR = arg('dir', 'harness/results');
+const SEED = Number(arg('seed'));
+const NODES = Number(arg('nodes'));
+const REGION = arg('region', 'eagle');
+const OFFSETS = JSON.parse(arg('offsets', '{}'));
+const DURATION_MS = Number(arg('duration-ms', 10_800_000));
+const MANIFEST = JSON.parse(readFileSync(arg('manifest', 'harness/soak-manifest.json'), 'utf8'));
+const MISSING_DEADLINE_MS = MANIFEST.bounds.MISSING_DEADLINE_MS;      // 120000
+const OUT = arg('out', `${DIR}/account-${SEED}.json`);
+if (!Number.isInteger(SEED) || !Number.isInteger(NODES)) { console.error('need --seed --nodes'); process.exit(2); }
+
+const plan = generatePlan({ seed: SEED, nodes: NODES, durationMs: DURATION_MS,
+  openN: arg('open-n') ? Number(arg('open-n')) : undefined,
+  ownedN: arg('owned-n') ? Number(arg('owned-n')) : undefined });
+const topicByName = new Map(plan.topics.map((t, ti) => [t.name, { ...t, ti }]));
+
+// name → topicId hex prefix (the form _disc emits: topicIdBig.toString(16).slice(0,12))
+const hexByName = new Map(), nameByHex = new Map();
+for (const t of plan.topics) {
+  try {
+    const big = await deriveTopicIdBig({ region: REGION, name: t.name });
+    const hex = big.toString(16).slice(0, 12);
+    hexByName.set(t.name, hex); nameByHex.set(hex, t.name);
+  } catch { /* */ }
+}
+
+// ── load ledgers ─────────────────────────────────────────────────────
+const load = (prefix) => {
+  const out = [];
+  for (const f of readdirSync(DIR).filter((f) => f.startsWith(`${prefix}-${SEED}-`) && f.endsWith('.jsonl')).sort()) {
+    for (const line of readFileSync(`${DIR}/${f}`, 'utf8').split('\n')) { if (line.trim()) { try { out.push(JSON.parse(line)); } catch { /* */ } } }
+  }
+  return out;
+};
+const cwOf = (r) => (typeof r.wall === 'number' ? r.wall : Date.parse(r.wall)) - (OFFSETS[r.host] ?? 0);
+
+const recs = load('sidecar');
+if (!recs.length) { console.error(`no sidecar-${SEED}-*.jsonl in ${DIR}`); process.exit(2); }
+for (const r of recs) r.cw = cwOf(r);
+recs.sort((a, b) => a.cw - b.cw);
+
+// ── join truths per (topic, seq) ─────────────────────────────────────
+const ops = new Map();          // key -> { topic, seq, api, intentCw, obs: Map(peer -> [{via,cw,msgId}]) }
+const key = (t, s) => `${t} ${s}`;
+const measureStart = new Map(); // peer -> earliest measure-start cw (converged boundary)
+const pullHeads = new Map();    // `${topic}:${peer}` -> [{cw, headSeq}] (repair evidence)
+for (const r of recs) {
+  if (r.t === 'intent' && r.topicSeq >= 0) {
+    ops.set(key(r.topic, r.topicSeq), { topic: r.topic, seq: r.topicSeq, publisher: r.peerIdx, intentCw: r.cw, api: null, obs: new Map() });
+  } else if (r.t === 'api' && r.topicSeq >= 0) {
+    const o = ops.get(key(r.topic, r.topicSeq)); if (o) o.api = { confirmed: r.confirmed, msgId: r.msgId, cw: r.cw };
+  } else if (r.t === 'observe') {
+    const o = ops.get(key(r.topic, r.topicSeq));
+    if (o) { if (!o.obs.has(r.peerIdx)) o.obs.set(r.peerIdx, []); o.obs.get(r.peerIdx).push({ via: r.via, cw: r.cw, msgId: r.msgId }); }
+  } else if (r.t === 'pullHead' || r.t === 'head') {
+    const k = `${r.topic}:${r.peerIdx}`; if (!pullHeads.has(k)) pullHeads.set(k, []);
+    if (r.headSeq != null) pullHeads.get(k).push({ cw: r.cw, headSeq: r.headSeq });
+  } else if (r.t === 'event' && r.kind === 'measure-start') {
+    if (!measureStart.has(r.peerIdx) || r.cw < measureStart.get(r.peerIdx)) measureStart.set(r.peerIdx, r.cw);
+  }
+}
+for (const arr of pullHeads.values()) arr.sort((a, b) => a.cw - b.cw);
+const convergedBoundary = measureStart.size ? Math.max(...measureStart.values()) : -Infinity;
+// repair evidence: earliest pull-head for (topic,reader) with cw<=deadline whose
+// headSeq reached this message's seq — the reader's store recovered it via pull/
+// replay, not the live watch push. Returns that cw, or null.
+const repairCw = (topic, peer, seq, deadline) => {
+  const hs = pullHeads.get(`${topic}:${peer}`); if (!hs) return null;
+  for (const h of hs) { if (h.cw > deadline) break; if (h.headSeq >= seq) return h.cw; }
+  return null;
+};
+
+// ── disc: per-topic timeline + term-verify attribution ───────────────
+const disc = load('disc');
+for (const d of disc) d.cw = (typeof d.wall === 'number' ? d.wall : Date.parse(d.wall)) - (OFFSETS[d.host] ?? 0);
+const discByTopic = new Map();  // topicName -> [disc...] (sorted)
+for (const d of disc) { const name = nameByHex.get(d.t); if (!name) continue; if (!discByTopic.has(name)) discByTopic.set(name, []); discByTopic.get(name).push(d); }
+for (const arr of discByTopic.values()) arr.sort((a, b) => a.cw - b.cw);
+
+// terminal-verify: TWO dimensions (Aster/Orion 8ddefd56). lookupOutcome = what the
+// verify lookup returned (self|closer|inconclusive); finalVerifyState = what the
+// subscription ended up as (self|attached|deferred|inconclusive), derived from the
+// disc sequence on the topic so deferred/inconclusive retries cannot hide in success.
+const tv = { attempts: 0, lookup: { self: 0, closer: 0, inconclusive: 0 }, lookupMs: [],
+  final: { self: 0, attached: 0, deferred: 0, inconclusive: 0 } };
+const FINAL_WINDOW_MS = 30_000;
+for (const [name, es] of discByTopic) {
+  for (let i = 0; i < es.length; i++) {
+    const d = es[i]; if (d.ev !== 'term-verify') continue;
+    tv.attempts++;
+    const lk = (d.kind === 'self' || d.kind === 'closer') ? d.kind : 'inconclusive';
+    tv.lookup[lk]++;
+    if (Number.isFinite(d.ms)) tv.lookupMs.push(d.ms);
+    // final state: the next became-root / sub-root on this topic within the window
+    let attach = null;
+    for (let j = i + 1; j < es.length && es[j].cw - d.cw <= FINAL_WINDOW_MS; j++) {
+      if (es[j].ev === 'became-root') { attach = 'self'; break; }
+      if (es[j].ev === 'sub-root') { attach = 'attached'; break; }
+    }
+    if (lk === 'self') tv.final.self++;
+    else if (attach === 'attached') tv.final.attached++;
+    else if (lk === 'inconclusive' && !attach) tv.final.inconclusive++;
+    else tv.final.deferred++;
+  }
+}
+
+// a topic "migrated in the window" if a became-root/sub-root to a NEW root appears
+// between publish and deadline; "reattach fired" if a branch-reattach appears.
+const topicSegments = (topicName, fromCw, toCw) => {
+  const es = (discByTopic.get(topicName) || []).filter((d) => d.cw >= fromCw - 5000 && d.cw <= toCw + 5000);
+  const roots = new Set(es.filter((d) => d.ev === 'sub-root' || d.ev === 'became-root').map((d) => d.root).filter(Boolean));
+  return { migration: roots.size > 1, reattach: es.some((d) => d.ev === 'branch-reattach') };
+};
+
+// ── frozen classification ────────────────────────────────────────────
+const pctl = (a, p) => a.length ? a.slice().sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(a.length * p))] : null;
+const lat = { live: { cold: [], converged: [] }, repair: { cold: [], converged: [] } };
+const migGaps = [];                              // delivery latency of delivered trials under an active migration
+const MIGRATION_GAP_SLO_MS = MANIFEST.bounds.MIGRATION_GAP_SLO_MS;   // 10000, distinct from the 120s deadline
+let trials = 0;                                   // (trial,reader) pairs on confirmed publishes
+let liveN = 0, repairN = 0, missingN = 0, dupExcess = 0, dupTrials = 0;
+const seg = { migration: { live: 0, repair: 0, missing: 0 }, stable: { live: 0, repair: 0, missing: 0 }, reattach: { live: 0, repair: 0, missing: 0 } };
+let confirmedPublishes = 0;
+
+for (const o of ops.values()) {
+  const t = topicByName.get(o.topic); if (!t) continue;          // skip coord etc.
+  if (!o.api?.confirmed || !o.api.msgId) continue;               // denominator: confirmed only
+  confirmedPublishes++;
+  const startCw = o.api.cw;                                       // anchor = api-confirm
+  const deadline = startCw + MISSING_DEADLINE_MS;
+  const readers = t.requiredReaders.filter((p) => p !== o.publisher);
+  for (const p of readers) {
+    trials++;
+    const arrivals = (o.obs.get(p) || []).filter((x) => x.msgId === o.api.msgId).sort((a, b) => a.cw - b.cw);
+    // duplicate = EXCESS arrivals per (msgId, reader), orthogonal, never a delivery
+    if (arrivals.length > 1) { dupTrials++; dupExcess += arrivals.length - 1; }
+    const firstWatch = arrivals.find((x) => x.via === 'watch' && x.cw <= deadline);
+    const phase = startCw < convergedBoundary ? 'cold' : 'converged';
+    let cls, deliverCw = null;
+    if (firstWatch) { cls = 'live'; liveN++; deliverCw = firstWatch.cw; lat.live[phase].push(firstWatch.cw - startCw); }
+    else {
+      // repair: recovered via the pull-head sweep (renewal/replay), not the live push
+      const rcw = repairCw(o.topic, p, o.seq, deadline);
+      const firstObs = arrivals[0] && arrivals[0].cw <= deadline ? arrivals[0].cw : null;   // any non-watch observe
+      const rc = (rcw != null && (firstObs == null || rcw < firstObs)) ? rcw : firstObs;
+      if (rc != null) { cls = 'repair'; repairN++; deliverCw = rc; lat.repair[phase].push(rc - startCw); }
+      else { cls = 'missing'; missingN++; }
+    }
+    const sg = topicSegments(o.topic, startCw, deliverCw ?? deadline);
+    const bucket = sg.migration ? 'migration' : 'stable';
+    seg[bucket][cls]++;
+    if (sg.reattach) seg.reattach[cls]++;
+    // migration-gap SLO (10s): a delivered trial under an active migration must arrive within the SLO
+    if (deliverCw != null && sg.migration) migGaps.push(deliverCw - startCw);
+  }
+}
+
+const classStat = (a) => ({ n: a.length, p50: pctl(a, 0.5), p95: pctl(a, 0.95), p99: pctl(a, 0.99), max: a.length ? Math.max(...a) : null });
+const account = {
+  contract: { manifest: 'harness/soak-manifest.json',
+    missingDeadlineMs: MISSING_DEADLINE_MS, migrationGapSloMs: MIGRATION_GAP_SLO_MS,
+    latencyAnchor: 'api-confirm → first app delivery', delivered: 'live + repair only' },
+  denominator: { confirmedPublishes, trials },
+  classification: {
+    live: liveN, repair: repairN, missing: missingN,
+    delivered: liveN + repairN,
+    deliveryRatePct: trials ? +(100 * (liveN + repairN) / trials).toFixed(3) : null,
+    missingRatePct: trials ? +(100 * missingN / trials).toFixed(3) : null,
+    duplicate: { trialsWithExcess: dupTrials, excessArrivals: dupExcess },
+  },
+  latency: {
+    live: { cold: classStat(lat.live.cold), converged: classStat(lat.live.converged) },
+    repair: { cold: classStat(lat.repair.cold), converged: classStat(lat.repair.converged) },
+  },
+  migrationGapSlo: {
+    boundMs: MIGRATION_GAP_SLO_MS,
+    role: 'pass/fail SLO for delivery under an active root transition (distinct from the 120s completeness deadline)',
+    deliveredUnderMigration: migGaps.length,
+    withinSlo: migGaps.filter((g) => g <= MIGRATION_GAP_SLO_MS).length,
+    overSlo: migGaps.filter((g) => g > MIGRATION_GAP_SLO_MS).length,
+    gap: classStat(migGaps),
+  },
+  segmentation: {
+    stable: seg.stable, migration: seg.migration, reattachFired: seg.reattach,
+    note: 'migration = topic root changed in the trial window; reattachFired counted where a branch-reattach appeared (may overlap migration)',
+  },
+  terminalVerify: {
+    verifyAttempts: tv.attempts,
+    lookupOutcome: tv.lookup,
+    finalVerifyState: tv.final,
+    lookupMs: { n: tv.lookupMs.length, p50: pctl(tv.lookupMs, 0.5), p95: pctl(tv.lookupMs, 0.95), p99: pctl(tv.lookupMs, 0.99), max: tv.lookupMs.length ? Math.max(...tv.lookupMs) : null },
+  },
+  discEventsSeen: disc.length,
+  toolSha256: createHash('sha256').update(readFileSync(new URL(import.meta.url).pathname)).digest('hex').slice(0, 16),
+};
+console.log(JSON.stringify(account, null, 1));
+writeFileSync(OUT, JSON.stringify(account));

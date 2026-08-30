@@ -111,9 +111,14 @@ SETTLE=$(( DURATION_MS / 1000 + 120 ))
 echo "── waiting ${SETTLE}s (window + settle)"
 sleep "$SETTLE"
 
-echo "── collecting remote ledgers"
-scp -q "m1:~/Documents/claude/axona-relay/harness/results/sidecar-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || echo "  m1: none collected"
-scp -q "axona-linux:~/Documents/claude/axona-relay/harness/results/sidecar-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || echo "  axona-linux: none collected"
+echo "── collecting remote ledgers (+disc +latstage +klog for the frozen accounting)"
+# The segmentation (disc), per-stage latency (latstage) and kernel-instability
+# (klog) traces live per-host too — collect all four families, not just sidecar,
+# or the remote peers' segment/attribution cuts are lost (validation caught this).
+for fam in sidecar disc latstage klog; do
+  scp -q "m1:~/Documents/claude/axona-relay/harness/results/$fam-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || true
+  scp -q "axona-linux:~/Documents/claude/axona-relay/harness/results/$fam-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || true
+done
 # Windows collection by ssh-cat — scp chokes on the drive-letter colon.
 for i in $(seq 0 $(( NODES - 1 ))); do
   f="sidecar-$SEED-$i.jsonl"
