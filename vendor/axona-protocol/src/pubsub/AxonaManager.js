@@ -809,6 +809,7 @@ export class AxonaManager {
   }
 
   _becomeRoot(topicBig, why = 'terminal') {
+    this._disc(topicBig, 'became-root', { why });
     return this._rootClaim.become(topicBig, why);
   }
 
@@ -979,6 +980,7 @@ export class AxonaManager {
   // the publish on a slow live-mesh lookup.
   pubsubPublish(topicId, json, meta = {}) {
     const hint = this._rootHint_(topicId);
+    this._disc(topicId, 'pub-root', { hint: hint ? String(hint).slice(0, 12) : null });
     // Retain briefly so a publish that stranded on the greedy walk (hint not yet
     // warm) is re-sent toward the true root the moment the background lookup
     // resolves — a one-shot publish never re-routes on its own, so a cold-hint
@@ -1214,6 +1216,18 @@ export class AxonaManager {
   _latStage(msgId, stage) {
     if (!this._latTrace || !msgId) return;
     this._log('info', 'lat-stage', { msgId, stage, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // Root-registration DISCRIMINATOR (Aster/Vega/Orion, 2026-08-30). Same
+  // LAT_TRACE gate. Captures the SUB-resolved root, PUB-resolved root, self-root
+  // events, and the true root's live fanout membership so the probe can tell
+  // apart the three divergence mechanisms (self-root split / asymmetric greedy
+  // termination / migration without handoff) and prove whether a SUB that
+  // reaches the true root is actually recorded in its fanout.
+  _disc(topicIdBig, event, extra = {}) {
+    if (!this._latTrace) return;
+    let t = null; try { t = topicIdBig?.toString(16)?.slice(0, 12) ?? null; } catch { /* */ }
+    this._log('info', 'disc', { t, ev: event, self: idHex(this.nodeId).slice(0, 12), ...extra });
   }
 }
 
