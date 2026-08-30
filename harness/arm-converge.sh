@@ -20,6 +20,10 @@ EXPECT="${EXPECT:?EXPECT required}"
 REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 export RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 RELAY_PRESENCE=1
+# Arm C: routing fix flags (composes with the stack above). ARM_FIX=1 (default on
+# here — arm-converge is only invoked for the fix roll) sets both fix env vars so
+# every replacement relay comes up new-kernel + stack + fix.
+if [ "${ARM_FIX:-1}" = 1 ]; then export FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1; fi
 
 node_relays() {  # pids whose comm is exactly node
   for p in $(pgrep -f "src/index.js" 2>/dev/null); do

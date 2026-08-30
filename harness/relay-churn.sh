@@ -42,10 +42,26 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 # aborts the roll instead of silently confounding the run. The unix start_one
 # forms leave ARM_ENV unquoted on purpose (word-splitting into env assignments);
 # Windows carries ARM_STACK through to win-relay.sh, which bakes the `set` lines.
+# ARM_ENV = literal assignments spliced into the remote ssh command strings
+# (m1/linux), where they are source text the remote shell parses as prefix
+# assignments — no local word-splitting involved. For the LOCAL m4 path we
+# EXPORT the vars instead, so node inherits them regardless of whether this
+# script's interpreter word-splits unquoted expansions (bash does, zsh does
+# not — relying on that split silently produced a stack-OFF relay on the first
+# attempt). Windows carries ARM_STACK through to win-relay.sh.
+ARM_ENV=''
 if [ "${ARM_STACK:-0}" = 1 ]; then
   ARM_ENV='RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 RELAY_PRESENCE=1'
-else
-  ARM_ENV=''
+  export RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 RELAY_PRESENCE=1
+fi
+# Arm C (ARM_FIX=1): the routing fix flags — FINDK_SKIP_DEAD (findKClosest skips
+# dead/unconnected probe peers) + SUB_TERMINAL_VERIFY (synchronous origin-
+# independent verification before a SUB self-roots). Appended to ARM_ENV for the
+# ssh command strings; exported for the local m4 path. Windows carries ARM_FIX
+# through to win-relay.sh. Composes with ARM_STACK (go-with-B keeps the stack on).
+if [ "${ARM_FIX:-0}" = 1 ]; then
+  ARM_ENV="${ARM_ENV:+$ARM_ENV }FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1"
+  export FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1
 fi
 
 # ssh with a hard local watchdog: run in the background, kill it if it outlives
@@ -82,7 +98,7 @@ case "$HOST" in
     }
     start_one() {
       ( cd "$RELAY_DIR" && mkdir -p relay-logs
-        env $ARM_ENV RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
+        RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
           caffeinate -i nohup "$NODE_BIN" src/index.js \
             >> "relay-logs/relay-churn-$(date +%s)-$$.log" 2>&1 </dev/null &
         disown )
@@ -128,7 +144,7 @@ case "$HOST" in
     # harness sidecars out of census/stop; schtasks start survives ssh).
     WR='/c/Users/david/github/axona-relay/harness/win-relay.sh'
     census()   { winw 15 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR census" | tr -d '[:space:]'; }
-    start_one(){ winw 20 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=${ARM_STACK:-0} $WR start" >/dev/null; }
+    start_one(){ winw 20 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=${ARM_STACK:-0} ARM_FIX=${ARM_FIX:-0} $WR start" >/dev/null; }
     stop_one() { winw 15 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR stop"  >/dev/null; }
     ;;
 
