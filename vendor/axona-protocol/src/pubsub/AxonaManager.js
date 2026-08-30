@@ -184,6 +184,13 @@ export class AxonaManager {
     this._tickLagPeak = 0;
     this._logSink = (typeof emitLog === 'function') ? emitLog : null;
     this._latTrace = (typeof process !== 'undefined' && process.env && process.env.LAT_TRACE === '1'); // per-stage latency trace (diagnostic, no-op off)
+    // Synchronous terminal self-root verification (council-ratified fix, David
+    // 2026-08-30). ROLLOUT GATE, default OFF → _onSub is byte-identical to today.
+    // ON: before a SUB self-roots at a greedy terminal, an origin-independent
+    // bounded lookup must prove local ownership or a strictly-closer reachable
+    // node; on timeout/inconclusive it FAILS CLOSED (holds, renewal retries) and
+    // never self-roots on a local minimum. Remove the gate once armed + validated.
+    this._subTerminalVerify = (typeof process !== 'undefined' && process.env && process.env.SUB_TERMINAL_VERIFY === '1');
 
     // DURABILITY — the second state machine (Aster, council 2026-08-01). Kept in
     // its own module with its own vocabulary because the defect it replaces was
@@ -692,6 +699,64 @@ export class AxonaManager {
   _deferToRoot(topicBig, type, payload, rootHex) {
     this._rootClaim.demote(topicBig, rootHex, 'defer-terminal');
     this._send(type, { ...payload, via: [rootHex] });
+  }
+
+  // Synchronous terminal-ownership verification (council-ratified, David 2026-08-30).
+  // Origin-independent by construction: it asks the routing "who is genuinely
+  // closest to this topicId?" and never consults where the SUB started. Returns:
+  //   { kind: 'self' }            — verified local ownership → self-root is legal
+  //   { kind: 'closer', rootHex } — a strictly-closer reachable node → attach there
+  //   { kind: 'inconclusive' }    — timeout / no evidence → FAIL CLOSED (Aster):
+  //                                 hold, do NOT self-root; the renewal retries.
+  // Fast path reuses the resolver's fresh cached hint; otherwise a bounded (<=50ms)
+  // single-flight lookup, and on timeout it kicks a background warm so the retry
+  // resolves fast. The iterative lookup is the origin-independent oracle proven by
+  // localmin-probe (all origins converge on one terminus); greedy is not, which is
+  // exactly the local minimum this gate refuses to crown.
+  async _verifyTerminalOwnership(topicBig) {
+    const t0 = this._now();
+    const selfDist = this.nodeId ^ topicBig;
+    const verdict = (kind, rootHex, terminus) => {
+      this._disc?.(topicBig, 'term-verify', { kind, root: rootHex ?? null, terminus: terminus ?? null, ms: this._now() - t0 });
+      return rootHex ? { kind, rootHex } : { kind };
+    };
+    // Fast path: ONLY trust a resolved hint that names a strictly-closer node.
+    // A via=null hint means "resolver's LOCAL findKClosest saw self" — which at a
+    // local minimum is exactly the wrong answer (the network escalation may not
+    // have landed yet). Never infer 'self' from it; verify actively instead.
+    const hint = this._rootHint?.get(topicBig);
+    if (hint && hint.via && (this._now() - hint.at) < this.renewFastMs) {
+      return verdict('closer', lc(hint.via), lc(hint.via));
+    }
+    const canLookup = (typeof this.dht.findKClosest === 'function') || (typeof this.dht.lookup === 'function');
+    if (!canLookup) return verdict('inconclusive');
+    if (!this._termVerifyInflight) this._termVerifyInflight = new Set();
+    if (this._termVerifyInflight.has(topicBig)) return verdict('inconclusive');   // single-flight → hold, renewal retries
+    this._termVerifyInflight.add(topicBig);
+    try {
+      // dht.lookup is the NETWORK iterative that hops relays and escapes the local
+      // synaptome — the true origin-independent oracle. findKClosest is local-only
+      // (returns self at a genuine local minimum in 0ms), so it is only a fast
+      // fallback when the network lookup is unavailable.
+      const probe = (typeof this.dht.lookup === 'function')
+        ? this.dht.lookup(topicBig).then((r) => (r && Array.isArray(r.path) && r.path.length) ? r.path[r.path.length - 1] : null)
+        : this.dht.findKClosest(topicBig, 1).then((a) => (Array.isArray(a) && a.length) ? a[0] : null);
+      const TERM_VERIFY_MS = Number(process.env.TERM_VERIFY_MS || 500);
+      const id = await Promise.race([
+        probe,
+        new Promise((res) => { const t = setTimeout(() => res('__t__'), TERM_VERIFY_MS); if (t && typeof t.unref === 'function') t.unref(); }),
+      ]);
+      if (id === '__t__' || id == null) {
+        if (typeof this.warmRootHint === 'function') this.warmRootHint(topicBig).catch(() => {});
+        return verdict('inconclusive');
+      }
+      let cBig; try { cBig = idBig(id); } catch { return verdict('inconclusive'); }
+      const cHex = lc(idHex(cBig));
+      if (cBig === this.nodeId) return verdict('self', null, cHex);
+      if ((cBig ^ topicBig) < selfDist) return verdict('closer', cHex, cHex);
+      return verdict('self', null, cHex);                                         // nobody strictly closer → legitimate self-root
+    } catch { return verdict('inconclusive'); }
+    finally { this._termVerifyInflight.delete(topicBig); }
   }
 
   // Forward a one-shot message (PUB/KILL) to the beaconed root and let the

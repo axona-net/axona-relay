@@ -37,7 +37,7 @@ pub.peer.onLog('info', rec('pub'));
 const subAm = sub.peer._axonaManager, pubAm = pub.peer._axonaManager;
 console.error('connected  sub', S(sub.nodeId), ' pub', S(pub.nodeId));
 
-const topic = `harness/disc-${S(sub.author.authorId)}`;
+const topic = process.env.TOPIC || `harness/disc-${S(sub.author.authorId)}`;
 const desc = { region: REGION, name: topic };
 const topicBig = await deriveTopicIdBig({ region: REGION, name: topic });
 console.error('topicId', S(topicBig));
@@ -66,7 +66,9 @@ console.log('pub nodeId       ', S(pub.nodeId));
 console.log('\n-- disc events --');
 for (const d of disc) console.log(`  [${d.peer}] ${d.ev.padEnd(12)} self=${d.self}` +
   (d.why ? ` why=${d.why}` : '') + (d.hint !== undefined ? ` hint=${d.hint}` : '') +
-  (d.root !== undefined ? ` root=${d.root}` : '') + (d.n !== undefined ? ` fanoutN=${d.n} members=${JSON.stringify(d.members)}` : ''));
+  (d.kind !== undefined ? ` kind=${d.kind}` : '') + (d.terminus !== undefined && d.terminus !== null ? ` terminus=${d.terminus}` : '') +
+  (d.ms !== undefined ? ` ms=${d.ms}` : '') +
+  (d.root !== undefined && d.ev !== 'term-verify' ? ` root=${d.root}` : '') + (d.n !== undefined ? ` fanoutN=${d.n} members=${JSON.stringify(d.members)}` : ''));
 if (!disc.length) console.log('  (none — root is an un-instrumented fleet relay; see resolution check below)');
 
 console.log('\n-- resolution --');

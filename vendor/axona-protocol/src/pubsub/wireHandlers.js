@@ -169,7 +169,7 @@ export const wireHandlersMethods = {
   },
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
-  _onSub(payload, meta) {
+  async _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
@@ -199,7 +199,23 @@ export const wireHandlersMethods = {
       // roots on its own publish and serves its local subscriber.
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
-    let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'sub-terminal');
+    let role = this.axonRoles.get(topicBig);
+    if (!role) {
+      // Synchronous terminal verification (council 2026-08-30, gated). Before a
+      // greedy terminal crowns itself sub-terminal, confirm origin-independently
+      // that it is genuinely closest. A strictly-closer reachable node → attach
+      // there (the proven beacon-defer path, source now the iterative oracle
+      // instead of a beacon). Timeout/inconclusive → FAIL CLOSED: hold the seat
+      // (mySubscriptions is set, so the renewal retries) and never self-root a
+      // local minimum. Flag OFF → byte-identical to the prior line.
+      if (this._subTerminalVerify) {
+        const verdict = await this._verifyTerminalOwnership(topicBig);
+        if (verdict.kind === 'closer') { this._deferToRoot(topicBig, T.SUB, payload, verdict.rootHex); return 'consumed'; }
+        if (verdict.kind !== 'self') return 'consumed';   // inconclusive → fail closed, renewal retries
+        // 'self' → verified local ownership → fall through to self-root
+      }
+      role = this._becomeRoot(topicBig, 'sub-terminal');
+    }
     if (!role) {
       // Admission refused (bridge fence) — do not seat here. This used to return
       // silently, which is the SAME missing concept as the PUB loop wearing the
