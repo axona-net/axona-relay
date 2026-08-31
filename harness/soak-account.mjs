@@ -110,6 +110,18 @@ const loadGlob = (re) => {
 };
 const disc = [...load('disc'), ...loadGlob(/^relay-disc-/)].filter((d) => d.stream !== 'lat');
 for (const d of disc) d.cw = (typeof d.wall === 'number' ? d.wall : Date.parse(d.wall)) - (OFFSETS[d.host] ?? 0);
+
+// root-receipt evidence (David 2026-08-31): the set of msgIds a fleet ROOT received
+// (relay-side lat stage root:recv). A message MISSING at a subscriber but present in
+// this set reached a root and was NOT pushed down — a fanout/registration failure,
+// not a routing failure. Absent from the set = it never reached a root (routing/pub).
+const rootRecvMsgIds = new Set();
+for (const f of readdirSync(DIR).filter((f) => /^relay-disc-/.test(f) && f.endsWith('.jsonl'))) {
+  for (const line of readFileSync(`${DIR}/${f}`, 'utf8').split('\n')) {
+    if (!line.trim()) continue;
+    try { const r = JSON.parse(line); if (r.stream === 'lat' && r.stage === 'root:recv' && r.msgId) rootRecvMsgIds.add(r.msgId); } catch { /* */ }
+  }
+}
 const discByTopic = new Map();  // topicName -> [disc...] (sorted)
 for (const d of disc) { const name = nameByHex.get(d.t); if (!name) continue; if (!discByTopic.has(name)) discByTopic.set(name, []); discByTopic.get(name).push(d); }
 for (const arr of discByTopic.values()) arr.sort((a, b) => a.cw - b.cw);
@@ -162,6 +174,7 @@ const migGaps = [];                              // delivery latency of delivere
 const MIGRATION_GAP_SLO_MS = MANIFEST.bounds.MIGRATION_GAP_SLO_MS;   // 10000, distinct from the 120s deadline
 let trials = 0;                                   // (trial,reader) pairs on confirmed publishes
 let liveN = 0, repairN = 0, missingN = 0;
+const missClass = { reachedRootNotDelivered: 0, neverReachedRoot: 0 };  // fanout vs routing loss
 const seg = { migration: { live: 0, repair: 0, missing: 0 }, stable: { live: 0, repair: 0, missing: 0 }, reattach: { live: 0, repair: 0, missing: 0 } };
 const latBySeg = { stable: [], migration: [] };   // live latency split by segment (is migration slower?)
 const causal = { escape: { trials: 0, missing: 0, liveLat: [] }, noEscape: { trials: 0, missing: 0, liveLat: [] } };
@@ -208,7 +221,11 @@ for (const o of ops.values()) {
       const dt = firstWatch.cw - startCw; deliverCw = firstWatch.cw;
       if (dt <= LIVE_WINDOW_MS) { cls = 'live'; liveN++; lat.live[phase].push(dt); }
       else { cls = 'repair'; repairN++; lat.repair[phase].push(dt); }
-    } else { cls = 'missing'; missingN++; }
+    } else {
+      cls = 'missing'; missingN++;
+      // classify the loss: did a root receive this message (fanout failure) or not (routing failure)?
+      if (rootRecvMsgIds.has(o.api.msgId)) missClass.reachedRootNotDelivered++; else missClass.neverReachedRoot++;
+    }
     const sg = topicSegments(o.topic, startCw, deliverCw ?? deadline);
     const bucket = sg.migration ? 'migration' : 'stable';
     seg[bucket][cls]++;
@@ -234,6 +251,13 @@ const account = {
     delivered: liveN + repairN,
     deliveryRatePct: trials ? +(100 * (liveN + repairN) / trials).toFixed(3) : null,
     missingRatePct: trials ? +(100 * missingN / trials).toFixed(3) : null,
+  },
+  missingClassification: {
+    note: 'David 2026-08-31: a missing message that a ROOT received (relay-side root:recv) reached a root but was not pushed to the subscriber — a FANOUT/registration failure; one with no root:recv NEVER reached a root — a ROUTING/publish failure. Needs relay-side disc (LAT_TRACE) to populate.',
+    rootRecvMsgIdsSeen: rootRecvMsgIds.size,
+    reachedRootNotDelivered: missClass.reachedRootNotDelivered,
+    neverReachedRoot: missClass.neverReachedRoot,
+    fanoutSharePct: missingN ? +(100 * missClass.reachedRootNotDelivered / missingN).toFixed(1) : null,
   },
   duplicate: {
     note: 'REAL duplicate = same msgId delivered >1x via WATCH (live path fired twice). watch+pull is the head-sweep re-reading, NOT a duplicate. kNear must not win by inflating real duplicates.',
