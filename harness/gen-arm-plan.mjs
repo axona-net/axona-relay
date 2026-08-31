@@ -25,12 +25,16 @@ if (!Number.isInteger(DURATION) || DURATION <= 0) { console.error('gen-arm-plan:
 // the runtime floor guard in churn.mjs re-measures actual census before every
 // action, so a mid-run drift is refused, never forced past the floor.
 const FLOOR_PCT = 95;
+// AB_EXCLUDE_HOSTS (comma-separated) drops hosts from the churn plan — used to run
+// the kNear A/B on the reliably-armable unix relays only, since the win re-arm is
+// unreliable and would leave a mixed-kNear fleet (2026-08-31).
+const EXCLUDE = new Set((process.env.AB_EXCLUDE_HOSTS || '').split(',').map((s) => s.trim()).filter(Boolean));
 const HOSTS = [
   { host: 'm4', size: 25 },
   { host: 'm1', size: 12 },
   { host: 'axona-linux', size: 5 },
   { host: 'axona-win', size: 20 },
-].map((h) => ({
+].filter((h) => !EXCLUDE.has(h.host)).map((h) => ({
   ...h,
   // killable = an abrupt single-relay kill keeps the host at/above its 95%
   // floor. Only m4 (24/25 = 96%) and win (19/20 = 95%) clear it; m1 (11/12 =
