@@ -94,7 +94,17 @@ const repairCw = (topic, peer, seq, deadline) => {
 };
 
 // ── disc: per-topic timeline + term-verify attribution ───────────────
-const disc = load('disc');
+// Sidecar disc (disc-<seed>-<peer>.jsonl) AND relay-side disc (relay-disc-*.jsonl,
+// written by the routing relays under the LAT_TRACE kernel — Aster condition 1).
+// The relay sink interleaves a lat stream; keep only the disc rows.
+const loadGlob = (re) => {
+  const out = [];
+  for (const f of readdirSync(DIR).filter((f) => re.test(f) && f.endsWith('.jsonl')).sort()) {
+    for (const line of readFileSync(`${DIR}/${f}`, 'utf8').split('\n')) { if (line.trim()) { try { out.push(JSON.parse(line)); } catch { /* */ } } }
+  }
+  return out;
+};
+const disc = [...load('disc'), ...loadGlob(/^relay-disc-/)].filter((d) => d.stream !== 'lat');
 for (const d of disc) d.cw = (typeof d.wall === 'number' ? d.wall : Date.parse(d.wall)) - (OFFSETS[d.host] ?? 0);
 const discByTopic = new Map();  // topicName -> [disc...] (sorted)
 for (const d of disc) { const name = nameByHex.get(d.t); if (!name) continue; if (!discByTopic.has(name)) discByTopic.set(name, []); discByTopic.get(name).push(d); }
@@ -134,6 +144,12 @@ const topicSegments = (topicName, fromCw, toCw) => {
   const roots = new Set(es.filter((d) => d.ev === 'sub-root' || d.ev === 'became-root').map((d) => d.root).filter(Boolean));
   return { migration: roots.size > 1, reattach: es.some((d) => d.ev === 'branch-reattach') };
 };
+// local-minimum ESCAPE on a topic in a window: a term-verify that found a strictly
+// closer root (kind=closer) — greedy would have stalled, the iterative lookup saved
+// it. Per-trial join (Aster condition 3): does a trial whose delivery window saw an
+// escape pay a latency tax or a higher miss rate? Needs relay-side disc to fire.
+const topicEscape = (topicName, fromCw, toCw) =>
+  (discByTopic.get(topicName) || []).some((d) => d.ev === 'term-verify' && d.kind === 'closer' && d.cw >= fromCw - 5000 && d.cw <= toCw + 5000);
 
 // ── frozen classification ────────────────────────────────────────────
 const pctl = (a, p) => a.length ? a.slice().sort((x, y) => x - y)[Math.min(a.length - 1, Math.floor(a.length * p))] : null;
@@ -141,8 +157,19 @@ const lat = { live: { cold: [], converged: [] }, repair: { cold: [], converged: 
 const migGaps = [];                              // delivery latency of delivered trials under an active migration
 const MIGRATION_GAP_SLO_MS = MANIFEST.bounds.MIGRATION_GAP_SLO_MS;   // 10000, distinct from the 120s deadline
 let trials = 0;                                   // (trial,reader) pairs on confirmed publishes
-let liveN = 0, repairN = 0, missingN = 0, dupExcess = 0, dupTrials = 0;
+let liveN = 0, repairN = 0, missingN = 0;
 const seg = { migration: { live: 0, repair: 0, missing: 0 }, stable: { live: 0, repair: 0, missing: 0 }, reattach: { live: 0, repair: 0, missing: 0 } };
+const latBySeg = { stable: [], migration: [] };   // live latency split by segment (is migration slower?)
+const causal = { escape: { trials: 0, missing: 0, liveLat: [] }, noEscape: { trials: 0, missing: 0, liveLat: [] } };
+// Duplicate accounting (Aster condition 2): a REAL duplicate delivery is the same
+// msgId pushed to a reader more than once via WATCH (the live forward path firing
+// twice). A watch arrival plus pull-head arrivals is NOT a duplicate — it is the
+// harness's own head-sweep re-reading a message it already has. Path-pair split
+// makes that distinction visible, so a density change cannot look like a win by
+// amplifying duplicate fanout while the sampler noise is filtered out.
+const dup = { realTrials: 0, watchExcess: [], totalExcess: [],
+  pathPairs: { 'watch-clean': 0, 'watch+pull(sampler)': 0, 'watch-DUP': 0, 'pull-only(repair)': 0, 'pull-repeated(sampler)': 0 },
+  realBySegment: { stable: 0, migration: 0 }, realByClass: { live: 0, repair: 0 } };
 let confirmedPublishes = 0;
 
 for (const o of ops.values()) {
@@ -155,8 +182,15 @@ for (const o of ops.values()) {
   for (const p of readers) {
     trials++;
     const arrivals = (o.obs.get(p) || []).filter((x) => x.msgId === o.api.msgId).sort((a, b) => a.cw - b.cw);
-    // duplicate = EXCESS arrivals per (msgId, reader), orthogonal, never a delivery
-    if (arrivals.length > 1) { dupTrials++; dupExcess += arrivals.length - 1; }
+    const W = arrivals.filter((x) => x.via === 'watch').length;
+    const P = arrivals.filter((x) => x.via === 'pull').length;
+    // real duplicate = >1 live watch delivery; path-pair classifies the rest
+    const realDup = W > 1;
+    if (realDup) { dup.realTrials++; dup.watchExcess.push(W - 1); }
+    if (arrivals.length > 1) dup.totalExcess.push(arrivals.length - 1);
+    const pp = W > 1 ? 'watch-DUP' : (W === 1 && P >= 1) ? 'watch+pull(sampler)' : (W === 1) ? 'watch-clean'
+      : (P > 1) ? 'pull-repeated(sampler)' : (P === 1) ? 'pull-only(repair)' : null;
+    if (pp) dup.pathPairs[pp] = (dup.pathPairs[pp] ?? 0) + 1;
     const firstWatch = arrivals.find((x) => x.via === 'watch' && x.cw <= deadline);
     const phase = startCw < convergedBoundary ? 'cold' : 'converged';
     let cls, deliverCw = null;
@@ -173,8 +207,13 @@ for (const o of ops.values()) {
     const bucket = sg.migration ? 'migration' : 'stable';
     seg[bucket][cls]++;
     if (sg.reattach) seg.reattach[cls]++;
+    if (realDup) { dup.realBySegment[bucket]++; if (cls === 'live' || cls === 'repair') dup.realByClass[cls]++; }
     // migration-gap SLO (10s): a delivered trial under an active migration must arrive within the SLO
     if (deliverCw != null && sg.migration) migGaps.push(deliverCw - startCw);
+    // per-trial causal join (E): latency by segment, and outcome by local-min escape
+    if (cls === 'live') latBySeg[bucket].push(deliverCw - startCw);
+    const cc = topicEscape(o.topic, startCw, deliverCw ?? deadline) ? causal.escape : causal.noEscape;
+    cc.trials++; if (cls === 'missing') cc.missing++; if (cls === 'live') cc.liveLat.push(deliverCw - startCw);
   }
 }
 
@@ -189,7 +228,15 @@ const account = {
     delivered: liveN + repairN,
     deliveryRatePct: trials ? +(100 * (liveN + repairN) / trials).toFixed(3) : null,
     missingRatePct: trials ? +(100 * missingN / trials).toFixed(3) : null,
-    duplicate: { trialsWithExcess: dupTrials, excessArrivals: dupExcess },
+  },
+  duplicate: {
+    note: 'REAL duplicate = same msgId delivered >1x via WATCH (live path fired twice). watch+pull is the head-sweep re-reading, NOT a duplicate. kNear must not win by inflating real duplicates.',
+    realDuplicateTrials: dup.realTrials,
+    realDuplicateRatePct: trials ? +(100 * dup.realTrials / trials).toFixed(3) : null,
+    watchExcessPerTrial: { p50: pctl(dup.watchExcess, 0.5), p95: pctl(dup.watchExcess, 0.95), p99: pctl(dup.watchExcess, 0.99), max: dup.watchExcess.length ? Math.max(...dup.watchExcess) : null },
+    realBySegment: dup.realBySegment, realByClass: dup.realByClass,
+    pathPairs: dup.pathPairs,
+    totalExcessInclSampler: dup.totalExcess.reduce((a, b) => a + b, 0),
   },
   latency: {
     live: { cold: classStat(lat.live.cold), converged: classStat(lat.live.converged) },
@@ -206,6 +253,14 @@ const account = {
   segmentation: {
     stable: seg.stable, migration: seg.migration, reattachFired: seg.reattach,
     note: 'migration = topic root changed in the trial window; reattachFired counted where a branch-reattach appeared (may overlap migration)',
+  },
+  causal: {
+    note: 'per-trial join (Aster 3): latency by segment, and outcome split by whether a local-minimum escape (term-verify closer) fired on the topic in the delivery window. Escape correlation needs relay-side disc — it is empty when disc ran sidecar-only.',
+    liveLatencyBySegment: { stable: classStat(latBySeg.stable), migration: classStat(latBySeg.migration) },
+    byEscape: {
+      withEscape: { trials: causal.escape.trials, missRatePct: causal.escape.trials ? +(100 * causal.escape.missing / causal.escape.trials).toFixed(3) : null, liveLatP50: pctl(causal.escape.liveLat, 0.5), liveLatP95: pctl(causal.escape.liveLat, 0.95) },
+      noEscape: { trials: causal.noEscape.trials, missRatePct: causal.noEscape.trials ? +(100 * causal.noEscape.missing / causal.noEscape.trials).toFixed(3) : null, liveLatP50: pctl(causal.noEscape.liveLat, 0.5), liveLatP95: pctl(causal.noEscape.liveLat, 0.95) },
+    },
   },
   terminalVerify: {
     verifyAttempts: tv.attempts,

@@ -38,6 +38,7 @@ import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.
 import { autoDetectRegion } from './geolocate.js';
 import { resolveBridgeUrl } from './network.js';
 import { readFile } from 'node:fs/promises';
+import { appendFileSync, mkdirSync } from 'node:fs';
 
 const RELAY_VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -224,6 +225,22 @@ async function main() {
     peer.onPeerLeave?.((id) => present.logLine(`{gray-fg}- peer{/} ${id.slice(0, 12)}…`));
     ['info', 'warn', 'error'].forEach((lvl) => peer.onLog?.(lvl, (msg, ctx) => onLog(lvl, msg, ctx)));
     peer.onError?.((err) => onLog('error', err?.code || 'error', { message: err?.message }));
+    // RELAY-SIDE disc/lat capture (Aster condition 1, 2026-08-31): under LAT_TRACE
+    // the routing relays — not just the sidecars — record their pubsub:disc events
+    // (became-root / sub-root / term-verify / branch-reattach, each carrying the
+    // topicId hex) and lat stages to a per-pid JSONL. This closes the terminal-
+    // verify attribution gap and lets a trial's local-minimum distance/escape join
+    // to its outcome. DEFAULT OFF (LAT_TRACE unset ⇒ byte-identical to before), and
+    // the fresh peer per connect attempt gets one handler (the prior peer is torn
+    // down), so a reconnect does not double-log.
+    if (process.env.LAT_TRACE === '1') {
+      try { mkdirSync('relay-logs', { recursive: true }); } catch { /* */ }
+      const discFile = `relay-logs/disc-relay-${process.pid}.jsonl`;
+      peer.onLog?.('info', (msg, ctx) => {
+        if (!ctx || (msg !== 'pubsub:disc' && msg !== 'pubsub:lat-stage')) return;
+        try { appendFileSync(discFile, JSON.stringify({ wall: Date.now(), pid: process.pid, self: (identity?.id || '').slice(0, 12), stream: msg === 'pubsub:disc' ? 'disc' : 'lat', ...ctx }) + '\n'); } catch { /* */ }
+      });
+    }
     try {
       await Promise.race([
         startRelay({ peer, transport }),

@@ -29,7 +29,13 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 RESULTS=harness/results
 mkdir -p "$RESULTS"
 
-COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-60000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000} TRACE=${TRACE:-0} LAT_TRACE=${LAT_TRACE:-0} SUB_TERMINAL_VERIFY=${SUB_TERMINAL_VERIFY:-1} FINDK_SKIP_DEAD=${FINDK_SKIP_DEAD:-1}"
+# HEAD_SWEEP_MS default lowered 60000 → 10000 (Aster condition 1): the pull-head
+# sweep is the repair-observation channel, so a 10s cadence observes recovery
+# ~continuously through the 120s deadline (12 samples) instead of 2, tightening the
+# missing bound. Safe: soak-account isolates REAL duplicates (watch>1) from the
+# sampler's watch+pull re-reads, so the extra sweeps do not inflate the duplicate
+# signal. Override with HEAD_SWEEP_MS for a lighter-load run.
+COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-10000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000} TRACE=${TRACE:-0} LAT_TRACE=${LAT_TRACE:-0} SUB_TERMINAL_VERIFY=${SUB_TERMINAL_VERIFY:-1} FINDK_SKIP_DEAD=${FINDK_SKIP_DEAD:-1}"
 
 launch_local() {  # peerIdx...
   for i in "$@"; do
@@ -107,9 +113,18 @@ else
   echo "  churn driver pid $!"
 fi
 
+# Capacity sampler (Aster condition 3): OS-level per-host relay count / RSS / CPU
+# every 30s, so kNear arms are compared at equal capacity. Killed before collection.
+CAP_PID=""
+if [ "${CAPACITY_SAMPLE:-1}" = 1 ]; then
+  SEED=$SEED INTERVAL_S=${CAP_INTERVAL_S:-30} nohup bash harness/capacity-sample.sh > "$RESULTS/capacity-$SEED.log" 2>&1 &
+  CAP_PID=$!; echo "  capacity sampler pid $CAP_PID → $RESULTS/capacity-$SEED.jsonl"
+fi
+
 SETTLE=$(( DURATION_MS / 1000 + 120 ))
 echo "── waiting ${SETTLE}s (window + settle)"
 sleep "$SETTLE"
+[ -n "$CAP_PID" ] && { kill "$CAP_PID" 2>/dev/null; echo "── capacity sampler stopped"; }
 
 echo "── collecting remote ledgers (+disc +latstage +klog for the frozen accounting)"
 # The segmentation (disc), per-stage latency (latstage) and kernel-instability
@@ -119,6 +134,16 @@ for fam in sidecar disc latstage klog; do
   scp -q "m1:~/Documents/claude/axona-relay/harness/results/$fam-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || true
   scp -q "axona-linux:~/Documents/claude/axona-relay/harness/results/$fam-$SEED-*.jsonl" "$RESULTS/" 2>/dev/null || true
 done
+# RELAY-SIDE disc (Aster condition 1): the routing relays write disc-relay-<pid>.jsonl
+# to relay-logs/ (only when rolled with the LAT_TRACE kernel, A). Collect from every
+# host into results as relay-disc-<host>-* so soak-account can join term-verify and
+# local-minimum escape per trial. Namespaced by host so pids can't collide.
+for h in m1 axona-linux; do
+  for f in $(ssh -o ConnectTimeout=10 "$h" 'ls ~/Documents/claude/axona-relay/relay-logs/disc-relay-*.jsonl 2>/dev/null' 2>/dev/null); do
+    scp -q "$h:$f" "$RESULTS/relay-disc-$h-$(basename "$f")" 2>/dev/null || true
+  done
+done
+for f in relay-logs/disc-relay-*.jsonl; do [ -f "$f" ] && cp -f "$f" "$RESULTS/relay-disc-m4-$(basename "$f")"; done 2>/dev/null || true
 # Windows collection by ssh-cat — scp chokes on the drive-letter colon.
 for i in $(seq 0 $(( NODES - 1 ))); do
   f="sidecar-$SEED-$i.jsonl"
@@ -135,4 +160,9 @@ node harness/analyze.mjs --dir "$RESULTS" --seed "$SEED" --nodes "$NODES" \
   --offsets '{"m4":0,"m1":136,"axona-linux":182,"axona-win":89}' \
   --out "$RESULTS/findings-$SEED.jsonl" \
   --summary-out "$RESULTS/summary-$SEED.json"
-echo "── done (analyzer exit $?)"
+echo "── frozen accounting (soak-account.mjs @ manifest)"
+node harness/soak-account.mjs --dir "$RESULTS" --seed "$SEED" --nodes "$NODES" --region "$REGION" \
+  --open-n "$OPEN_N" --owned-n "$OWNED_N" --duration-ms "$DURATION_MS" \
+  --offsets '{"m4":0,"m1":136,"axona-linux":182,"axona-win":89}' \
+  --manifest harness/soak-manifest.json --out "$RESULTS/account-$SEED.json" > "$RESULTS/account-$SEED.txt" 2>&1
+echo "── done (frozen accounting → $RESULTS/account-$SEED.json)"
