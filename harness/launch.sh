@@ -29,13 +29,15 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 RESULTS=harness/results
 mkdir -p "$RESULTS"
 
-# HEAD_SWEEP_MS default lowered 60000 → 10000 (Aster condition 1): the pull-head
-# sweep is the repair-observation channel, so a 10s cadence observes recovery
-# ~continuously through the 120s deadline (12 samples) instead of 2, tightening the
-# missing bound. Safe: soak-account isolates REAL duplicates (watch>1) from the
-# sampler's watch+pull re-reads, so the extra sweeps do not inflate the duplicate
-# signal. Override with HEAD_SWEEP_MS for a lighter-load run.
-COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-10000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000} TRACE=${TRACE:-0} LAT_TRACE=${LAT_TRACE:-0} SUB_TERMINAL_VERIFY=${SUB_TERMINAL_VERIFY:-1} FINDK_SKIP_DEAD=${FINDK_SKIP_DEAD:-1}"
+# HEAD_SWEEP_MS default REVERTED to 60000 (2026-08-31). The 10s cadence I set for
+# "continuous repair" was an OBSERVER EFFECT: each sweep pull is a routed op that
+# contends with live delivery at the topic roots, and 6x that load dropped delivery
+# 97.9%→85.4% at fixed kNear=5 (seed-33 isolation) — not CPU (flat), root/lookup
+# occupancy. 60s is the proven-clean cadence (seed-31, 97.9%). TRADEOFF: coarser
+# repair-observation resolution; the right fix for continuous repair is a PASSIVE /
+# relay-side delivery signal that injects no pull load (follow-up), not a faster
+# active sweep. Override with HEAD_SWEEP_MS to test a middle cadence (e.g. 30s).
+COMMON="NODES=$NODES SEED=$SEED DURATION_MS=$DURATION_MS OPEN_N=$OPEN_N OWNED_N=$OWNED_N REGION=$REGION BRIDGE=$BRIDGE LEDGER_DIR=harness/results HEAD_SWEEP_MS=${HEAD_SWEEP_MS:-60000} READINESS_MS=${READINESS_MS:-15000} COORD_WAIT_MS=${COORD_WAIT_MS:-120000} TRACE=${TRACE:-0} LAT_TRACE=${LAT_TRACE:-0} SUB_TERMINAL_VERIFY=${SUB_TERMINAL_VERIFY:-1} FINDK_SKIP_DEAD=${FINDK_SKIP_DEAD:-1}"
 
 launch_local() {  # peerIdx...
   for i in "$@"; do
