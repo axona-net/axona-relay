@@ -80,10 +80,15 @@ export const ARM_ENVS = ['RELAY_SYNAPTOME_MAINTAIN', 'RELAY_ADMISSION_GATE', 'RE
 
 export function armingFromEnv(env = process.env) {
   const armedEnvs = ARM_ENVS.filter((e) => env[e] === '1');
+  // kNear (the XOR-nearest successor quota for last-mile descent) is env-tunable
+  // for the density sweep (David 2026-08-30). Default 5 = byte-identical to before.
+  // Clamped to [1,64] so a typo cannot request an unbounded successor set.
+  const kNearOf = (raw, dflt) => { const n = Number.parseInt(raw, 10); return Number.isInteger(n) ? Math.min(64, Math.max(1, n)) : dflt; };
+  const maintainKNear = kNearOf(env.RELAY_SYNAPTOME_KNEAR, 5);
   return {
     armedEnvs,
     armMaintain: env.RELAY_SYNAPTOME_MAINTAIN === '1'
-      ? { kNear: 5, intervalMs: 15000, maxPerTick: 3 } : null,
+      ? { kNear: maintainKNear, intervalMs: 15000, maxPerTick: 3 } : null,
     armGate: env.RELAY_ADMISSION_GATE === '1'
       ? { kNear: 5, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } : null,
     armGuard: env.RELAY_ATTEMPT_GUARD === '1'
