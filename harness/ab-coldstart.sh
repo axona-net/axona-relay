@@ -23,8 +23,15 @@ echo "[coldstart] stopping all relays"
 for p in $(pgrep -f "src/index.js" 2>/dev/null); do [ "$(basename "$(ps -p "$p" -o comm= 2>/dev/null)" 2>/dev/null)" = node ] && kill "$p" 2>/dev/null; done
 ssh -o ConnectTimeout=10 m1 'for p in $(pgrep -f "src/index.js"); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] && kill $p 2>/dev/null; done' 2>/dev/null
 ssh -o ConnectTimeout=10 axona-linux 'for p in $(pgrep -f "src/index.js"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) kill $p 2>/dev/null;; esac; done' 2>/dev/null
-printf '%s\n' 'powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name=\x27node.exe\x27\" | Where-Object { $_.CommandLine -match \x27src.index.js\x27 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }"' \
-  | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' 2>/dev/null
+# win stop: heredoc over ssh (printf-piped powershell mangled the \x27 quotes and
+# silently no-op'd; Stop-Process -Force is immediate, not the graceful ~5s/node the
+# harness wrapper does). Verify it reaches 0.
+{ cat <<'WINSTOP'
+powershell -NoProfile -Command "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { \$_.CommandLine -match 'src.index.js' } | ForEach-Object { Stop-Process -Id \$_.ProcessId -Force }"
+sleep 2
+echo -n "win after stop: "; powershell -NoProfile -Command "@(Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { \$_.CommandLine -match 'src.index.js' }).Count"
+WINSTOP
+} | ssh -o ConnectTimeout=20 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' 2>/dev/null | tr -d '\r'
 # also clear the relay-side disc so the coming arm starts fresh
 rm -f relay-logs/disc-relay-*.jsonl
 ssh -o ConnectTimeout=10 m1 'rm -f ~/Documents/claude/axona-relay/relay-logs/disc-relay-*.jsonl' 2>/dev/null
@@ -44,10 +51,19 @@ echo "[coldstart] starting m1 x12"
 ssh -o ConnectTimeout=15 m1 "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && for i in \$(seq 1 12); do $ENVV caffeinate -i nohup $NODE_M1 src/index.js >> relay-logs/relay-cold-$ts-m1-\$i.log 2>&1 </dev/null & done; echo m1-started" 2>&1 | grep -v Warning
 echo "[coldstart] starting linux x5"
 ssh -o ConnectTimeout=15 axona-linux "cd ~/Documents/claude/axona-relay && mkdir -p relay-logs && for i in \$(seq 1 5); do $ENVV nohup \$HOME/bin/node src/index.js >> relay-logs/relay-cold-$ts-lx-\$i.log 2>&1 </dev/null & done; echo linux-started" 2>&1 | grep -v Warning
-echo "[coldstart] starting win x20 (schtasks, fresh)"
-for i in $(seq 1 20); do
-  printf 'RELAY_REGION=%s BRIDGE_URL=%s ARM_STACK=1 ARM_FIX=1 RELAY_SYNAPTOME_KNEAR=%s LAT_TRACE=1 /c/Users/david/github/axona-relay/harness/win-relay.sh start\n' "$REGION" "$BRIDGE" "$K" \
-    | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' >/dev/null 2>&1
-  sleep 0.3
+echo "[coldstart] starting win x20 (batched on-box, verify + top-up)"
+# One ssh session: census, start the deficit, wait for bind, repeat up to 3 passes
+# to 20 (each schtasks start has a ~5% miss rate, so a single pass lands ~16-19).
+{ cat <<WINSTART
+export RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=1 ARM_FIX=1 RELAY_SYNAPTOME_KNEAR=$K LAT_TRACE=1
+WR=/c/Users/david/github/axona-relay/harness/win-relay.sh
+for pass in 1 2 3; do
+  have=\$(\$WR census 2>/dev/null | tr -d '[:space:]'); have=\${have:-0}
+  need=\$((20 - have)); [ "\$need" -le 0 ] && break
+  for i in \$(seq 1 \$need); do \$WR start >/dev/null 2>&1; sleep 0.4; done
+  sleep 22
 done
+echo -n "win final census: "; \$WR census
+WINSTART
+} | ssh -o ConnectTimeout=20 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' 2>/dev/null | tr -d '\r'
 echo "[coldstart] all start commands issued $(date -u +%H:%M:%SZ); relays bind over the next ~30-60s"
