@@ -147,14 +147,14 @@ plan.topics.forEach((t, ti) => {
   const desc = t.kind === 'owned'
     ? { ...D(t.name), owner: authors.get(t.publishers) ?? author.authorId, write: 'owner' }
     : D(t.name);
-  myTopics.push({ ti, t, desc, lastSeqSeen: -1, watchLastMono: 0 });
+  myTopics.push({ ti, t, desc, lastSeqSeen: -1, lastMsgId: null, watchLastMono: 0 });
 });
 for (const m of myTopics) {
   const sh = await peer.sub(m.desc, (envp) => {
     const msg = envp?.message;
     if (msg?.k !== 'load') return;
     m.watchLastMono = Date.now();
-    if (Number.isInteger(msg.seq) && msg.seq > m.lastSeqSeen) m.lastSeqSeen = msg.seq;
+    if (Number.isInteger(msg.seq) && msg.seq > m.lastSeqSeen) { m.lastSeqSeen = msg.seq; m.lastMsgId = envp.msgId; }
     led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: envp.msgId,
       via: 'watch', payloadHash: sha256(JSON.stringify(msg)) });
   }, { since: 'all' });
@@ -201,26 +201,20 @@ const t0 = Date.now();
 
 // ── samplers ─────────────────────────────────────────────────────────
 const samplers = [];
-const SWEEP_CAP = 6;   // concurrent pulls per head-sweep batch
-// Head sweep (splitHead detector input): every reader pulls the head of EVERY
-// topic it holds, so two readers' heads for the same topic land in one window
-// and are comparable. The old sampler pulled ONE RANDOM topic per tick, so
-// readers never lined up and split-root was unobservable — that is why Arm A
-// had zero split-root rows. Also feeds delivery accounting via observe(pull).
-samplers.push(setInterval(async () => {
-  for (let i = 0; i < myTopics.length; i += SWEEP_CAP) {
-    await Promise.all(myTopics.slice(i, i + SWEEP_CAP).map(async (m) => {
-      try {
-        const head = await peer.pull(null, { topic: m.desc, timeoutMs: 8_000 });
-        const msg = head?.message;
-        led.head({ topic: m.t.name, descriptor: m.desc,
-          headSeq: Number.isInteger(msg?.seq) ? msg.seq : null, headMsgId: head?.msgId ?? null });
-        if (Number.isInteger(msg?.seq)) {
-          led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: head.msgId,
-            via: 'pull', payloadHash: sha256(JSON.stringify(msg)) });
-        }
-      } catch { led.head({ topic: m.t.name, descriptor: m.desc, headSeq: null, headMsgId: null }); }
-    }));
+// Head sweep — LOCAL read (2026-08-31, David's catch). The subscriber is ON the
+// topic's axon tree and already holds every message it received via the watch
+// callback, so its head is m.lastSeqSeen / m.lastMsgId — no routed peer.pull to
+// the root. The old routed pull was the OBSERVER EFFECT: each pull walked to the
+// root and contended with the live push there, dropping delivery 97.9%→85.4% at
+// 10s cadence (seed-33). Reading local is free, so the cadence no longer perturbs
+// the run. Feeds split-root detection (two readers' local heads compared). The
+// observe(via:'pull') channel is gone: everything a subscriber receives — live push
+// AND renewal replay — already arrives through the watch callback and is recorded
+// there, so the pull row was redundant as well as expensive.
+samplers.push(setInterval(() => {
+  for (const m of myTopics) {
+    led.head({ topic: m.t.name, descriptor: m.desc,
+      headSeq: m.lastSeqSeen >= 0 ? m.lastSeqSeen : null, headMsgId: m.lastMsgId });
   }
 }, Number(env('HEAD_SWEEP_MS', 60_000))));
 // State sweep: honest watch liveness + the participant connection set + roles.
@@ -247,17 +241,13 @@ samplers.push(setInterval(() => {
 // ── end of window ────────────────────────────────────────────────────
 await sleep(Math.max(0, DURATION_MS - (Date.now() - t0)));
 for (const s of samplers) clearInterval(s);
-// Final replay sweep: a LATE pull per topic so eventual-replay integrity has
-// its closing sample (the reconciliation window's read).
+// Final head sample from LOCAL state (2026-08-31) — no routed pull. The watch
+// record is the authoritative view of what THIS subscriber received; a closing
+// local head lets the analyzer see the reader's final position without injecting
+// a last burst of root-routed reads at window end.
 for (const m of myTopics) {
-  try {
-    const head = await peer.pull(null, { topic: m.desc, timeoutMs: 20_000 });
-    const msg = head?.message;
-    if (Number.isInteger(msg?.seq)) {
-      led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: head.msgId,
-        via: 'replay', payloadHash: sha256(JSON.stringify(msg)) });
-    }
-  } catch { /* ledgered by absence */ }
+  led.head({ topic: m.t.name, descriptor: m.desc,
+    headSeq: m.lastSeqSeen >= 0 ? m.lastSeqSeen : null, headMsgId: m.lastMsgId });
 }
 led.event({ kind: 'end', detail: { planHash } });
 try { await peer.leave({ timeoutMs: 8_000 }); } catch { /* dying */ }

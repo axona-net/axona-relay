@@ -29,6 +29,10 @@ const OFFSETS = JSON.parse(arg('offsets', '{}'));
 const DURATION_MS = Number(arg('duration-ms', 10_800_000));
 const MANIFEST = JSON.parse(readFileSync(arg('manifest', 'harness/soak-manifest.json'), 'utf8'));
 const MISSING_DEADLINE_MS = MANIFEST.bounds.MISSING_DEADLINE_MS;      // 120000
+// live/repair split boundary (2026-08-31): a watch delivery within this window of
+// api-confirm is the live forward push; beyond it, delivery waited for a renewal
+// cycle (repair). Default = RENEW_FAST (5s). Overridable via manifest.bounds.
+const LIVE_WINDOW_MS = MANIFEST.bounds.LIVE_WINDOW_MS ?? 5000;
 const OUT = arg('out', `${DIR}/account-${SEED}.json`);
 if (!Number.isInteger(SEED) || !Number.isInteger(NODES)) { console.error('need --seed --nodes'); process.exit(2); }
 
@@ -191,18 +195,20 @@ for (const o of ops.values()) {
     const pp = W > 1 ? 'watch-DUP' : (W === 1 && P >= 1) ? 'watch+pull(sampler)' : (W === 1) ? 'watch-clean'
       : (P > 1) ? 'pull-repeated(sampler)' : (P === 1) ? 'pull-only(repair)' : null;
     if (pp) dup.pathPairs[pp] = (dup.pathPairs[pp] ?? 0) + 1;
+    // live/repair now split on WATCH-ARRIVAL TIMING (2026-08-31, pull removed). Every
+    // delivery a subscriber gets — the root's live fanout push AND a renewal replay —
+    // arrives through the watch callback; the difference is latency. A delivery within
+    // LIVE_WINDOW_MS of api-confirm is the forward push (live); a later one waited for a
+    // renewal cycle (repair). No routed pull, so no observer effect. Supersedes the
+    // pull-head repair proxy, which routed to the root and perturbed the run.
     const firstWatch = arrivals.find((x) => x.via === 'watch' && x.cw <= deadline);
     const phase = startCw < convergedBoundary ? 'cold' : 'converged';
     let cls, deliverCw = null;
-    if (firstWatch) { cls = 'live'; liveN++; deliverCw = firstWatch.cw; lat.live[phase].push(firstWatch.cw - startCw); }
-    else {
-      // repair: recovered via the pull-head sweep (renewal/replay), not the live push
-      const rcw = repairCw(o.topic, p, o.seq, deadline);
-      const firstObs = arrivals[0] && arrivals[0].cw <= deadline ? arrivals[0].cw : null;   // any non-watch observe
-      const rc = (rcw != null && (firstObs == null || rcw < firstObs)) ? rcw : firstObs;
-      if (rc != null) { cls = 'repair'; repairN++; deliverCw = rc; lat.repair[phase].push(rc - startCw); }
-      else { cls = 'missing'; missingN++; }
-    }
+    if (firstWatch) {
+      const dt = firstWatch.cw - startCw; deliverCw = firstWatch.cw;
+      if (dt <= LIVE_WINDOW_MS) { cls = 'live'; liveN++; lat.live[phase].push(dt); }
+      else { cls = 'repair'; repairN++; lat.repair[phase].push(dt); }
+    } else { cls = 'missing'; missingN++; }
     const sg = topicSegments(o.topic, startCw, deliverCw ?? deadline);
     const bucket = sg.migration ? 'migration' : 'stable';
     seg[bucket][cls]++;
