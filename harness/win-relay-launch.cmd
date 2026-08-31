@@ -18,4 +18,7 @@ if "%~5"=="1" (
   set FINDK_SKIP_DEAD=1
   set SUB_TERMINAL_VERIFY=1
 )
+REM %6 = kNear successor quota (density sweep); %7 = LAT_TRACE (relay-side disc)
+if not "%~6"=="" set RELAY_SYNAPTOME_KNEAR=%~6
+if "%~7"=="1" set LAT_TRACE=1
 node src\index.js >> %~4 2>&1

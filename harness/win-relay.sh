@@ -40,8 +40,10 @@ case "${1:-}" in
     # launcher with a short arg list: region, bridge, arm flag, logfile.
     arm="${ARM_STACK:-0}"
     armfix="${ARM_FIX:-0}"
+    knear="${RELAY_SYNAPTOME_KNEAR:-5}"
+    lat="${LAT_TRACE:-0}"
     launch='C:\Users\david\github\axona-relay\harness\win-relay-launch.cmd'
-    tr="cmd /c $launch $REGION $BRIDGE $arm relay-logs\\relay-churn-$ts.log $armfix"
+    tr="cmd /c $launch $REGION $BRIDGE $arm relay-logs\\relay-churn-$ts.log $armfix $knear $lat"
     powershell -NoProfile -Command "schtasks /Create /F /TN axona-relay-churn-$ts /SC ONCE /ST 00:00 /TR '$tr' | Out-Null; schtasks /Run /TN axona-relay-churn-$ts | Out-Null"
     echo started
     ;;

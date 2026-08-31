@@ -24,6 +24,10 @@ export RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 R
 # here — arm-converge is only invoked for the fix roll) sets both fix env vars so
 # every replacement relay comes up new-kernel + stack + fix.
 if [ "${ARM_FIX:-1}" = 1 ]; then export FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1; fi
+# Density sweep + relay-side disc (2026-08-31): the successor quota and LAT_TRACE are
+# inherited by start_armed's node from this process env. Export them so a re-soak
+# roll arms at the chosen kNear and the Mac relays emit disc-relay-<pid>.jsonl.
+export RELAY_SYNAPTOME_KNEAR="${RELAY_SYNAPTOME_KNEAR:-5}" LAT_TRACE="${LAT_TRACE:-0}"
 
 node_relays() {  # pids whose comm is exactly node
   for p in $(pgrep -f "src/index.js" 2>/dev/null); do

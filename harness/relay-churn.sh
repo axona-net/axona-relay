@@ -63,6 +63,18 @@ if [ "${ARM_FIX:-0}" = 1 ]; then
   ARM_ENV="${ARM_ENV:+$ARM_ENV }FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1"
   export FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1
 fi
+# Density sweep + relay-side disc (2026-08-31): thread the successor quota and the
+# LAT_TRACE flag through so a re-soak roll arms at the chosen kNear AND makes the
+# relays emit disc-relay-<pid>.jsonl. Appended to ARM_ENV for the m1/linux ssh
+# strings; exported for the local m4 path; win carries them to win-relay.sh below.
+if [ -n "${RELAY_SYNAPTOME_KNEAR:-}" ]; then
+  ARM_ENV="${ARM_ENV:+$ARM_ENV }RELAY_SYNAPTOME_KNEAR=$RELAY_SYNAPTOME_KNEAR"
+  export RELAY_SYNAPTOME_KNEAR
+fi
+if [ "${LAT_TRACE:-0}" = 1 ]; then
+  ARM_ENV="${ARM_ENV:+$ARM_ENV }LAT_TRACE=1"
+  export LAT_TRACE=1
+fi
 
 # ssh with a hard local watchdog: run in the background, kill it if it outlives
 # the budget, always return. Guarantees this script cannot wedge the driver.
@@ -144,7 +156,7 @@ case "$HOST" in
     # harness sidecars out of census/stop; schtasks start survives ssh).
     WR='/c/Users/david/github/axona-relay/harness/win-relay.sh'
     census()   { winw 15 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR census" | tr -d '[:space:]'; }
-    start_one(){ winw 20 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=${ARM_STACK:-0} ARM_FIX=${ARM_FIX:-0} $WR start" >/dev/null; }
+    start_one(){ winw 20 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=${ARM_STACK:-0} ARM_FIX=${ARM_FIX:-0} RELAY_SYNAPTOME_KNEAR=${RELAY_SYNAPTOME_KNEAR:-5} LAT_TRACE=${LAT_TRACE:-0} $WR start" >/dev/null; }
     stop_one() { winw 15 "RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE $WR stop"  >/dev/null; }
     ;;
 
