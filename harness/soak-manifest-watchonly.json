@@ -1,0 +1,88 @@
+{
+  "manifest": "axona pub/sub soak — WATCH-ONLY measurement contract (v2)",
+  "supersedes": "soak-manifest.json @ 5909ffe (pull-based repair, now retired)",
+  "frozenAt": "2026-08-31",
+  "authority": "Amends 5909ffe after the pull false-credit correction (65eca48). Written to Aster's re-freeze spec (c0cc2f8f); ratified direction Orion 0d859416, Vega 30c76ae5. Approves MEASUREMENT only — Gates 4/6 remain David's.",
+
+  "whyAmended": "Under 5909ffe, delivery was credited when a routed peer.pull showed the ROOT held a message. The root holding a message is not the subscriber receiving it — the pull reads the wrong node, and the false credit scaled with sweep frequency (18 points at 10s). All 5909ffe completeness numbers, including the 97.9% baseline, are INVALID as end-to-end delivery evidence. This contract makes subscriber-local receipt the sole delivery event.",
+
+  "deliveryEvent": {
+    "sole": "a message is delivered to a required reader IF AND ONLY IF that reader's subscription callback received it (led.observe via 'watch'). Root possession, pull-head reads, and any routed read are NOT delivery. There is no pull channel.",
+    "paths": "the watch callback fires for BOTH the root's live fanout push AND a renewal replay (since:'all' re-subscribe). Both count as delivery; they differ only in latency."
+  },
+
+  "identifiers": {
+    "trial": "(confirmed publish msgId, required reader) — one trial per pair. requiredReaders come from the seeded plan, never from who answered.",
+    "message": "origin api-confirm msgId, preserved across every path; a reader's arrival matches a trial by msgId equality.",
+    "reader": "peerIdx from the seeded plan (stable across the run)."
+  },
+
+  "denominator": "confirmed publishes (api.confirmed===true with an assigned msgId). Intent without api-confirm never enters the trial set.",
+
+  "classification": {
+    "exactlyOnce": "each (trial, reader) is live | repair | missing at the deadline",
+    "live": "first watch arrival within LIVE_WINDOW_MS of api-confirm — the forward fanout push",
+    "repair": "first watch arrival later than LIVE_WINDOW_MS but within MISSING_DEADLINE_MS — delivery that waited for a renewal cycle",
+    "missing": "no watch arrival by MISSING_DEADLINE_MS",
+    "delivered": "live + repair"
+  },
+
+  "renewalReplayClassification": "a renewal replay arrives through the SAME watch callback as a live push; it is distinguished only by latency (it is late, so it lands in 'repair'). It is NOT a separate observe channel and NOT inferred from any root read.",
+
+  "duplication": {
+    "realDuplicate": "same msgId delivered to a reader MORE THAN ONCE via watch (W>1). Reported as an excess-arrival count, never folded into delivered.",
+    "note": "with the pull removed there is no sampler re-read; watch+pull path-pairs no longer occur. Any excess is now a genuine multi-delivery."
+  },
+
+  "bounds": {
+    "MISSING_DEADLINE_MS": 120000,
+    "MISSING_DEADLINE_basis": "2 x RENEW_MS (60s steady ceiling), the recovery-plane ceiling",
+    "MIGRATION_GAP_SLO_MS": 10000,
+    "MIGRATION_GAP_SLO_basis": "Orion 62512171: pass/fail SLO for delivery under an active root transition, distinct from the completeness deadline",
+    "LIVE_WINDOW_MS": 5000,
+    "LIVE_WINDOW_basis": "RENEW_FAST — a delivery beyond one fast-renewal interval waited for a renewal cycle, so it is recovery (repair), not the forward push. Predeclared before any run under this contract."
+  },
+
+  "latency": {
+    "anchor": "origin api-confirm (confirmed msgId) to first WATCH delivery, per message",
+    "perClass": "p50/p95/p99 and count for live and repair separately; cold and converged phases apart",
+    "clock": "per-host wall corrected by calibration offsets; monotonic only within a process",
+    "offsetsMs": { "m4": 0, "m1": 136, "axona-linux": 182, "axona-win": 89 }
+  },
+
+  "localHeadSampling": {
+    "behavior": "the sidecar head-sweep and final drain read the subscriber's LOCAL head (m.lastSeqSeen / m.lastMsgId, tracked in the watch callback) and emit led.head from it. NO peer.pull, zero routed load, so the sweep cadence does not perturb the run. led.head feeds split-root detection (two readers' local heads compared).",
+    "cadence": "HEAD_SWEEP_MS default 60000; because the read is local it may be lowered without an observer effect."
+  },
+
+  "watchCollectorIntegrity": {
+    "lossHandling": "every watch callback appends one led.observe(via:'watch') synchronously; a write failure is a dropped observation and would UNDER-count delivery (bias toward more 'missing'), never over-count. The ledger is append-only JSONL; a torn final line is skipped by the analyzer's per-line try/catch.",
+    "overflow": "the subscription's own ring is the kernel's; a ring eviction before the callback fires is a genuine non-delivery to the app and is correctly counted missing."
+  },
+
+  "segmentation": "each trial tagged by root migration, subscriber reattachment, dead-peer skip, and terminal-verify outcome, from relay-side + sidecar disc (LAT_TRACE). Migration tail cut separately.",
+
+  "immutableHashes": {
+    "note": "each run's runmanifest stamps these at start; recorded here for the contract baseline.",
+    "sidecar.mjs": "fe8f29e9eb67bcb3",
+    "soak-account.mjs": "ddeab515c1a594f1",
+    "launch.sh": "fd7c8635b94abfdd",
+    "kernelVendor": "f19cc32 (v4.68.2 + FINDK_SKIP_DEAD + SUB_TERMINAL_VERIFY + reattach; unchanged)",
+    "contractCommit": "stamped per run"
+  },
+
+  "historicalArmsRecomputed": {
+    "note": "recomputed under watch-only where raw callback ledgers exist; the pull-based figures are retired.",
+    "seed-31_kNear5_60s": { "watchOnly": 97.5, "pullBased_retired": 97.9 },
+    "seed-32_kNear10_10s": { "watchOnly": 88.6, "pullBased_retired": 90.3 },
+    "seed-33_kNear5_10s": { "watchOnly": 67.5, "pullBased_retired": 85.4 },
+    "comparability": "these cross seed, duration, and time window — DIRECTIONAL only. They support the successor-density hypothesis (kNear=10 88.6% vs kNear=5 67.5% at matched 10s) but do NOT establish a causal benefit. Any arm without raw callback evidence is marked non-comparable, not estimated."
+  },
+
+  "confirmatoryABMatrix": {
+    "design": "contemporaneous alternating kNear=5 vs kNear=10 at IDENTICAL 60s cadence and load, same seed/topic-set/relay-set/churn/deadlines, with a drift-repeat arm to expose time variation",
+    "preDeclaredPass": "NON-INFERIORITY on completeness AND on live p95/p99 — a lower local-min rate or median alone is not a pass",
+    "reports": "completeness by class, live/repair p50/p95/p99, migration-gap SLO, real-duplicate rate, terminal-verify (lookupOutcome + finalVerifyState), capacity, and the load metrics Aster named (pull RPCs are now zero; report connection/queue pressure where kernel counters allow)",
+    "gate": "David's — this contract approves measurement, not the run"
+  }
+}
