@@ -74,7 +74,9 @@ function parse(dir) {
   const hopTx = new Map();          // hopAttemptId -> {msgIds, from, to}
   const hopRx = new Set();
   const appRecv = [], subRecv = [];
-  const idMap = new Map();          // (peerIdx|host) -> node prefix
+  const idMap = new Map();          // (peerIdx|host) -> node prefix (last-wins; legacy)
+  const selfTL = [];                // TIME-INDEXED {peerIdx, host, self, wall} — reconnect continuity
+  const lifecycle = [];             // sidecar Ledger events: sub-activate / sub-end / topicmap / measure-start / end
   let maxT = 0;
   for (const f of files) {
     let text; try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
@@ -83,7 +85,15 @@ function parse(dir) {
       let r; try { r = JSON.parse(line); } catch { continue; }
       if (typeof r.t === 'number' && r.t > maxT) maxT = r.t;
       if (typeof r.wall === 'number' && r.wall > maxT) maxT = r.wall;
-      if (typeof r.self === 'string' && Number.isInteger(r.peerIdx) && typeof r.host === 'string') idMap.set(`${r.peerIdx}|${r.host}`, pfx(r.self));
+      if (typeof r.self === 'string' && Number.isInteger(r.peerIdx) && typeof r.host === 'string') {
+        idMap.set(`${r.peerIdx}|${r.host}`, pfx(r.self));
+        if (typeof r.wall === 'number') selfTL.push({ peerIdx: r.peerIdx, host: r.host, self: pfx(r.self), wall: r.wall });
+      }
+      // sidecar lifecycle Ledger rows: wall is an ISO string here (not epoch ms)
+      if (r.t === 'event' && typeof r.kind === 'string' && Number.isInteger(r.peerIdx)) {
+        const wallMs = typeof r.wall === 'string' ? Date.parse(r.wall) : (typeof r.wall === 'number' ? r.wall : null);
+        lifecycle.push({ kind: r.kind, detail: r.detail || {}, peerIdx: r.peerIdx, host: r.host, wallMs });
+      }
       if (r.ev === 'root-members' && r.msgId) rootMembers.push(r);
       const stage = r.stage;
       if (stage === 'fanout-ledger') ledgerRows.push(r);
@@ -93,7 +103,44 @@ function parse(dir) {
       else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
     }
   }
-  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, maxT };
+  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, selfTL, lifecycle, maxT };
+}
+
+// ---- D_intent (time-indexed, from the harness lifecycle ledger) ------
+// Builds, per (peerIdx,host,topicId), the ACTIVE interval [activate, end) and a
+// self-timeline so a subscriber's nodeId AT a given publishTs is resolved with
+// reconnect continuity. Returns null if no lifecycle ledger is present (D_intent
+// then stays UNOBSERVED_BELIEF-pending, never fabricated).
+function buildIntent(lifecycle, selfTL) {
+  const acts = lifecycle.filter((e) => e.kind === 'sub-activate');
+  if (!acts.length) return null;
+  const name2topic = new Map();     // `${peerIdx}|${host}|${name}` -> topicId
+  for (const e of lifecycle) if (e.kind === 'topicmap' && e.detail?.topicId) name2topic.set(`${e.peerIdx}|${e.host}|${e.detail.name}`, pfx(e.detail.topicId));
+  // window end per (peerIdx,host): the sidecar's `end`/measure-end, fallback Infinity
+  const endByPeer = new Map();
+  for (const e of lifecycle) if ((e.kind === 'end') && e.wallMs != null) endByPeer.set(`${e.peerIdx}|${e.host}`, e.wallMs);
+  // intervals keyed by (peerIdx|host|topicId)
+  const intervals = new Map();
+  for (const e of acts) {
+    const tp = pfx(e.detail?.topicId);
+    if (!tp || e.wallMs == null) continue;
+    intervals.set(`${e.peerIdx}|${e.host}|${tp}`, { peer: `${e.peerIdx}|${e.host}`, topicId: tp, from: e.wallMs, to: Infinity });
+  }
+  for (const e of lifecycle) {
+    if (e.kind !== 'sub-end') continue;
+    const tp = name2topic.get(`${e.peerIdx}|${e.host}|${e.detail?.topic}`);
+    const k = `${e.peerIdx}|${e.host}|${tp}`;
+    if (tp && intervals.has(k) && e.wallMs != null) intervals.get(k).to = e.wallMs;
+  }
+  // any interval left open closes at its peer's window end
+  for (const iv of intervals.values()) if (iv.to === Infinity) { const en = endByPeer.get(iv.peer); if (en != null) iv.to = en; }
+  const tl = selfTL.slice().sort((a, b) => a.wall - b.wall);
+  const selfAt = (peer, ts) => {         // nodeId active for this peer at ts (reconnect-aware)
+    let best = null;
+    for (const s of tl) { if (`${s.peerIdx}|${s.host}` !== peer) continue; if (s.wall <= ts) best = s.self; else break; }
+    return best;
+  };
+  return { intervals: [...intervals.values()], selfAt };
 }
 
 // ---- per-msg tree model + validity ----------------------------------
@@ -186,9 +233,10 @@ function pathEdges(sub, parentOf, root) {
 
 // ---- reconcile -------------------------------------------------------
 function reconcile(parsed, opts = {}) {
-  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, maxT } = parsed;
+  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, selfTL = [], lifecycle = [], maxT } = parsed;
   const censorMs = opts.censorMs ?? CENSOR_MS;
   const censorCutoff = maxT - censorMs;
+  const intent = buildIntent(lifecycle, selfTL);   // null if no lifecycle ledger
 
   // group ledger rows + root-members by msgId
   const rowsByMsg = new Map(), rmByMsg = new Map(), pubTs = new Map();
@@ -216,7 +264,7 @@ function reconcile(parsed, opts = {}) {
   }
 
   const agg = { publishes: 0, voided: 0, censored: 0, belief: 0, delivered: 0,
-    forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0, dupReceipts, unmappedReceipts };
+    forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0, unobservedBelief: 0, dupReceipts, unmappedReceipts };
   const voidReasons = {}; const rows = [];
 
   for (const [msgId, mrows] of rowsByMsg) {
@@ -225,6 +273,19 @@ function reconcile(parsed, opts = {}) {
     const tree = buildTree(mrows, rmByMsg.get(msgId));
     if (tree.void) { agg.voided++; voidReasons[tree.void] = (voidReasons[tree.void] || 0) + 1; continue; }
     agg.publishes++;
+    // D_intent \ D_belief = UNOBSERVED_BELIEF: a subscriber the harness REQUIRED at
+    // this publish (its active interval on the msg's topic contained publishTs) whose
+    // resolved nodeId the kernel belief tree never listed. UNVERIFIED intent/belief
+    // divergence — reported, never counted as delivery loss (Aster #1).
+    if (intent && typeof pt === 'number') {
+      const topicId = pfx(mrows.find((r) => r.topicId)?.topicId);
+      for (const iv of intent.intervals) {
+        if (iv.topicId !== topicId) continue;
+        if (!(pt >= iv.from && pt < iv.to)) continue;
+        const node = intent.selfAt(iv.peer, pt);
+        if (node && !tree.belief.has(node)) agg.unobservedBelief++;
+      }
+    }
     const app = appByMsg.get(msgId) || new Set();
     const missed = setDiff(tree.belief, app);
     let fwd = 0, cb = 0, unres = 0;
@@ -244,7 +305,7 @@ function reconcile(parsed, opts = {}) {
 
   lat.sort((a, b) => a - b);
   const p = (q) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(q / 100 * lat.length))] : null;
-  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs,
+  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, hasIntent: !!intent,
     completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null };
 }
 
@@ -260,7 +321,8 @@ function report(res, note) {
   console.log(`  FINAL_HOP_CALLBACK (every edge proven, app receipt absent):    ${a.callbackDrop}`);
   console.log(`  UNRESOLVED (path unreconstructable — not forced into a bucket): ${a.unresolved}`);
   console.log(`  = D_belief \\ R_app total: ${a.beliefNotApp}  (fwd+callback+unresolved must equal this)`);
-  console.log(`  D_intent \\ D_belief: UNOBSERVED_BELIEF pending — time-indexed harness ledger not built (Aster #1)`);
+  if (res.hasIntent) console.log(`  D_intent \\ D_belief: UNOBSERVED_BELIEF = ${a.unobservedBelief}  (required at publishTs, absent from belief tree — UNVERIFIED divergence, not loss)`);
+  else console.log(`  D_intent \\ D_belief: UNOBSERVED_BELIEF pending — no lifecycle ledger in this data (Aster #1)`);
   if (a.voided) console.log(`VOID publishes by reason (never scored as loss): ${JSON.stringify(res.voidReasons)}`);
   console.log(`app-receipt latency: p50=${res.latP50}ms p95=${res.latP95}ms   censor window=${res.censorMs}ms`);
   console.log('=================================================================================================\n');
@@ -331,6 +393,20 @@ function selftest() {
     ], rootMembers: [], hopTx: new Map([mkHop('f1', R, A, 'M7')]), hopRx: new Set(['f1']), appRecv: [], idMap, maxT: 1e6 };
   const r7 = reconcile(full, { censorMs: 0 });
 
+  // (f) D_intent: the harness REQUIRED subscriber P (peerIdx 5, nodeId G) on topic
+  //     TT, active before the publish, but the kernel belief tree listed only A ->
+  //     G is UNOBSERVED_BELIEF (required, unlisted). A itself delivers.
+  const G = '28'.repeat(6), TT = 'aabbccddeeff001122';
+  const intentFix = {
+    ledgerRows: [L({ msgId: 'M8', node: R, isRoot: 1, parent: null, topicId: TT, n: 1, recips: [{ sub: A, child: 0 }] })],
+    rootMembers: [], hopTx: new Map([mkHop('g1', R, A, 'M8')]), hopRx: new Set(['g1']),
+    appRecv: [{ msgId: 'M8', key: '1|h', t: 1010 }],
+    idMap, selfTL: [{ peerIdx: 5, host: 'h', self: pfx(G), wall: 100 }],
+    lifecycle: [{ kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 5, host: 'h', wallMs: 500 }],
+    maxT: 1e6,
+  };
+  const r8 = reconcile(intentFix, { censorMs: 0 });
+
   const checks = [
     ['M1 D_belief==5 (dual-role C once, no leafhood drop)', a1.belief === 5],
     ['M1 delivered==3', a1.delivered === 3],
@@ -343,6 +419,7 @@ function selftest() {
     ['(c) omitted subtree -> VOID via root-members mismatch', r5.agg.voided === 1 && !!r5.voidReasons.ROOTMEMBERS_MISMATCH],
     ['(d) conflicting parent rows -> VOID', r6.agg.voided === 1 && !!r6.voidReasons.CONFLICTING_PARENT],
     ['(e) fully proven path, no app -> callbackDrop==1', r7.agg.callbackDrop === 1 && r7.agg.forwardingDrop === 0],
+    ['(f) D_intent: required-but-unlisted sub -> UNOBSERVED_BELIEF==1, A delivered', r8.hasIntent && r8.agg.unobservedBelief === 1 && r8.agg.delivered === 1],
   ];
   let ok = true;
   console.log('\n----- SELFTEST (path-aware reconciliation on synthetic fixtures) -----');

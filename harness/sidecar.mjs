@@ -162,6 +162,16 @@ for (const m of myTopics) {
   // (which key on the 12-hex topicId) by open vs owned, to test whether owned
   // topics form more empty sub-terminal roots (the cold-hint hypothesis).
   led.event({ kind: 'topicmap', detail: { name: m.t.name, kind: m.t.kind, topicId: sh?.topicId ?? null } });
+  // LIFECYCLE LEDGER (combined Gate-4, Aster a87ad414 #1): the time-indexed
+  // D_intent the reconciliation analyzer needs. peer.sub RESOLVING with a handle
+  // is the activation event — the kernel seated the subscription; the Ledger
+  // auto-stamps wall+mono, so this row's timestamp is the activation instant.
+  // Keyed by topicId (joins to the kernel fanout-ledger) + peerIdx/host (joins to
+  // deliver:app and, via disc `self`, to the subscriber nodeId, reconnects and
+  // all). Closed by the matching sub-end at leave; the measured window is bounded
+  // by measure-start / end. A publish is REQUIRED for this subscriber iff its
+  // publishTs falls in [sub-activate, sub-end) for the topic.
+  led.event({ kind: 'sub-activate', detail: { topic: m.t.name, topicId: sh?.topicId ?? null, since: 'all' } });
 }
 led.event({ kind: 'subscribed', detail: { topics: myTopics.length } });
 phase(`subscribed to ${myTopics.length} topics; entering publish loop`);
@@ -248,6 +258,10 @@ for (const s of samplers) clearInterval(s);
 for (const m of myTopics) {
   led.head({ topic: m.t.name, descriptor: m.desc,
     headSeq: m.lastSeqSeen >= 0 ? m.lastSeqSeen : null, headMsgId: m.lastMsgId });
+  // LIFECYCLE LEDGER: close each subscription's active interval (Aster #1
+  // unsubscribe/expiry). leave() drops them all at once, so this wall stamp is
+  // the deactivation instant; a publish after it is NOT required for this reader.
+  led.event({ kind: 'sub-end', detail: { topic: m.t.name, reason: 'leave' } });
 }
 led.event({ kind: 'end', detail: { planHash } });
 try { await peer.leave({ timeoutMs: 8_000 }); } catch { /* dying */ }
