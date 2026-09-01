@@ -460,6 +460,7 @@ export const wireHandlersMethods = {
     // terminal state explicitly rather than leaving it pending forever.
     if (!this._rootReplicas) this._durability.noCohortConfigured(env.msgId);
     this._latStage(env.msgId, 'root:fanout');
+    this._rootOrigin(env.msgId, role.epoch);   // publish-time origin-root identity (Aster c755397a)
     if (this._latTrace) this._disc(role.topicId, 'root-members', { msgId: env.msgId, n: role.subscribers.size, members: [...role.subscribers.keys()].map((k) => String(k).slice(0, 12)) });
     this._fanout(role, msg, null);                                       // to subscribers
     // local app (if subscribed)
@@ -854,7 +855,7 @@ export const wireHandlersMethods = {
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)
       }
-      this._latStage(m.msgId, 'sub:recv');
+      this._edgeRecv(m.msgId, lc(payload.from));   // edge-join receipt: from=upstream sender, to=self (Aster c755397a)
       this._deliverToApp(topicBig, m.json, m.msgId, m.publishTs, m.seq);
     }
     return 'consumed';
