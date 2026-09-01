@@ -97,6 +97,14 @@ if [ "${LAT_TRACE:-0}" = 1 ]; then
   fi
 fi
 
+# PRE-ARM clock probe (Aster 2a2778b2): measure each host's offset+uncertainty
+# immediately before the window, so the reconciliation analyzer bounds its boundary
+# band from measured uncertainty + pre/post drift, not from a static offset magnitude.
+if [ "${LAT_TRACE:-0}" = 1 ]; then
+  echo "── pre-arm clock probe"
+  SEED=$SEED node harness/clock-probe.mjs "$SEED" pre m4 m1 axona-linux axona-win || echo "  (clock probe pre failed — reconcile will VOID timing)"
+fi
+
 echo "── launching $NODES sidecars (seed $SEED, $(( DURATION_MS / 60000 ))min window)"
 launch_local 0 1
 launch_ssh_unix m1 "/opt/homebrew/Cellar/node/26.6.0/bin:/opt/homebrew/bin" darwin 2 3
@@ -179,6 +187,13 @@ for i in $(seq 0 $(( NODES - 1 ))); do
   [ -s "$RESULTS/$f" ] || rm -f "$RESULTS/$f"
 done
 ls "$RESULTS"/sidecar-$SEED-*.jsonl 2>/dev/null | sed 's/^/  /'
+
+# POST-ARM clock probe (Aster 2a2778b2): re-measure so the analyzer sees pre/post
+# drift and VOIDs the timing-dependent analysis if it exceeds the frozen bound.
+if [ "${LAT_TRACE:-0}" = 1 ]; then
+  echo "── post-arm clock probe"
+  SEED=$SEED node harness/clock-probe.mjs "$SEED" post m4 m1 axona-linux axona-win || echo "  (clock probe post failed — reconcile will VOID timing)"
+fi
 
 echo "── analyzer"
 node harness/analyze.mjs --dir "$RESULTS" --seed "$SEED" --nodes "$NODES" \

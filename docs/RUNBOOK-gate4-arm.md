@@ -95,6 +95,14 @@ honest verdict is INCONCLUSIVE for those strata, and the fix is a longer window 
 a higher publish rate, not a retire on thin data. Recommend ≥30 min, or raise the
 schedule's publish rate to power the deep strata in less wall-clock.
 
+`launch.sh` runs the cross-host clock probe (`clock-probe.mjs`) automatically —
+pre (immediately before the window) and post (after collection) — writing
+`harness/results/clock-<seed>-{pre,post}.json`. The reconciliation analyzer reads
+them to bound its boundary band from measured uncertainty + pre/post drift, and
+VOIDs the timing-dependent analysis if a probe failed or drift exceeds the frozen
+bound (Aster 2a2778b2). No probe ⇒ the analyzer runs with a conservative band and
+reports timing UNVALIDATED.
+
 ## Step 4 — collection
 
 `launch.sh` collects automatically (incl. win relay-disc since `400f4aa`, and the
@@ -113,8 +121,10 @@ node harness/soak-account.mjs --dir harness/results --seed <n> --nodes 6 ...
 node harness/analyze-deliver-hop.mjs harness/results
 
 # c) three-set reconciliation: service completeness (D_required denominator),
-#    activation failure, belief divergence, and path-aware miss localization.
-node harness/reconcile-delivery.mjs harness/results
+#    activation failure, belief divergence, path-aware miss localization. Reads the
+#    clock probes (needs SEED to find clock-<seed>-{pre,post}.json) and prints the
+#    per-host offset/uncertainty/drift + whether timing is validated.
+SEED=<n> node harness/reconcile-delivery.mjs harness/results
 ```
 
 ## Step 6 — verdict

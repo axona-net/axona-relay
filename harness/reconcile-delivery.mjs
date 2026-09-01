@@ -76,6 +76,39 @@ const pfx = (h) => (typeof h === 'string' ? h.slice(0, 12) : null);
 const setDiff = (a, b) => [...a].filter((x) => !b.has(x));
 
 // ---- parse -----------------------------------------------------------
+// Collection provenance (Aster 2a2778b2): a kernel-emitted row (fanout-ledger, hop)
+// carries no host field, but the relay-log FILENAME the collector wrote does. Recover
+// it so every event's timestamp can be corrected with its OWN host's offset.
+function hostFromFile(f) {
+  if (/^relay-disc-axona-linux-/.test(f)) return 'axona-linux';
+  if (/^relay-disc-win/.test(f)) return 'axona-win';
+  if (/^relay-disc-m1-/.test(f)) return 'm1';
+  if (/^relay-disc-m4-/.test(f)) return 'm4';
+  return null;   // sidecar files carry host in-row
+}
+
+// Load the pre/post clock probes (clock-<seed>-{pre,post}.json). Returns per-host
+// {offset, uncertainty, drift} + the validity band, or null if absent.
+function loadClock(dir, seed) {
+  const read = (phase) => { try { return JSON.parse(readFileSync(join(dir, `clock-${seed}-${phase}.json`), 'utf8')).hosts; } catch { return null; } };
+  const pre = read('pre'), post = read('post');
+  if (!pre && !post) return null;
+  const hosts = {}; let worstUnc = 0, worstDrift = 0, anyFailed = false;
+  const names = new Set([...Object.keys(pre || {}), ...Object.keys(post || {})]);
+  for (const h of names) {
+    const a = pre?.[h], b = post?.[h];
+    if ((a && a.failed) || (b && b.failed)) anyFailed = true;
+    const oPre = a?.offset, oPost = b?.offset;
+    const offset = Number.isFinite(oPre) && Number.isFinite(oPost) ? Math.round((oPre + oPost) / 2) : (oPre ?? oPost ?? null);
+    const drift = Number.isFinite(oPre) && Number.isFinite(oPost) ? Math.abs(oPost - oPre) : null;
+    const uncertainty = Math.max(a?.uncertainty ?? 0, b?.uncertainty ?? 0);
+    hosts[h] = { offset, uncertainty, drift };
+    if (Number.isFinite(uncertainty)) worstUnc = Math.max(worstUnc, uncertainty);
+    if (Number.isFinite(drift)) worstDrift = Math.max(worstDrift, drift);
+  }
+  return { hosts, band: worstUnc + worstDrift, worstUnc, worstDrift, anyFailed, hasPre: !!pre, hasPost: !!post };
+}
+
 function parse(dir) {
   const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
   const ledgerRows = [], rootMembers = [];
@@ -88,6 +121,7 @@ function parse(dir) {
   let maxT = 0;
   for (const f of files) {
     let text; try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
+    const fileHost = hostFromFile(f);
     for (const line of text.split('\n')) {
       if (!line) continue;
       let r; try { r = JSON.parse(line); } catch { continue; }
@@ -104,14 +138,17 @@ function parse(dir) {
       }
       if (r.ev === 'root-members' && r.msgId) rootMembers.push(r);
       const stage = r.stage;
-      if (stage === 'fanout-ledger') ledgerRows.push(r);
-      else if (stage === 'deliver:hop_tx') { if (r.hopAttemptId != null && !hopTx.has(r.hopAttemptId)) hopTx.set(r.hopAttemptId, { msgIds: r.msgIds || [], from: pfx(r.from), to: pfx(r.to) }); }
+      // srcHost = the row's own host (sidecar rows) or the collection filename's host
+      // (kernel rows). null => provenance missing => timing analysis VOID for it.
+      const srcHost = (typeof r.host === 'string') ? r.host : fileHost;
+      if (stage === 'fanout-ledger') ledgerRows.push({ ...r, srcHost });
+      else if (stage === 'deliver:hop_tx') { if (r.hopAttemptId != null && !hopTx.has(r.hopAttemptId)) hopTx.set(r.hopAttemptId, { msgIds: r.msgIds || [], from: pfx(r.from), to: pfx(r.to), srcHost }); }
       else if (stage === 'deliver:hop_rx') { if (r.hopAttemptId != null) hopRx.add(r.hopAttemptId); }
       else if (stage === 'deliver:app') appRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
       else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
     }
   }
-  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, selfTL, lifecycle, maxT };
+  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, selfTL, lifecycle, maxT, clock: loadClock(dir, process.env.SEED || '0') };
 }
 
 // ---- three-set model from the harness lifecycle ledger (Aster 54d03977) ------
@@ -122,10 +159,15 @@ function parse(dir) {
 // offset is absorbed by a pre-declared BAND, and a publish within BAND of any
 // required reader's activation/end boundary is boundary-ambiguous → right-censored.
 // Returns null if no lifecycle ledger is present (sets then stay 'pending').
+function offOf(offsets, host) {   // handles measured-table {host:{offset}} OR static {host:number}
+  const v = offsets && offsets[host];
+  if (v == null) return 0;
+  return Number.isFinite(v) ? v : (Number.isFinite(v.offset) ? v.offset : 0);
+}
 function buildSets(lifecycle, selfTL, offsets, band) {
   const hasLifecycle = lifecycle.some((e) => e.kind === 'sub-required' || e.kind === 'sub-activate');
   if (!hasLifecycle) return null;
-  const off = (host) => (offsets && Number.isFinite(offsets[host]) ? offsets[host] : 0);
+  const off = (host) => offOf(offsets, host);
   const corr = (wallMs, host) => (wallMs == null ? null : wallMs - off(host));  // -> common (m4) basis
 
   // GLOBAL name->topicId (a topic's id is identical for every peer; a peer whose
@@ -270,20 +312,40 @@ function pathEdges(sub, parentOf, root) {
 
 // ---- reconcile -------------------------------------------------------
 function reconcile(parsed, opts = {}) {
-  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, selfTL = [], lifecycle = [], maxT } = parsed;
+  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, selfTL = [], lifecycle = [], maxT, clock = null } = parsed;
   const censorMs = opts.censorMs ?? CENSOR_MS;
   const censorCutoff = maxT - censorMs;
-  const offsets = opts.offsets ?? OFFSETS;
-  const band = opts.band ?? CLOCK_BAND;
+  const FROZEN_DRIFT_BOUND = opts.driftBound ?? 500;    // pre-declared: drift beyond this VOIDs timing
+  // Clock basis (b), Aster 2a2778b2: prefer the MEASURED pre/post probe; a measured
+  // offset is a correction, the band is uncertainty + observed drift. Fall back to the
+  // static offsets only with clockValidated=false + a conservative band, and VOID timing
+  // when sampling failed or drift exceeds the frozen bound.
+  const clk = opts.clock !== undefined ? opts.clock : clock;
+  let offsets, band, clockValidated, timingVoid, clockNote;
+  if (clk && clk.hosts) {
+    offsets = clk.hosts; band = Math.max(clk.band || 0, 1);
+    timingVoid = clk.anyFailed || !clk.hasPre || !clk.hasPost || (clk.worstDrift ?? 0) > FROZEN_DRIFT_BOUND;
+    clockValidated = !timingVoid;
+    clockNote = `measured (pre=${clk.hasPre} post=${clk.hasPost} worstUnc=${clk.worstUnc}ms drift=${clk.worstDrift}ms band=${band}ms${timingVoid ? ' → TIMING VOID' : ''})`;
+  } else {
+    offsets = opts.offsets ?? OFFSETS; band = Math.max(...Object.values(OFFSETS)) + (opts.bandMargin ?? 200);
+    clockValidated = false; timingVoid = true;
+    clockNote = `NO probe — static offsets, conservative band=${band}ms, timing UNVALIDATED (Aster 2a2778b2: VOID boundary calls)`;
+  }
   const sets = buildSets(lifecycle, selfTL, offsets, band);   // null if no lifecycle ledger
 
   // group ledger rows + root-members by msgId
-  const rowsByMsg = new Map(), rmByMsg = new Map(), pubTs = new Map();
+  const rowsByMsg = new Map(), rmByMsg = new Map(), pubTs = new Map(), provMissing = new Map();
   for (const row of ledgerRows) {
     if (!row.msgId) continue;
     if (!rowsByMsg.has(row.msgId)) rowsByMsg.set(row.msgId, []);
     rowsByMsg.get(row.msgId).push(row);
-    if (typeof row.t === 'number') pubTs.set(row.msgId, Math.min(pubTs.get(row.msgId) ?? Infinity, row.t));
+    // publishTs corrected to the common basis by the row's OWN source host (Aster 2a2778b2).
+    if (typeof row.t === 'number') {
+      const ct = row.t - offOf(offsets, row.srcHost);
+      pubTs.set(row.msgId, Math.min(pubTs.get(row.msgId) ?? Infinity, ct));
+    }
+    if (!row.srcHost) provMissing.set(row.msgId, true);   // no host provenance -> timing unreliable for this publish
   }
   for (const rm of rootMembers) { if (!rmByMsg.has(rm.msgId)) rmByMsg.set(rm.msgId, []); rmByMsg.get(rm.msgId).push(rm); }
 
@@ -302,7 +364,7 @@ function reconcile(parsed, opts = {}) {
     const pt = pubTs.get(a.msgId); if (typeof pt === 'number' && typeof a.t === 'number') lat.push(a.t - pt);
   }
 
-  const agg = { publishes: 0, voided: 0, censored: 0, boundaryAmbiguous: 0, belief: 0, delivered: 0,
+  const agg = { publishes: 0, voided: 0, censored: 0, boundaryAmbiguous: 0, provenanceVoid: 0, belief: 0, delivered: 0,
     forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0,
     required: 0, reqDelivered: 0, activationFailure: 0, beliefDivergence: 0, dupReceipts, unmappedReceipts };
   const voidReasons = {}; const rows = [];
@@ -321,11 +383,16 @@ function reconcile(parsed, opts = {}) {
     // boundary-ambiguous and right-censored (clock basis b). Divergences are reported,
     // NEVER counted as transport loss.
     if (sets && typeof pt === 'number') {
+      // provenance/timing gates (Aster 2a2778b2): a publish whose fanout rows lack
+      // host provenance, or any timing-void run (failed/absent probe or drift beyond
+      // the frozen bound), cannot have its activation/end boundary trusted → censor
+      // it rather than force a boundary call. Set membership stays identity-keyed.
+      if (provMissing.get(msgId)) { agg.provenanceVoid++; continue; }
       const topicId = pfx(mrows.find((r) => r.topicId)?.topicId);
       const required = sets.requiredByTopic.get(topicId) || new Set();
       let boundary = false; const states = [];
       for (const peer of required) { const st = sets.activePeer(peer, topicId, pt); if (st.boundary) boundary = true; states.push({ peer, st }); }
-      if (boundary) { agg.boundaryAmbiguous++; continue; }        // right-censor boundary-ambiguous publishes
+      if (boundary || timingVoid) { agg.boundaryAmbiguous++; continue; }   // right-censor boundary-ambiguous / timing-void
       agg.publishes++;
       agg.required += required.size;
       for (const { st } of states) {
@@ -356,6 +423,7 @@ function reconcile(parsed, opts = {}) {
   lat.sort((a, b) => a - b);
   const p = (q) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(q / 100 * lat.length))] : null;
   return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, band, hasSets: !!sets,
+    clockValidated, timingVoid, clockNote, clockHosts: (clk && clk.hosts) || null,
     completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null,
     serviceCompleteness: agg.required ? +(100 * agg.reqDelivered / agg.required).toFixed(2) : null };
 }
@@ -364,7 +432,9 @@ function report(res, note) {
   const a = res.agg;
   console.log('\n===== DELIVERY RECONCILIATION (path-aware; fanout-ledger 73b705d; rules 722f8464/89ab0777) =====');
   if (note) console.log(note);
-  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored@end: ${a.censored}, boundary-ambiguous censored: ${a.boundaryAmbiguous})`);
+  console.log(`CLOCK: ${res.clockNote}   validated=${res.clockValidated}${res.timingVoid ? '  [timing-dependent boundary calls VOID/censored]' : ''}`);
+  if (res.clockHosts) for (const [h, c] of Object.entries(res.clockHosts)) console.log(`  ${h}: offset=${c.offset}ms uncertainty=${c.uncertainty}ms drift=${c.drift}ms`);
+  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored@end: ${a.censored}, boundary/timing censored: ${a.boundaryAmbiguous}, provenance-void: ${a.provenanceVoid})`);
   console.log(`receipts: dup per (msg,sub)=${a.dupReceipts}, unmapped (no peer→node)=${a.unmappedReceipts}`);
   if (res.hasSets) {
     console.log('THREE SETS (Aster 54d03977) — service completeness uses D_required as denominator:');
@@ -454,8 +524,11 @@ function selftest() {
   // three-set lifecycle fixtures (Aster 54d03977). Host 'h' has offset 0; band 182.
   const G = '28'.repeat(6), H1 = '31'.repeat(6), H2 = '32'.repeat(6), I1 = '41'.repeat(6), I2 = '42'.repeat(6), J = '5a'.repeat(6), K = '6b'.repeat(6), TT = 'aabbccddeeff001122';
   const tmap = { kind: 'topicmap', detail: { name: 'T', topicId: TT }, peerIdx: 0, host: 'h' };
-  const beliefTree = (msgId, leaves) => [L({ msgId, node: R, isRoot: 1, parent: null, topicId: TT, n: leaves.length, recips: leaves.map((s) => ({ sub: s, child: 0 })) })];
-  const RC = (o) => reconcile(o, { censorMs: 0 });
+  // CK: a MEASURED clock table (validated: pre+post, no fail). unc=uncertainty(ms),
+  // drift(ms), offset(ms). band = unc + drift. host 'h' is the only sidecar host here.
+  const CK = (unc = 5, drift = 0, offset = 0) => ({ hosts: { h: { offset, uncertainty: unc, drift } }, band: unc + drift, worstUnc: unc, worstDrift: drift, anyFailed: false, hasPre: true, hasPost: true });
+  const beliefTree = (msgId, leaves, srcHost = 'h') => [L({ msgId, node: R, isRoot: 1, parent: null, topicId: TT, n: leaves.length, srcHost, recips: leaves.map((s) => ({ sub: s, child: 0 })) })];
+  const RC = (o, clk = CK()) => reconcile(o, { censorMs: 0, clock: clk });
 
   // (f) required + active, but node absent from belief -> D_active\D_belief divergence.
   const r8 = RC({ ledgerRows: beliefTree('M8', [A]), rootMembers: [], hopTx: new Map([mkHop('g1', R, A, 'M8')]), hopRx: new Set(['g1']),
@@ -481,10 +554,37 @@ function selftest() {
     appRecv: [{ msgId: 'MC', key: '9|h', t: 1010 }], idMap: new Map([...idMap, ['9|h', pfx(J)]]), selfTL: [{ peerIdx: 9, host: 'h', self: pfx(J), wall: 50 }],
     lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 9, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 9, host: 'h', wallMs: 100 }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 9, host: 'h', wallMs: 120 }], maxT: 1e6 });
 
-  // (k) publish inside the clock-uncertainty band of activation -> boundary-ambiguous, censored.
+  // (k) publish inside the clock band of activation (band 150 > |1000-900|) -> boundary-ambiguous censored.
   const r13 = RC({ ledgerRows: beliefTree('MD', [A]), rootMembers: [], hopTx: new Map([mkHop('g7', R, A, 'MD')]), hopRx: new Set(['g7']),
     appRecv: [], idMap, selfTL: [{ peerIdx: 10, host: 'h', self: pfx(K), wall: 50 }],
-    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 10, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 10, host: 'h', wallMs: 900 }], maxT: 1e6 });
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 10, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 10, host: 'h', wallMs: 900 }], maxT: 1e6 }, CK(150));
+
+  // (l) LARGE but PRECISE offset (5000ms, uncertainty 5) -> correct classification, NOT
+  //     spuriously censored. Raw walls are in the host-5000ms-ahead basis; corrected:
+  //     activation 5100->100, publish 6000->1000, self 5050->50. active+delivered.
+  const r14 = RC({ ledgerRows: beliefTree('ME', [A], 'h').map((r) => ({ ...r, t: 6000 })), rootMembers: [], hopTx: new Map([mkHop('g8', R, A, 'ME')]), hopRx: new Set(['g8']),
+    appRecv: [{ msgId: 'ME', key: '11|h', t: 6010 }], idMap: new Map([...idMap, ['11|h', pfx(G)]]), selfTL: [{ peerIdx: 11, host: 'h', self: pfx(G), wall: 5050 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 11, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 11, host: 'h', wallMs: 5100 }],
+    maxT: 1e7 }, CK(5, 0, 5000));
+
+  // (m) small offset, HIGH uncertainty (band 150) -> publish 100ms from activation is
+  //     boundary-ambiguous, censored (the wide band, not the offset, drives it).
+  const r15 = RC({ ledgerRows: beliefTree('MF', [A]), rootMembers: [], hopTx: new Map([mkHop('g9', R, A, 'MF')]), hopRx: new Set(['g9']),
+    appRecv: [], idMap, selfTL: [{ peerIdx: 12, host: 'h', self: pfx(K), wall: 50 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 12, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 12, host: 'h', wallMs: 900 }], maxT: 1e6 }, CK(150, 0, 0));
+
+  // (n) MISSING source-host provenance on the fanout row -> timing unreliable -> VOID
+  //     (provenance), not a forced boundary call.
+  const noProv = beliefTree('MG', [A]).map((r) => { const { srcHost, ...rest } = r; return rest; });
+  const r16 = RC({ ledgerRows: noProv, rootMembers: [], hopTx: new Map([mkHop('ga', R, A, 'MG')]), hopRx: new Set(['ga']),
+    appRecv: [], idMap, selfTL: [{ peerIdx: 13, host: 'h', self: pfx(K), wall: 50 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 13, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 13, host: 'h', wallMs: 100 }], maxT: 1e6 });
+
+  // (o) DRIFT beyond the frozen bound (800 > 500) -> timing VOID; every boundary call
+  //     censored, clockValidated=false.
+  const r17 = RC({ ledgerRows: beliefTree('MH', [A]), rootMembers: [], hopTx: new Map([mkHop('gb', R, A, 'MH')]), hopRx: new Set(['gb']),
+    appRecv: [], idMap, selfTL: [{ peerIdx: 14, host: 'h', self: pfx(K), wall: 50 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 14, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 14, host: 'h', wallMs: 100 }], maxT: 1e6 }, CK(5, 800, 0));
 
   const checks = [
     ['M1 D_belief==5 (dual-role C once, no leafhood drop)', a1.belief === 5],
@@ -504,6 +604,10 @@ function selftest() {
     ['(i) identity replaced, no reactivation -> interval clamped, activationFailure==1', r11.agg.activationFailure === 1],
     ['(j) repeated idempotent activation -> ONE interval, reqDelivered==1, no failure', r12.agg.required === 1 && r12.agg.reqDelivered === 1 && r12.agg.activationFailure === 0],
     ['(k) publish in clock band -> boundary-ambiguous censored (0 scored)', r13.agg.boundaryAmbiguous === 1 && r13.agg.publishes === 0],
+    ['(l) large-but-precise offset -> classified, NOT censored (reqDelivered==1)', r14.clockValidated && r14.agg.reqDelivered === 1 && r14.agg.publishes === 1],
+    ['(m) small offset + high uncertainty -> wide band censors (0 scored)', r15.agg.boundaryAmbiguous === 1 && r15.agg.publishes === 0],
+    ['(n) missing host provenance -> provenanceVoid==1 (0 scored)', r16.agg.provenanceVoid === 1 && r16.agg.publishes === 0],
+    ['(o) drift beyond bound -> timing VOID, clockValidated=false, 0 scored', r17.timingVoid === true && r17.clockValidated === false && r17.agg.publishes === 0],
   ];
   let ok = true;
   console.log('\n----- SELFTEST (path-aware reconciliation on synthetic fixtures) -----');
