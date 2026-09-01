@@ -72,6 +72,16 @@ const CLOCK_BAND = Number((process.argv.find((a) => a.startsWith('--band=')) || 
 
 const pfx = (h) => (typeof h === 'string' ? h.slice(0, 12) : null);
 const setDiff = (a, b) => [...a].filter((x) => !b.has(x));
+// Wilson 95% CI (Aster CALLBACK-BOUND f3b50506): a partition bucket count is a rate
+// over |D_required| with a CI — a zero count (e.g. D=0 callback) is an UPPER BOUND,
+// never a categorical elimination. Same method as analyze-deliver-hop.
+const WZ = 1.96;
+const wilson = (k, n) => {
+  if (!n) return { est: 0, lo: 0, hi: 0 };
+  const ph = k / n, z2 = WZ * WZ, den = 1 + z2 / n;
+  const c = (ph + z2 / (2 * n)) / den, h = (WZ * Math.sqrt(ph * (1 - ph) / n + z2 / (4 * n * n))) / den;
+  return { est: +(100 * ph).toFixed(2), lo: +(100 * Math.max(0, c - h)).toFixed(2), hi: +(100 * Math.min(1, c + h)).toFixed(2) };
+};
 
 // ---- parse -----------------------------------------------------------
 // Collection provenance (Aster 2a2778b2): a kernel-emitted row (fanout-ledger, hop)
@@ -468,12 +478,14 @@ function report(res, note) {
   console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, ROOT_DIVERGENCE flagged: ${a.rootDivergence}, censored@end: ${a.censored}, boundary/timing censored: ${a.boundaryAmbiguous}, provenance-void: ${a.provenanceVoid})`);
   console.log(`receipts: dup per (msg,sub)=${a.dupReceipts}, unmapped (no peer→node)=${a.unmappedReceipts}`);
   if (res.hasSets) {
-    console.log(`D_required MUTUALLY-EXCLUSIVE PARTITION (Aster c6202ccb) — closes: ${res.partitionCloses ? 'YES' : 'NO ✗'}  (A+B+C+D+E must == |D_required|=${a.required}):`);
-    console.log(`  E delivered (req ∩ R_app):                                  ${a.bE_delivered}   SERVICE COMPLETENESS=${res.serviceCompleteness}%`);
-    console.log(`  A activation/continuity failure (miss ∖ active):            ${a.bA_activation}`);
-    console.log(`  B belief divergence (miss ∩ active ∖ belief):               ${a.bB_beliefDiv}`);
-    console.log(`  C NODE NON-ARRIVAL (miss ∩ active ∩ belief ∖ R_node):       ${a.bC_nodeNonArrival}   ← only this is "never reached the node" (provisional unless R_node coverage complete)`);
-    console.log(`  D arrived-at-node, app absent (… ∩ R_node ∖ R_app):         ${a.bD_arrivedNoApp}`);
+    const req = a.required;
+    const ci = (k) => { const w = wilson(k, req); return `${(100 * k / (req || 1)).toFixed(2)}% [${w.lo}-${w.hi}]`; };
+    console.log(`D_required MUTUALLY-EXCLUSIVE PARTITION (Aster c6202ccb) — closes: ${res.partitionCloses ? 'YES' : 'NO ✗'}  (A+B+C+D+E must == |D_required|=${req}); rate [Wilson 95% CI]:`);
+    console.log(`  E delivered (req ∩ R_app):                            ${a.bE_delivered}  ${ci(a.bE_delivered)}   SERVICE COMPLETENESS=${res.serviceCompleteness}%`);
+    console.log(`  A activation/continuity failure (miss ∖ active):      ${a.bA_activation}  ${ci(a.bA_activation)}`);
+    console.log(`  B belief divergence (miss ∩ active ∖ belief):         ${a.bB_beliefDiv}  ${ci(a.bB_beliefDiv)}`);
+    console.log(`  C NODE NON-ARRIVAL (miss ∩ active ∩ belief ∖ R_node): ${a.bC_nodeNonArrival}  ${ci(a.bC_nodeNonArrival)}   ← "never reached node" (provisional unless R_node coverage complete)`);
+    console.log(`  D arrived-at-node, app absent (… ∩ R_node ∖ R_app):   ${a.bD_arrivedNoApp}  ${ci(a.bD_arrivedNoApp)}   ← callback drop: an UPPER BOUND at ${a.bD_arrivedNoApp} observed, NOT an elimination (Aster CALLBACK-BOUND)`);
     console.log(`  A/B are structural/control-plane, NOT folded into C; C vs forwarding-vs-tree needs the edge-join + root-identity stamps.`);
   } else {
     console.log(`D_required/D_active pending — no lifecycle ledger in this data (Aster 54d03977)`);
