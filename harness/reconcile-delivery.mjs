@@ -145,7 +145,7 @@ function parse(dir) {
       else if (stage === 'deliver:hop_tx') { if (r.hopAttemptId != null && !hopTx.has(r.hopAttemptId)) hopTx.set(r.hopAttemptId, { msgIds: r.msgIds || [], from: pfx(r.from), to: pfx(r.to), srcHost }); }
       else if (stage === 'deliver:hop_rx') { if (r.hopAttemptId != null) hopRx.add(r.hopAttemptId); }
       else if (stage === 'deliver:app') appRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
-      else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
+      else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, self: pfx(r.self), t: r.t });
     }
   }
   return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, selfTL, lifecycle, maxT, clock: loadClock(dir, process.env.SEED || '0') };
@@ -244,7 +244,7 @@ function buildTree(rows, rootMembersForMsg) {
     if (typeof row.topicId === 'string') topics.add(row.topicId);
     const recips = Array.isArray(row.recips) ? row.recips : [];
     if (Number.isInteger(row.n) && row.n !== recips.length) voidReason = voidReason || 'TELEMETRY_TRUNCATED';
-    if (row.isRoot === 1 || row.parent == null) rootFlags.add(node);
+    if (row.isRoot === 1) rootFlags.add(node);   // root = a node that DECLARED isRoot; parent==null alone is not a root
     if (row.parent) claim(node, pfx(row.parent));                 // own-row parent claim
     if (row.localDelivery === 1) belief.add(node);
     for (const rc of recips) {
@@ -265,15 +265,23 @@ function buildTree(rows, rootMembersForMsg) {
     if (parents.size > 1) voidReason = voidReason || 'CONFLICTING_PARENT';
     parentOf.set(node, parents.size === 1 ? [...parents][0] : null);
   }
-  // exactly one root
-  const rootsByFlag = [...rootFlags];
-  const rootsByNoParent = [...nodes].filter((n) => !parentOf.get(n));
-  const rootSet = new Set([...rootsByFlag, ...rootsByNoParent]);
-  if (rootSet.size !== 1) voidReason = voidReason || `TREE_NO_UNIQUE_ROOT(${rootSet.size})`;
+  // Root = a node that DECLARED isRoot==1 for this msgId. A node with parent==null
+  // but isRoot==0 is a re-fanning relay whose upstream was not recorded — NOT a root;
+  // its subtree is unreconstructable and its recipients fall to UNRESOLVED, they do
+  // NOT void the publish (2026-09-01: this reclassified 172 false multi-roots that a
+  // parent==null-as-root rule had produced). GENUINE multi-root — 2+ nodes each
+  // declaring isRoot for one message — is real root-set divergence: a reported
+  // MECHANISM class (ROOT_DIVERGENCE), not a telemetry void.
+  const rootSet = new Set([...rootFlags]);
+  let divergence = null;
+  if (rootSet.size === 0) voidReason = voidReason || 'NO_ROOT_OBSERVED';
+  else if (rootSet.size > 1) divergence = `ROOT_DIVERGENCE(${rootSet.size})`;
   const root = rootSet.size === 1 ? [...rootSet][0] : null;
   // one topic
   if (topics.size > 1) voidReason = voidReason || 'CONFLICTING_TOPIC';
-  // acyclic + every ledger NODE reaches the root
+  // acyclic (a cycle is real corruption -> void). A node that simply does not reach
+  // the root is a relay with unrecorded upstream; its recipients become UNRESOLVED
+  // per-recipient (pathEdges returns null), never a whole-publish void.
   if (root) {
     for (const n of nodes) {
       let cur = n, steps = 0; const seen = new Set();
@@ -281,7 +289,6 @@ function buildTree(rows, rootMembersForMsg) {
         if (seen.has(cur)) { voidReason = voidReason || 'TREE_CYCLE'; break; }
         seen.add(cur); cur = parentOf.get(cur); if (++steps > nodes.size + 2) { voidReason = voidReason || 'TREE_CYCLE'; break; }
       }
-      if (cur !== root) voidReason = voidReason || 'TREE_UNREACHABLE_ROOT';
     }
   }
   // root-members overlap cross-check (independent root projection)
@@ -312,7 +319,7 @@ function pathEdges(sub, parentOf, root) {
 
 // ---- reconcile -------------------------------------------------------
 function reconcile(parsed, opts = {}) {
-  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, selfTL = [], lifecycle = [], maxT, clock = null } = parsed;
+  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv = [], idMap, selfTL = [], lifecycle = [], maxT, clock = null } = parsed;
   const censorMs = opts.censorMs ?? CENSOR_MS;
   const censorCutoff = maxT - censorMs;
   const FROZEN_DRIFT_BOUND = opts.driftBound ?? 500;    // pre-declared: drift beyond this VOIDs timing
@@ -349,9 +356,16 @@ function reconcile(parsed, opts = {}) {
   }
   for (const rm of rootMembers) { if (!rmByMsg.has(rm.msgId)) rmByMsg.set(rm.msgId, []); rmByMsg.get(rm.msgId).push(rm); }
 
-  // proven edges per msgId: `${msgId}|${from}|${to}` for a forwarded-and-arrived hop
-  const provenEdge = new Set();
-  for (const [id, tx] of hopTx) { if (!hopRx.has(id) || !tx.from || !tx.to) continue; for (const m of tx.msgIds) provenEdge.add(`${m}|${tx.from}|${tx.to}`); }
+  // NODE ARRIVAL per msgId (Aster c755397a): a sub:recv or deliver:app proves the
+  // message ARRIVED AT that node — NOT which edge carried it (the receipt has no
+  // upstream/parent field, so it cannot attribute an edge or separate tree divergence
+  // from forwarding loss). So we split the miss set only into what the receipt can
+  // prove: ARRIVED-but-no-app vs NEVER-ARRIVED. The receiving node is `self` on a
+  // relay row, else the (peerIdx,host)->node map for a sidecar row.
+  const receivedByMsg = new Map();   // msgId -> Set(node that received it)
+  const addRecv = (msgId, node) => { if (!msgId || !node) return; if (!receivedByMsg.has(msgId)) receivedByMsg.set(msgId, new Set()); receivedByMsg.get(msgId).add(node); };
+  for (const s of subRecv) addRecv(s.msgId, s.self || idMap.get(s.key));
+  for (const a of appRecv) addRecv(a.msgId, idMap.get(a.key));
 
   // R_app per msgId (deduped per (msg,sub); duplicates counted)
   const appByMsg = new Map(); let dupReceipts = 0, unmappedReceipts = 0; const seen = new Set(); const lat = [];
@@ -364,9 +378,9 @@ function reconcile(parsed, opts = {}) {
     const pt = pubTs.get(a.msgId); if (typeof pt === 'number' && typeof a.t === 'number') lat.push(a.t - pt);
   }
 
-  const agg = { publishes: 0, voided: 0, censored: 0, boundaryAmbiguous: 0, provenanceVoid: 0, belief: 0, delivered: 0,
-    forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0,
-    required: 0, reqDelivered: 0, activationFailure: 0, beliefDivergence: 0, dupReceipts, unmappedReceipts };
+  const agg = { publishes: 0, voided: 0, rootDivergence: 0, censored: 0, boundaryAmbiguous: 0, provenanceVoid: 0, belief: 0, delivered: 0,
+    arrivedNoApp: 0, neverArrived: 0, beliefNotApp: 0,
+    required: 0, reqDelivered: 0, activationFailure: 0, beliefDivergence: 0, reqArrivedNoApp: 0, reqNeverArrived: 0, dupReceipts, unmappedReceipts };
   const voidReasons = {}; const rows = [];
 
   for (const [msgId, mrows] of rowsByMsg) {
@@ -374,7 +388,13 @@ function reconcile(parsed, opts = {}) {
     if (typeof pt === 'number' && pt > censorCutoff) { agg.censored++; continue; }
     const tree = buildTree(mrows, rmByMsg.get(msgId));
     if (tree.void) { agg.voided++; voidReasons[tree.void] = (voidReasons[tree.void] || 0) + 1; continue; }
+    // GENUINE root-set divergence (2+ nodes declared isRoot for one message) is a real
+    // mechanism, not a telemetry void — flag it and still score (belief/receipt sets do
+    // not need a single root). Full independent-ingress vs re-fanout separation needs
+    // publish-time root identity (Aster c755397a) — a further stamp, flagged.
+    if (tree.divergence) { agg.rootDivergence++; voidReasons[tree.divergence] = (voidReasons[tree.divergence] || 0) + 1; }
     const app = appByMsg.get(msgId) || new Set();
+    const recvd = receivedByMsg.get(msgId) || new Set();   // nodes that received this msg (sub:recv/deliver:app)
 
     // THREE-SET breakdown (Aster 54d03977), when a lifecycle ledger exists. REQUIRED
     // is the frozen-plan obligation (independent of sub success); ACTIVE is a resolved,
@@ -398,26 +418,28 @@ function reconcile(parsed, opts = {}) {
       for (const { st } of states) {
         if (!st.active) { agg.activationFailure++; continue; }    // D_required \ D_active
         if (st.node && !tree.belief.has(st.node)) agg.beliefDivergence++;   // D_active \ D_belief
-        if (st.node && app.has(st.node)) agg.reqDelivered++;      // required AND delivered (service completeness)
+        if (st.node && app.has(st.node)) { agg.reqDelivered++; continue; }  // required AND delivered (service completeness)
+        // CLEAN localization over the app-subscriber set (D_required), not D_belief
+        // (which is contaminated by relays that receive but have no app). A required
+        // reader that missed: node received (sub:recv) -> app/callback gap; else never
+        // arrived -> forwarding-or-tree (not separable without an edge-join receipt).
+        if (st.node) { if (recvd.has(st.node)) agg.reqArrivedNoApp++; else agg.reqNeverArrived++; }
       }
     } else {
       agg.publishes++;
     }
 
+    // MISS localization by NODE ARRIVAL (Aster c755397a). A sub:recv/deliver:app proves
+    // the message reached that NODE, not which edge carried it, so the miss set splits
+    // only into ARRIVED-but-no-app (node received it, app delivery absent) vs
+    // NEVER-ARRIVED (no receipt — forwarding loss OR tree divergence, NOT separable
+    // without an edge-join receipt + publish-time root identity). No per-edge claim.
     const missed = setDiff(tree.belief, app);
-    let fwd = 0, cb = 0, unres = 0;
-    for (const s of missed) {
-      const edges = pathEdges(s, tree.parentOf, tree.root);
-      if (edges === null) { unres++; continue; }                 // unreconstructable path
-      // earliest unproven edge is the forwarding boundary
-      let boundary = -1;
-      for (let i = 0; i < edges.length; i++) { const [a, b] = edges[i]; if (!provenEdge.has(`${msgId}|${a}|${b}`)) { boundary = i; break; } }
-      if (boundary === -1) cb++;                                 // every network edge proven, app absent -> final-hop/callback
-      else fwd++;                                                // earliest unproven edge -> forwarding boundary
-    }
+    let arrived = 0, never = 0;
+    for (const s of missed) { if (recvd.has(s)) arrived++; else never++; }
     agg.belief += tree.belief.size; agg.delivered += tree.belief.size - missed.length;
-    agg.beliefNotApp += missed.length; agg.forwardingDrop += fwd; agg.callbackDrop += cb; agg.unresolved += unres;
-    rows.push({ msgId, belief: tree.belief.size, delivered: tree.belief.size - missed.length, forwardingDrop: fwd, callbackDrop: cb, unresolved: unres });
+    agg.beliefNotApp += missed.length; agg.arrivedNoApp += arrived; agg.neverArrived += never;
+    rows.push({ msgId, belief: tree.belief.size, delivered: tree.belief.size - missed.length, arrivedNoApp: arrived, neverArrived: never, rootDivergence: tree.divergence ? 1 : 0 });
   }
 
   lat.sort((a, b) => a - b);
@@ -430,11 +452,11 @@ function reconcile(parsed, opts = {}) {
 
 function report(res, note) {
   const a = res.agg;
-  console.log('\n===== DELIVERY RECONCILIATION (path-aware; fanout-ledger 73b705d; rules 722f8464/89ab0777) =====');
+  console.log('\n===== DELIVERY RECONCILIATION (node-arrival; fanout-ledger 73b705d; rules 722f8464/89ab0777/c755397a) =====');
   if (note) console.log(note);
   console.log(`CLOCK: ${res.clockNote}   validated=${res.clockValidated}${res.timingVoid ? '  [timing-dependent boundary calls VOID/censored]' : ''}`);
   if (res.clockHosts) for (const [h, c] of Object.entries(res.clockHosts)) console.log(`  ${h}: offset=${c.offset}ms uncertainty=${c.uncertainty}ms drift=${c.drift}ms`);
-  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored@end: ${a.censored}, boundary/timing censored: ${a.boundaryAmbiguous}, provenance-void: ${a.provenanceVoid})`);
+  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, ROOT_DIVERGENCE flagged: ${a.rootDivergence}, censored@end: ${a.censored}, boundary/timing censored: ${a.boundaryAmbiguous}, provenance-void: ${a.provenanceVoid})`);
   console.log(`receipts: dup per (msg,sub)=${a.dupReceipts}, unmapped (no peer→node)=${a.unmappedReceipts}`);
   if (res.hasSets) {
     console.log('THREE SETS (Aster 54d03977) — service completeness uses D_required as denominator:');
@@ -442,16 +464,19 @@ function report(res, note) {
     console.log(`  D_required \\ D_active  (subscription activation/continuity failure): ${a.activationFailure}`);
     console.log(`  D_active   \\ D_belief  (active-intent / kernel-belief divergence):    ${a.beliefDivergence}`);
     console.log(`  (both divergences reported, NEVER counted as transport loss)`);
+    console.log('  CLEAN miss localization over D_required (app-subscribers, not relay-contaminated D_belief):');
+    console.log(`    req ARRIVED_NO_APP (reader's node received, app absent): ${a.reqArrivedNoApp}`);
+    console.log(`    req NEVER_ARRIVED  (no receipt — forwarding-or-tree): ${a.reqNeverArrived}`);
   } else {
     console.log(`D_required/D_active pending — no lifecycle ledger in this data (Aster 54d03977)`);
   }
   console.log(`kernel-belief tree obligations (D_belief): ${a.belief}   delivered: ${a.delivered}   belief-completeness=${res.completeness}%`);
-  console.log('D_belief \\ R_app miss localization — path-aware, partitions the miss set exactly:');
-  console.log(`  FORWARDING_DROP (earliest unproven edge on the root→sub path): ${a.forwardingDrop}`);
-  console.log(`  FINAL_HOP_CALLBACK (every edge proven, app receipt absent):    ${a.callbackDrop}`);
-  console.log(`  UNRESOLVED (path unreconstructable — not forced into a bucket): ${a.unresolved}`);
-  console.log(`  = D_belief \\ R_app total: ${a.beliefNotApp}  (fwd+callback+unresolved must equal this)`);
-  if (a.voided) console.log(`VOID publishes by reason (never scored as loss): ${JSON.stringify(res.voidReasons)}`);
+  console.log('D_belief \\ R_app miss localization — NODE ARRIVAL only (receipt proves node, not edge):');
+  console.log(`  ARRIVED_NO_APP (node received the msg, app delivery absent):   ${a.arrivedNoApp}`);
+  console.log(`  NEVER_ARRIVED  (no receipt — forwarding loss OR tree divergence, not separable here): ${a.neverArrived}`);
+  console.log(`  = D_belief \\ R_app total: ${a.beliefNotApp}  (arrived + never must equal this)`);
+  console.log(`  NOTE: separating forwarding-loss from tree-divergence within NEVER_ARRIVED needs an edge-join receipt (sub:recv carrying upstream sender) + publish-time root identity — further stamps (Aster c755397a).`);
+  if (a.voided || a.rootDivergence) console.log(`VOID/divergence by reason: ${JSON.stringify(res.voidReasons)}`);
   console.log(`app-receipt latency: p50=${res.latP50}ms p95=${res.latP95}ms   censor window=${res.censorMs}ms   clock band=${res.band}ms`);
   console.log('=================================================================================================\n');
 }
@@ -472,9 +497,9 @@ function selftest() {
       L({ msgId: 'M1', node: R, isRoot: 1, localDelivery: 1, parent: null, n: 3, recips: [{ sub: A, child: 0 }, { sub: B, child: 0 }, { sub: C, child: 1 }] }),
       L({ msgId: 'M1', node: C, localDelivery: 1, parent: R, n: 1, recips: [{ sub: D, child: 0 }] }),
     ],
-    rootMembers: [], hopTx: new Map([mkHop('h1', R, A, 'M1'), mkHop('h3', R, C, 'M1'), mkHop('h4', C, D, 'M1')]),
-    hopRx: new Set(['h1', 'h3', 'h4']),
+    rootMembers: [], hopTx: new Map(), hopRx: new Set(),
     appRecv: [{ msgId: 'M1', key: '0|h', t: 1010 }, { msgId: 'M1', key: '1|h', t: 1012 }, { msgId: 'M1', key: '4|h', t: 1020 }, { msgId: 'M1', key: '1|h', t: 1013 }],
+    subRecv: [{ msgId: 'M1', self: pfx(C), t: 1005 }],   // C received the msg (node arrival) but its app never delivered -> ARRIVED_NO_APP; B has no receipt -> NEVER_ARRIVED
     idMap, maxT: 1e6,
   };
   const r1 = reconcile(base, { censorMs: 0 }); results.push(r1);
@@ -515,10 +540,10 @@ function selftest() {
     ], rootMembers: [], hopTx: new Map(), hopRx: new Set(), appRecv: [], idMap, maxT: 1e6 };
   const r6 = reconcile(conf, { censorMs: 0 });
 
-  // (e) fully proven path, missing deliver:app -> FINAL_HOP_CALLBACK.
+  // (e) node received (sub:recv) but app delivery absent -> ARRIVED_NO_APP.
   const full = { ledgerRows: [
       L({ msgId: 'M7', node: R, isRoot: 1, parent: null, n: 1, recips: [{ sub: A, child: 0 }] }),
-    ], rootMembers: [], hopTx: new Map([mkHop('f1', R, A, 'M7')]), hopRx: new Set(['f1']), appRecv: [], idMap, maxT: 1e6 };
+    ], rootMembers: [], hopTx: new Map(), hopRx: new Set(), appRecv: [], subRecv: [{ msgId: 'M7', self: pfx(A), t: 1005 }], idMap, maxT: 1e6 };
   const r7 = reconcile(full, { censorMs: 0 });
 
   // three-set lifecycle fixtures (Aster 54d03977). Host 'h' has offset 0; band 182.
@@ -589,15 +614,15 @@ function selftest() {
   const checks = [
     ['M1 D_belief==5 (dual-role C once, no leafhood drop)', a1.belief === 5],
     ['M1 delivered==3', a1.delivered === 3],
-    ['M1 partition exact: fwd+cb+unresolved==beliefNotApp', a1.forwardingDrop + a1.callbackDrop + a1.unresolved === a1.beliefNotApp],
-    ['M1 forwardingDrop==1 (B not forwarded)', a1.forwardingDrop === 1],
-    ['M1 callbackDrop==1 (C reached, app absent)', a1.callbackDrop === 1],
+    ['M1 partition exact: arrived+never==beliefNotApp', a1.arrivedNoApp + a1.neverArrived === a1.beliefNotApp],
+    ['M1 neverArrived==1 (B no receipt)', a1.neverArrived === 1],
+    ['M1 arrivedNoApp==1 (C received, app absent)', a1.arrivedNoApp === 1],
     ['M1 dupReceipts==1', a1.dupReceipts === 1],
-    ['(a) 3-hop fail@hop2 -> forwardingDrop==1 (intermediate boundary), callback==0', r3.agg.forwardingDrop === 1 && r3.agg.callbackDrop === 0],
+    ['(a) leaf never received -> neverArrived==1, arrivedNoApp==0', r3.agg.neverArrived === 1 && r3.agg.arrivedNoApp === 0],
     ['(b) dual-parent ambiguity -> VOID (0 scored)', r4.agg.voided === 1 && r4.agg.publishes === 0],
     ['(c) omitted subtree -> VOID via root-members mismatch', r5.agg.voided === 1 && !!r5.voidReasons.ROOTMEMBERS_MISMATCH],
     ['(d) conflicting parent rows -> VOID', r6.agg.voided === 1 && !!r6.voidReasons.CONFLICTING_PARENT],
-    ['(e) fully proven path, no app -> callbackDrop==1', r7.agg.callbackDrop === 1 && r7.agg.forwardingDrop === 0],
+    ['(e) node received, no app -> arrivedNoApp==1, neverArrived==0', r7.agg.arrivedNoApp === 1 && r7.agg.neverArrived === 0],
     ['(f) required+active, node unlisted -> D_active\\D_belief divergence==1', r8.hasSets && r8.agg.beliefDivergence === 1 && r8.agg.activationFailure === 0],
     ['(g) required, sub never resolves -> activationFailure==1', r9.hasSets && r9.agg.activationFailure === 1 && r9.agg.required === 1],
     ['(h) disconnect, reconnect after publish -> inactive (activationFailure==1)', r10.agg.activationFailure === 1],
