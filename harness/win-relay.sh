@@ -30,6 +30,9 @@ case "${1:-}" in
   census)
     powershell -NoProfile -Command "@($RELAY_FILTER).Count" | tr -d '[:space:]'
     ;;
+  pids)   # live relay ProcessIds, one per line (for the pre-arm coverage gate)
+    relay_pids
+    ;;
   start)
     mkdir -p relay-logs
     ts=$(date +%s)

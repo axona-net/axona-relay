@@ -83,6 +83,20 @@ remote axona-linux 'cd ~/Documents/claude/axona-relay && git fetch -q origin && 
 echo 'cd /c/Users/david/github/axona-relay && git fetch -q origin && git reset -q --hard origin/testnet && git log --oneline -1' \
   | ssh -o ConnectTimeout=15 axona-win '"C:\Program Files\Git\bin\bash.exe" -s'
 
+# PRE-ARM COVERAGE GATE (2026-09-01): a traced arm is only readable if EVERY live
+# relay is emitting telemetry under the expected kernel. The first instrumented
+# read voided because LAT_TRACE was non-uniform — senders traced, most receivers
+# not — so tx and rx were different populations. Refuse to open the window unless
+# coverage is uniform. Only gates traced arms; LAT_TRACE=0 runs are unaffected.
+# COVERAGE_OVERRIDE=1 admits a known partial-coverage arm (the read will be void).
+if [ "${LAT_TRACE:-0}" = 1 ]; then
+  echo "── pre-arm coverage gate (LAT_TRACE=1)"
+  if ! REGION="$REGION" BRIDGE="$BRIDGE" bash harness/coverage-check.sh; then
+    echo "✗ coverage gate REFUSED the arm — not opening the window. Roll the fleet uniformly (LAT_TRACE=1, $(grep -hoE "KERNEL_VERSION[[:space:]]*=[[:space:]]*'[^']+'" vendor/axona-protocol/src/transport/handshake.js | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)) and retry, or set COVERAGE_OVERRIDE=1 to admit a void read deliberately." >&2
+    exit 1
+  fi
+fi
+
 echo "── launching $NODES sidecars (seed $SEED, $(( DURATION_MS / 60000 ))min window)"
 launch_local 0 1
 launch_ssh_unix m1 "/opt/homebrew/Cellar/node/26.6.0/bin:/opt/homebrew/bin" darwin 2 3
