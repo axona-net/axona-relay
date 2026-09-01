@@ -63,6 +63,14 @@ import { join } from 'node:path';
 const DIR = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[2] : 'harness/results';
 const SELFTEST = process.argv.includes('--selftest');
 const CENSOR_MS = Number((process.argv.find((a) => a.startsWith('--censor=')) || '').split('=')[1] || 5000);
+// Clock basis (b): measured cross-host wall offsets (ms, m4=0 basis; same values the
+// soak analyzers use) + a pre-declared uncertainty BAND. Sidecar event walls are
+// offset-corrected; the residual (the kernel ledger row carries no host tag, so the
+// relay's own offset is unknown up to max|offset|) is absorbed by the band, and a
+// publish within band of a required reader's activation/end boundary is right-censored.
+const OFFSETS = { m4: 0, m1: 136, 'axona-linux': 182, 'axona-win': 89 };
+const CLOCK_BAND = Number((process.argv.find((a) => a.startsWith('--band=')) || '').split('=')[1]
+  || Math.max(0, ...Object.values({ m4: 0, m1: 136, 'axona-linux': 182, 'axona-win': 89 })));  // = 182ms default
 
 const pfx = (h) => (typeof h === 'string' ? h.slice(0, 12) : null);
 const setDiff = (a, b) => [...a].filter((x) => !b.has(x));
@@ -106,41 +114,70 @@ function parse(dir) {
   return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, selfTL, lifecycle, maxT };
 }
 
-// ---- D_intent (time-indexed, from the harness lifecycle ledger) ------
-// Builds, per (peerIdx,host,topicId), the ACTIVE interval [activate, end) and a
-// self-timeline so a subscriber's nodeId AT a given publishTs is resolved with
-// reconnect continuity. Returns null if no lifecycle ledger is present (D_intent
-// then stays UNOBSERVED_BELIEF-pending, never fabricated).
-function buildIntent(lifecycle, selfTL) {
-  const acts = lifecycle.filter((e) => e.kind === 'sub-activate');
-  if (!acts.length) return null;
-  const name2topic = new Map();     // `${peerIdx}|${host}|${name}` -> topicId
-  for (const e of lifecycle) if (e.kind === 'topicmap' && e.detail?.topicId) name2topic.set(`${e.peerIdx}|${e.host}|${e.detail.name}`, pfx(e.detail.topicId));
-  // window end per (peerIdx,host): the sidecar's `end`/measure-end, fallback Infinity
+// ---- three-set model from the harness lifecycle ledger (Aster 54d03977) ------
+// Separates REQUIRED (the frozen plan's obligation, independent of sub success),
+// ACTIVE (a resolved activation interval bound to the node identity at activation),
+// and lets the caller compare against BELIEF (kernel ledger). Clock basis (b):
+// sidecar event walls are offset-corrected to a common basis; the residual relay
+// offset is absorbed by a pre-declared BAND, and a publish within BAND of any
+// required reader's activation/end boundary is boundary-ambiguous → right-censored.
+// Returns null if no lifecycle ledger is present (sets then stay 'pending').
+function buildSets(lifecycle, selfTL, offsets, band) {
+  const hasLifecycle = lifecycle.some((e) => e.kind === 'sub-required' || e.kind === 'sub-activate');
+  if (!hasLifecycle) return null;
+  const off = (host) => (offsets && Number.isFinite(offsets[host]) ? offsets[host] : 0);
+  const corr = (wallMs, host) => (wallMs == null ? null : wallMs - off(host));  // -> common (m4) basis
+
+  // GLOBAL name->topicId (a topic's id is identical for every peer; a peer whose
+  // sub FAILED still maps via another peer's successful topicmap for that name).
+  const name2topic = new Map();
+  for (const e of lifecycle) if (e.kind === 'topicmap' && e.detail?.topicId && e.detail?.name) name2topic.set(e.detail.name, pfx(e.detail.topicId));
+
+  // reconnect-aware self timeline (corrected), per peer
+  const tl = selfTL.map((s) => ({ peer: `${s.peerIdx}|${s.host}`, self: s.self, wall: corr(s.wall, s.host) }))
+    .filter((s) => s.wall != null).sort((a, b) => a.wall - b.wall);
+  const selfAt = (peer, ts) => { let best = null; for (const s of tl) { if (s.peer !== peer) continue; if (s.wall <= ts) best = s.self; else break; } return best; };
+  const nextSelfChangeAfter = (peer, node, from) => { let out = Infinity; for (const s of tl) { if (s.peer !== peer) continue; if (s.wall > from && s.self !== node) { out = s.wall; break; } } return out; };
+
+  // D_required: topicId -> Set(peer)
+  const requiredByTopic = new Map();
+  for (const e of lifecycle) if (e.kind === 'sub-required') { const tp = name2topic.get(e.detail?.topic); if (tp) { if (!requiredByTopic.has(tp)) requiredByTopic.set(tp, new Set()); requiredByTopic.get(tp).add(`${e.peerIdx}|${e.host}`); } }
+
+  // window end per peer (fallback interval close)
   const endByPeer = new Map();
-  for (const e of lifecycle) if ((e.kind === 'end') && e.wallMs != null) endByPeer.set(`${e.peerIdx}|${e.host}`, e.wallMs);
-  // intervals keyed by (peerIdx|host|topicId)
+  for (const e of lifecycle) if (e.kind === 'end' && e.wallMs != null) endByPeer.set(`${e.peerIdx}|${e.host}`, corr(e.wallMs, e.host));
+
+  // D_active intervals, keyed (peer|topicId), bound to the node at activation and
+  // clamped to the next identity change (reconnect rule).
   const intervals = new Map();
-  for (const e of acts) {
-    const tp = pfx(e.detail?.topicId);
-    if (!tp || e.wallMs == null) continue;
-    intervals.set(`${e.peerIdx}|${e.host}|${tp}`, { peer: `${e.peerIdx}|${e.host}`, topicId: tp, from: e.wallMs, to: Infinity });
+  for (const e of lifecycle) {
+    if (e.kind !== 'sub-activate') continue;
+    const tp = pfx(e.detail?.topicId); if (!tp || e.wallMs == null) continue;
+    const peer = `${e.peerIdx}|${e.host}`, from = corr(e.wallMs, e.host);
+    const node = selfAt(peer, from);
+    const clamp = nextSelfChangeAfter(peer, node, from);           // identity change closes the interval
+    intervals.set(`${peer}|${tp}`, { peer, topicId: tp, from, to: clamp, node });   // to refined by sub-end below
   }
   for (const e of lifecycle) {
     if (e.kind !== 'sub-end') continue;
-    const tp = name2topic.get(`${e.peerIdx}|${e.host}|${e.detail?.topic}`);
-    const k = `${e.peerIdx}|${e.host}|${tp}`;
-    if (tp && intervals.has(k) && e.wallMs != null) intervals.get(k).to = e.wallMs;
+    const tp = name2topic.get(e.detail?.topic), k = `${e.peerIdx}|${e.host}|${tp}`;
+    if (tp && intervals.has(k) && e.wallMs != null) { const iv = intervals.get(k); iv.to = Math.min(iv.to, corr(e.wallMs, e.host)); }
   }
-  // any interval left open closes at its peer's window end
   for (const iv of intervals.values()) if (iv.to === Infinity) { const en = endByPeer.get(iv.peer); if (en != null) iv.to = en; }
-  const tl = selfTL.slice().sort((a, b) => a.wall - b.wall);
-  const selfAt = (peer, ts) => {         // nodeId active for this peer at ts (reconnect-aware)
-    let best = null;
-    for (const s of tl) { if (`${s.peerIdx}|${s.host}` !== peer) continue; if (s.wall <= ts) best = s.self; else break; }
-    return best;
+  const ivByPeerTopic = new Map(); for (const iv of intervals.values()) ivByPeerTopic.set(`${iv.peer}|${iv.topicId}`, iv);
+
+  // activePeer at (peer, topicId, ts): active iff an interval contains ts AND the
+  // identity is stable (selfAt(ts) === interval.node). boundary-ambiguous iff ts is
+  // within band of a boundary.
+  const activePeer = (peer, topicId, ts) => {
+    const iv = ivByPeerTopic.get(`${peer}|${topicId}`);
+    if (!iv) return { active: false, node: null, boundary: false };
+    const inside = ts >= iv.from && ts < iv.to;
+    const idStable = selfAt(peer, ts) === iv.node;
+    const boundary = Math.abs(ts - iv.from) < band || (Number.isFinite(iv.to) && Math.abs(ts - iv.to) < band);
+    return { active: inside && idStable, node: iv.node, boundary };
   };
-  return { intervals: [...intervals.values()], selfAt };
+  return { requiredByTopic, activePeer, band };
 }
 
 // ---- per-msg tree model + validity ----------------------------------
@@ -236,7 +273,9 @@ function reconcile(parsed, opts = {}) {
   const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, selfTL = [], lifecycle = [], maxT } = parsed;
   const censorMs = opts.censorMs ?? CENSOR_MS;
   const censorCutoff = maxT - censorMs;
-  const intent = buildIntent(lifecycle, selfTL);   // null if no lifecycle ledger
+  const offsets = opts.offsets ?? OFFSETS;
+  const band = opts.band ?? CLOCK_BAND;
+  const sets = buildSets(lifecycle, selfTL, offsets, band);   // null if no lifecycle ledger
 
   // group ledger rows + root-members by msgId
   const rowsByMsg = new Map(), rmByMsg = new Map(), pubTs = new Map();
@@ -263,8 +302,9 @@ function reconcile(parsed, opts = {}) {
     const pt = pubTs.get(a.msgId); if (typeof pt === 'number' && typeof a.t === 'number') lat.push(a.t - pt);
   }
 
-  const agg = { publishes: 0, voided: 0, censored: 0, belief: 0, delivered: 0,
-    forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0, unobservedBelief: 0, dupReceipts, unmappedReceipts };
+  const agg = { publishes: 0, voided: 0, censored: 0, boundaryAmbiguous: 0, belief: 0, delivered: 0,
+    forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0,
+    required: 0, reqDelivered: 0, activationFailure: 0, beliefDivergence: 0, dupReceipts, unmappedReceipts };
   const voidReasons = {}; const rows = [];
 
   for (const [msgId, mrows] of rowsByMsg) {
@@ -272,21 +312,31 @@ function reconcile(parsed, opts = {}) {
     if (typeof pt === 'number' && pt > censorCutoff) { agg.censored++; continue; }
     const tree = buildTree(mrows, rmByMsg.get(msgId));
     if (tree.void) { agg.voided++; voidReasons[tree.void] = (voidReasons[tree.void] || 0) + 1; continue; }
-    agg.publishes++;
-    // D_intent \ D_belief = UNOBSERVED_BELIEF: a subscriber the harness REQUIRED at
-    // this publish (its active interval on the msg's topic contained publishTs) whose
-    // resolved nodeId the kernel belief tree never listed. UNVERIFIED intent/belief
-    // divergence — reported, never counted as delivery loss (Aster #1).
-    if (intent && typeof pt === 'number') {
-      const topicId = pfx(mrows.find((r) => r.topicId)?.topicId);
-      for (const iv of intent.intervals) {
-        if (iv.topicId !== topicId) continue;
-        if (!(pt >= iv.from && pt < iv.to)) continue;
-        const node = intent.selfAt(iv.peer, pt);
-        if (node && !tree.belief.has(node)) agg.unobservedBelief++;
-      }
-    }
     const app = appByMsg.get(msgId) || new Set();
+
+    // THREE-SET breakdown (Aster 54d03977), when a lifecycle ledger exists. REQUIRED
+    // is the frozen-plan obligation (independent of sub success); ACTIVE is a resolved,
+    // identity-stable interval containing publishTs; BELIEF is the kernel ledger. A
+    // publish within band of any required reader's activation/end boundary is
+    // boundary-ambiguous and right-censored (clock basis b). Divergences are reported,
+    // NEVER counted as transport loss.
+    if (sets && typeof pt === 'number') {
+      const topicId = pfx(mrows.find((r) => r.topicId)?.topicId);
+      const required = sets.requiredByTopic.get(topicId) || new Set();
+      let boundary = false; const states = [];
+      for (const peer of required) { const st = sets.activePeer(peer, topicId, pt); if (st.boundary) boundary = true; states.push({ peer, st }); }
+      if (boundary) { agg.boundaryAmbiguous++; continue; }        // right-censor boundary-ambiguous publishes
+      agg.publishes++;
+      agg.required += required.size;
+      for (const { st } of states) {
+        if (!st.active) { agg.activationFailure++; continue; }    // D_required \ D_active
+        if (st.node && !tree.belief.has(st.node)) agg.beliefDivergence++;   // D_active \ D_belief
+        if (st.node && app.has(st.node)) agg.reqDelivered++;      // required AND delivered (service completeness)
+      }
+    } else {
+      agg.publishes++;
+    }
+
     const missed = setDiff(tree.belief, app);
     let fwd = 0, cb = 0, unres = 0;
     for (const s of missed) {
@@ -305,26 +355,34 @@ function reconcile(parsed, opts = {}) {
 
   lat.sort((a, b) => a - b);
   const p = (q) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(q / 100 * lat.length))] : null;
-  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, hasIntent: !!intent,
-    completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null };
+  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, band, hasSets: !!sets,
+    completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null,
+    serviceCompleteness: agg.required ? +(100 * agg.reqDelivered / agg.required).toFixed(2) : null };
 }
 
 function report(res, note) {
   const a = res.agg;
   console.log('\n===== DELIVERY RECONCILIATION (path-aware; fanout-ledger 73b705d; rules 722f8464/89ab0777) =====');
   if (note) console.log(note);
-  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored: ${a.censored})`);
+  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored@end: ${a.censored}, boundary-ambiguous censored: ${a.boundaryAmbiguous})`);
   console.log(`receipts: dup per (msg,sub)=${a.dupReceipts}, unmapped (no peer→node)=${a.unmappedReceipts}`);
-  console.log(`expected app obligations (D_belief): ${a.belief}   delivered: ${a.delivered}   completeness=${res.completeness}%`);
-  console.log('miss localization — path-aware, partitions the miss set exactly:');
+  if (res.hasSets) {
+    console.log('THREE SETS (Aster 54d03977) — service completeness uses D_required as denominator:');
+    console.log(`  D_required obligations: ${a.required}   delivered: ${a.reqDelivered}   SERVICE COMPLETENESS=${res.serviceCompleteness}%`);
+    console.log(`  D_required \\ D_active  (subscription activation/continuity failure): ${a.activationFailure}`);
+    console.log(`  D_active   \\ D_belief  (active-intent / kernel-belief divergence):    ${a.beliefDivergence}`);
+    console.log(`  (both divergences reported, NEVER counted as transport loss)`);
+  } else {
+    console.log(`D_required/D_active pending — no lifecycle ledger in this data (Aster 54d03977)`);
+  }
+  console.log(`kernel-belief tree obligations (D_belief): ${a.belief}   delivered: ${a.delivered}   belief-completeness=${res.completeness}%`);
+  console.log('D_belief \\ R_app miss localization — path-aware, partitions the miss set exactly:');
   console.log(`  FORWARDING_DROP (earliest unproven edge on the root→sub path): ${a.forwardingDrop}`);
   console.log(`  FINAL_HOP_CALLBACK (every edge proven, app receipt absent):    ${a.callbackDrop}`);
   console.log(`  UNRESOLVED (path unreconstructable — not forced into a bucket): ${a.unresolved}`);
   console.log(`  = D_belief \\ R_app total: ${a.beliefNotApp}  (fwd+callback+unresolved must equal this)`);
-  if (res.hasIntent) console.log(`  D_intent \\ D_belief: UNOBSERVED_BELIEF = ${a.unobservedBelief}  (required at publishTs, absent from belief tree — UNVERIFIED divergence, not loss)`);
-  else console.log(`  D_intent \\ D_belief: UNOBSERVED_BELIEF pending — no lifecycle ledger in this data (Aster #1)`);
   if (a.voided) console.log(`VOID publishes by reason (never scored as loss): ${JSON.stringify(res.voidReasons)}`);
-  console.log(`app-receipt latency: p50=${res.latP50}ms p95=${res.latP95}ms   censor window=${res.censorMs}ms`);
+  console.log(`app-receipt latency: p50=${res.latP50}ms p95=${res.latP95}ms   censor window=${res.censorMs}ms   clock band=${res.band}ms`);
   console.log('=================================================================================================\n');
 }
 
@@ -393,19 +451,40 @@ function selftest() {
     ], rootMembers: [], hopTx: new Map([mkHop('f1', R, A, 'M7')]), hopRx: new Set(['f1']), appRecv: [], idMap, maxT: 1e6 };
   const r7 = reconcile(full, { censorMs: 0 });
 
-  // (f) D_intent: the harness REQUIRED subscriber P (peerIdx 5, nodeId G) on topic
-  //     TT, active before the publish, but the kernel belief tree listed only A ->
-  //     G is UNOBSERVED_BELIEF (required, unlisted). A itself delivers.
-  const G = '28'.repeat(6), TT = 'aabbccddeeff001122';
-  const intentFix = {
-    ledgerRows: [L({ msgId: 'M8', node: R, isRoot: 1, parent: null, topicId: TT, n: 1, recips: [{ sub: A, child: 0 }] })],
-    rootMembers: [], hopTx: new Map([mkHop('g1', R, A, 'M8')]), hopRx: new Set(['g1']),
-    appRecv: [{ msgId: 'M8', key: '1|h', t: 1010 }],
-    idMap, selfTL: [{ peerIdx: 5, host: 'h', self: pfx(G), wall: 100 }],
-    lifecycle: [{ kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 5, host: 'h', wallMs: 500 }],
-    maxT: 1e6,
-  };
-  const r8 = reconcile(intentFix, { censorMs: 0 });
+  // three-set lifecycle fixtures (Aster 54d03977). Host 'h' has offset 0; band 182.
+  const G = '28'.repeat(6), H1 = '31'.repeat(6), H2 = '32'.repeat(6), I1 = '41'.repeat(6), I2 = '42'.repeat(6), J = '5a'.repeat(6), K = '6b'.repeat(6), TT = 'aabbccddeeff001122';
+  const tmap = { kind: 'topicmap', detail: { name: 'T', topicId: TT }, peerIdx: 0, host: 'h' };
+  const beliefTree = (msgId, leaves) => [L({ msgId, node: R, isRoot: 1, parent: null, topicId: TT, n: leaves.length, recips: leaves.map((s) => ({ sub: s, child: 0 })) })];
+  const RC = (o) => reconcile(o, { censorMs: 0 });
+
+  // (f) required + active, but node absent from belief -> D_active\D_belief divergence.
+  const r8 = RC({ ledgerRows: beliefTree('M8', [A]), rootMembers: [], hopTx: new Map([mkHop('g1', R, A, 'M8')]), hopRx: new Set(['g1']),
+    appRecv: [{ msgId: 'M8', key: '1|h', t: 1010 }], idMap, selfTL: [{ peerIdx: 5, host: 'h', self: pfx(G), wall: 50 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 5, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 5, host: 'h', wallMs: 100 }], maxT: 1e6 });
+
+  // (g) required, sub NEVER resolves (no sub-activate) -> D_required\D_active activation failure.
+  const r9 = RC({ ledgerRows: beliefTree('M9', [A]), rootMembers: [], hopTx: new Map([mkHop('g2', R, A, 'M9')]), hopRx: new Set(['g2']),
+    appRecv: [], idMap, selfTL: [], lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 6, host: 'h' }], maxT: 1e6 });
+
+  // (h) disconnect before publish, reconnect (new activate) AFTER publish -> inactive at publishTs.
+  const r10 = RC({ ledgerRows: beliefTree('MA', [A]), rootMembers: [], hopTx: new Map([mkHop('g3', R, A, 'MA')]), hopRx: new Set(['g3']),
+    appRecv: [], idMap, selfTL: [{ peerIdx: 7, host: 'h', self: pfx(H1), wall: 50 }, { peerIdx: 7, host: 'h', self: pfx(H2), wall: 1200 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 7, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 7, host: 'h', wallMs: 1200 }], maxT: 1e6 });
+
+  // (i) identity replaced mid-interval, NO reactivation -> interval clamped, inactive at publishTs.
+  const r11 = RC({ ledgerRows: beliefTree('MB', [A]), rootMembers: [], hopTx: new Map([mkHop('g4', R, A, 'MB')]), hopRx: new Set(['g4']),
+    appRecv: [], idMap, selfTL: [{ peerIdx: 8, host: 'h', self: pfx(I1), wall: 50 }, { peerIdx: 8, host: 'h', self: pfx(I2), wall: 500 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 8, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 8, host: 'h', wallMs: 100 }], maxT: 1e6 });
+
+  // (j) repeated idempotent activation -> ONE interval; active+in-belief+delivered.
+  const r12 = RC({ ledgerRows: beliefTree('MC', [A, J]), rootMembers: [], hopTx: new Map([mkHop('g5', R, A, 'MC'), mkHop('g6', R, J, 'MC')]), hopRx: new Set(['g5', 'g6']),
+    appRecv: [{ msgId: 'MC', key: '9|h', t: 1010 }], idMap: new Map([...idMap, ['9|h', pfx(J)]]), selfTL: [{ peerIdx: 9, host: 'h', self: pfx(J), wall: 50 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 9, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 9, host: 'h', wallMs: 100 }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 9, host: 'h', wallMs: 120 }], maxT: 1e6 });
+
+  // (k) publish inside the clock-uncertainty band of activation -> boundary-ambiguous, censored.
+  const r13 = RC({ ledgerRows: beliefTree('MD', [A]), rootMembers: [], hopTx: new Map([mkHop('g7', R, A, 'MD')]), hopRx: new Set(['g7']),
+    appRecv: [], idMap, selfTL: [{ peerIdx: 10, host: 'h', self: pfx(K), wall: 50 }],
+    lifecycle: [tmap, { kind: 'sub-required', detail: { topic: 'T' }, peerIdx: 10, host: 'h' }, { kind: 'sub-activate', detail: { topic: 'T', topicId: TT }, peerIdx: 10, host: 'h', wallMs: 900 }], maxT: 1e6 });
 
   const checks = [
     ['M1 D_belief==5 (dual-role C once, no leafhood drop)', a1.belief === 5],
@@ -419,7 +498,12 @@ function selftest() {
     ['(c) omitted subtree -> VOID via root-members mismatch', r5.agg.voided === 1 && !!r5.voidReasons.ROOTMEMBERS_MISMATCH],
     ['(d) conflicting parent rows -> VOID', r6.agg.voided === 1 && !!r6.voidReasons.CONFLICTING_PARENT],
     ['(e) fully proven path, no app -> callbackDrop==1', r7.agg.callbackDrop === 1 && r7.agg.forwardingDrop === 0],
-    ['(f) D_intent: required-but-unlisted sub -> UNOBSERVED_BELIEF==1, A delivered', r8.hasIntent && r8.agg.unobservedBelief === 1 && r8.agg.delivered === 1],
+    ['(f) required+active, node unlisted -> D_active\\D_belief divergence==1', r8.hasSets && r8.agg.beliefDivergence === 1 && r8.agg.activationFailure === 0],
+    ['(g) required, sub never resolves -> activationFailure==1', r9.hasSets && r9.agg.activationFailure === 1 && r9.agg.required === 1],
+    ['(h) disconnect, reconnect after publish -> inactive (activationFailure==1)', r10.agg.activationFailure === 1],
+    ['(i) identity replaced, no reactivation -> interval clamped, activationFailure==1', r11.agg.activationFailure === 1],
+    ['(j) repeated idempotent activation -> ONE interval, reqDelivered==1, no failure', r12.agg.required === 1 && r12.agg.reqDelivered === 1 && r12.agg.activationFailure === 0],
+    ['(k) publish in clock band -> boundary-ambiguous censored (0 scored)', r13.agg.boundaryAmbiguous === 1 && r13.agg.publishes === 0],
   ];
   let ok = true;
   console.log('\n----- SELFTEST (path-aware reconciliation on synthetic fixtures) -----');

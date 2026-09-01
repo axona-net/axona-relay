@@ -147,30 +147,44 @@ plan.topics.forEach((t, ti) => {
   const desc = t.kind === 'owned'
     ? { ...D(t.name), owner: authors.get(t.publishers) ?? author.authorId, write: 'owner' }
     : D(t.name);
-  myTopics.push({ ti, t, desc, lastSeqSeen: -1, lastMsgId: null, watchLastMono: 0 });
+  myTopics.push({ ti, t, desc, reader, lastSeqSeen: -1, lastMsgId: null, watchLastMono: 0 });
 });
 for (const m of myTopics) {
-  const sh = await peer.sub(m.desc, (envp) => {
-    const msg = envp?.message;
-    if (msg?.k !== 'load') return;
-    m.watchLastMono = Date.now();
-    if (Number.isInteger(msg.seq) && msg.seq > m.lastSeqSeen) { m.lastSeqSeen = msg.seq; m.lastMsgId = envp.msgId; }
-    led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: envp.msgId,
-      via: 'watch', payloadHash: sha256(JSON.stringify(msg)) });
-  }, { since: 'all' });
+  // LIFECYCLE LEDGER — D_required (Aster 54d03977). Emitted BEFORE peer.sub, so a
+  // reader the frozen plan requires is recorded EVEN IF its subscription never
+  // resolves. D_required is the service-completeness denominator; a required reader
+  // with no matching sub-activate is an activation FAILURE (D_required∖D_active),
+  // not a reader that silently vanishes from the count.
+  if (m.reader) led.event({ kind: 'sub-required', detail: { topic: m.t.name, kind: m.t.kind } });
+  let sh = null;
+  try {
+    sh = await peer.sub(m.desc, (envp) => {
+      const msg = envp?.message;
+      if (msg?.k !== 'load') return;
+      m.watchLastMono = Date.now();
+      if (Number.isInteger(msg.seq) && msg.seq > m.lastSeqSeen) { m.lastSeqSeen = msg.seq; m.lastMsgId = envp.msgId; }
+      led.observe({ topic: m.t.name, topicSeq: msg.seq, nonce: msg.nonce, msgId: envp.msgId,
+        via: 'watch', payloadHash: sha256(JSON.stringify(msg)) });
+    }, { since: 'all' });
+  } catch (err) {
+    // Survive a failed subscribe (was an uncaught crash) so the activation FAILURE
+    // is observable rather than taking the whole sidecar down mid-arm.
+    led.event({ kind: 'sub-fail', detail: { topic: m.t.name, error: String(err?.message).slice(0, 120) } });
+    continue;
+  }
   // topicId <-> (name, kind) map — lets the analyzer group relay-log root events
   // (which key on the 12-hex topicId) by open vs owned, to test whether owned
   // topics form more empty sub-terminal roots (the cold-hint hypothesis).
   led.event({ kind: 'topicmap', detail: { name: m.t.name, kind: m.t.kind, topicId: sh?.topicId ?? null } });
-  // LIFECYCLE LEDGER (combined Gate-4, Aster a87ad414 #1): the time-indexed
-  // D_intent the reconciliation analyzer needs. peer.sub RESOLVING with a handle
-  // is the activation event — the kernel seated the subscription; the Ledger
-  // auto-stamps wall+mono, so this row's timestamp is the activation instant.
-  // Keyed by topicId (joins to the kernel fanout-ledger) + peerIdx/host (joins to
-  // deliver:app and, via disc `self`, to the subscriber nodeId, reconnects and
-  // all). Closed by the matching sub-end at leave; the measured window is bounded
-  // by measure-start / end. A publish is REQUIRED for this subscriber iff its
-  // publishTs falls in [sub-activate, sub-end) for the topic.
+  // LIFECYCLE LEDGER — D_active (Aster a87ad414 #1 / 54d03977). peer.sub RESOLVING
+  // with a handle is the activation event; the Ledger auto-stamps wall+mono, so
+  // this row's timestamp is the activation instant. Keyed by topicId (joins to the
+  // kernel fanout-ledger) + peerIdx/host (joins to deliver:app and, via disc `self`,
+  // to the subscriber nodeId). The analyzer BINDS the activation interval to the
+  // nodeId active at this instant and closes it on any identity change — it never
+  // maps an open interval onto a new nodeId (reconnect rule). Closed by sub-end at
+  // leave; the window is bounded by measure-start/end. A reader is ACTIVE for a
+  // publish iff publishTs ∈ [sub-activate, sub-end) on the topic, offset-corrected.
   led.event({ kind: 'sub-activate', detail: { topic: m.t.name, topicId: sh?.topicId ?? null, since: 'all' } });
 }
 led.event({ kind: 'subscribed', detail: { topics: myTopics.length } });
