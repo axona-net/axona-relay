@@ -863,6 +863,9 @@ export const wireHandlersMethods = {
   // Fan a stamped message to every subscriber (optionally excluding the sender).
   _fanout(role, msg, excludeHex) {
     const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg] };
+    // Publish-time expectation ledger (DRAFT, gated) — record the believed
+    // recipient/lease set BEFORE the sends, at every fanning node. See _fanoutLedger.
+    if (this._latTrace) this._fanoutLedger(role, msg?.msgId, excludeHex);
     for (const subHex of role.subscribers.keys()) {
       if (excludeHex && subHex === excludeHex) continue;
       this._route(idBig(subHex), T.DELIVER, { ...base });

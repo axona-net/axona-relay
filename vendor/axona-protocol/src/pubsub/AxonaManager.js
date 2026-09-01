@@ -1312,6 +1312,72 @@ export class AxonaManager {
     if (!this._latTrace) return;
     this._log('info', 'lat-stage', { stage: 'deliver:hop_rx', hopAttemptId, hopIdx, from: fromHex, to: toHex, msgIds, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
   }
+
+  // Publish-time EXPECTATION LEDGER (combined Gate-4 item 3; Aster a87ad414;
+  // DRAFT 2026-09-01 for David's review — gated but NOT yet approved for a deploy).
+  //
+  // WHY it fires here and not at root:fanout alone. A single root:fanout is ONE
+  // branch transmission; the eligible recipient set of a publish is spread across
+  // the whole delivery tree. So this stamps at EVERY fanning node (root and each
+  // intermediate relay — _fanout is the one choke point they all pass through).
+  // The union of these per-node ledgers reconstructs the tree, joined ACROSS nodes
+  // by msgId (the stable cross-tree identity — node-local seq is NOT a join key).
+  //
+  // TREE POSITION AND DELIVERY OBLIGATION ARE SEPARATE FACTS (Aster 722f8464). A
+  // node can be BOTH an intermediate forwarder AND a local app subscriber, so graph
+  // leafhood — "a sub that is never a node" — does NOT equal the app-subscriber
+  // denominator; it would silently drop subscribed forwarders. Two explicit fields:
+  // per recipient edge, `child`=1 marks a relay-forwarding edge (0 = a terminal
+  // leaf-subscriber edge); per node, `localDelivery`=1 marks that THIS node's own
+  // app owes delivery. Reconciliation derives expected app recipients as
+  // {child=0 recipient edges} ∪ {localDelivery=1 nodes}, deduped by nodeId — never
+  // from leafhood. `parent` (this node's upstream) + node/seq/epoch separate seat
+  // reattachments for the same topic.
+  //
+  // WHAT it records: per message x LOCAL subscriber, the lease state the fanning
+  // node BELIEVED at send time — full-hex id (joins to deliver:app / sub:recv),
+  // {since,lastRenewed}, lease age, whether the recipient is a child-relay edge, and
+  // whether it is the sender we skip. Per node: localDelivery obligation, upstream
+  // parent, and epoch/seq so a publish is pinned to the topology incarnation.
+  //
+  // WHAT it deliberately does NOT do: pre-filter exclusions. Expired-lease / self /
+  // child-relay / sender-dedup are recorded as RAW state (+ dropMs threshold), so
+  // the reconciliation analyzer applies the DECLARED exclusion policy transparently
+  // instead of the kernel silently dropping recipients from the denominator. Its
+  // divergence from the harness's ground-truth subscribe log is the signal that
+  // localizes loss to BEFORE fanout (eligible but absent here) vs AFTER (present
+  // here, no deliver:app). Same LAT_TRACE gate; byte-identical when off; bounded by
+  // maxDirect recips per node.
+  _fanoutLedger(role, msgId, excludeHex) {
+    if (!this._latTrace || !msgId || !role) return;
+    const now = this._now();
+    const recips = [];
+    for (const [subHex, sub] of role.subscribers) {
+      recips.push({
+        sub: subHex,                                       // FULL hex — joins to deliver:app / sub:recv
+        since: sub?.since ?? 0,
+        lastRenewed: sub?.lastRenewed ?? 0,
+        leaseAgeMs: now - (sub?.lastRenewed ?? 0),         // EXPIRED iff leaseAgeMs > dropMs
+        child: role.children?.has(subHex) ? 1 : 0,         // 1 = aggregates a sub-tree (not a leaf app-sub)
+        excludedSender: (excludeHex && subHex === excludeHex) ? 1 : 0,   // the sender this fanout skips
+      });
+    }
+    this._log('info', 'lat-stage', {
+      stage: 'fanout-ledger',
+      msgId,                                               // STABLE cross-tree join key (same on every node)
+      topicId: idHex(role.topicId),
+      node: idHex(this.nodeId),                            // FULL hex — the fanning node
+      isRoot: role.isRoot ? 1 : 0,
+      localDelivery: this.mySubscriptions?.has(role.topicId) ? 1 : 0,  // THIS node's own app owes delivery — the dual-role field (Aster 722f8464)
+      parent: (this._upstream?.get(role.topicId) || [])[0] || null,    // upstream seat this node renews toward — separates reattachments (null at root)
+      epoch: Number.isFinite(role.epoch) ? role.epoch : null,   // seat generation — meaningful at isRoot:1 (0 on relays)
+      seq: Number.isFinite(role.seq) ? role.seq : null,
+      dropMs: this.dropMs,                                 // analyzer classifies expiry with the SAME threshold
+      n: recips.length,
+      recips,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0,
+    });
+  }
 }
 
 // ── Phase 2 assembly ────────────────────────────────────────────────────
