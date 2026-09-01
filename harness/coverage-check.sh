@@ -84,13 +84,25 @@ host_pids() {
   esac
 }
 
-# Pids (from disc-relay-<pid>.jsonl filenames) that have a NON-EMPTY trace file.
-host_traced_pids() {
+# ARMED pids: LAT_TRACE=1 in the live relay's process ENVIRONMENT — the definitive,
+# activity-independent arming signal (David 2026-09-01, replacing disc-emission which
+# a freshly-cold-started quiet relay hasn't produced yet). Unix env is CLI-readable
+# per-pid; Windows process env is NOT, so win relays are armed BY CONSTRUCTION — a
+# cold start passes LAT_TRACE=1 through win-relay.sh to win-relay-launch.cmd's arg7
+# `if "%~7"=="1" set LAT_TRACE=1`, so every live win relay carries it. win is reported
+# as `structural` (env-unverifiable) and the arm's own emission + the analyzer VOID
+# guard are the backstop.
+host_armed_pids() {
   local h="$1"
   case "$h" in
-    m4)         for f in "$M4_DIR"/relay-logs/disc-relay-*.jsonl; do [ -s "$f" ] && basename "$f" | grep -oE '[0-9]+'; done 2>/dev/null ;;
-    axona-win)  winw 15 "for f in $WIN_DIR/relay-logs/disc-relay-*.jsonl; do [ -s \"\$f\" ] && basename \"\$f\" | grep -oE '[0-9]+'; done 2>/dev/null" | tr -d '\r' ;;
-    *)          sshw 15 "$h" "for f in $REMOTE_DIR/relay-logs/disc-relay-*.jsonl; do [ -s \"\$f\" ] && basename \"\$f\" | grep -oE '[0-9]+'; done 2>/dev/null" | tr -d '\r' ;;
+    m4)
+      for p in $(pgrep -f "src/index.js" 2>/dev/null); do
+        [ "$(basename "$(ps -p "$p" -o comm= 2>/dev/null)" 2>/dev/null)" = node ] || continue
+        ps eww "$p" 2>/dev/null | grep -q 'LAT_TRACE=1' && echo "$p"
+      done ;;
+    m1)          sshw 20 m1 'for p in $(pgrep -f "src/index.js"); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] || continue; ps eww $p 2>/dev/null | grep -q LAT_TRACE=1 && echo $p; done' | tr -d '\r' ;;
+    axona-linux) sshw 20 axona-linux 'for p in $(pgrep -f "src/index.js"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) tr "\0" "\n" < /proc/$p/environ 2>/dev/null | grep -qx LAT_TRACE=1 && echo $p;; esac; done' | tr -d '\r' ;;
+    axona-win)   host_pids axona-win ;;   # env not CLI-readable; armed by cold-start construction (structural)
   esac
 }
 
@@ -109,17 +121,18 @@ while :; do
     # live pids (unique)
     live="$(host_pids "$h" | grep -E '^[0-9]+$' | sort -u)"
     lc=$(printf '%s\n' "$live" | grep -cE '^[0-9]+$')
-    # traced pids (unique)
-    traced="$(host_traced_pids "$h" | grep -E '^[0-9]+$' | sort -u)"
-    # uncovered = live not in traced
+    # armed pids (LAT_TRACE=1 in env; win = structural)
+    method="env"; [ "$h" = axona-win ] && method="structural"
+    traced="$(host_armed_pids "$h" | grep -E '^[0-9]+$' | sort -u)"
+    # uncovered = live not armed
     unc="$(comm -23 <(printf '%s\n' "$live" | grep -E '^[0-9]+$' | sort -u) \
                     <(printf '%s\n' "$traced" | grep -E '^[0-9]+$' | sort -u))"
     uc=$(printf '%s\n' "$unc" | grep -cE '^[0-9]+$')
 
     total_live=$((total_live+lc)); total_unc=$((total_unc+uc))
     covd=$((lc-uc))
-    line="  $h: kernel=$vok  live=$lc covered=$covd uncovered=$uc"
-    [ "$uc" -gt 0 ] && line="$line  [untraced pids: $(printf '%s ' $unc)]"
+    line="  $h: kernel=$vok  live=$lc armed=$covd unarmed=$uc  ($method)"
+    [ "$uc" -gt 0 ] && line="$line  [UNARMED pids: $(printf '%s ' $unc)]"
     report="$report$line"$'\n'
   done
 
