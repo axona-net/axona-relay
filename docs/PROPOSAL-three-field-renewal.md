@@ -56,6 +56,41 @@ timestamp watermark catches the tail as a coarse window and re-sends everything
 newer than the oldest hole. The two fields together catch both, exactly: the
 subscriber names its holes, the root fills its tail.
 
+## Watermark semantics
+
+A scalar "largest sequence seen" is unsafe when delivery is sparse or reordered:
+it hides every hole below itself. The renewal carries a **contiguous
+acknowledgement frontier** (the high-water: the highest sequence below which the
+subscriber holds everything) plus **explicit missing ranges** (the missing-list).
+The pair is exact where the scalar is not.
+
+Pinned semantics:
+
+- **Epoch scope.** The frontier and the missing-list are scoped to one
+  subscription epoch and one topic ordering domain. A resubscribe that opens a new
+  epoch resets both; a root migration that changes the ordering domain is a new
+  epoch, so a frontier from the old root is never applied against the new root's
+  head.
+- **Bounds.** The frontier is inclusive (the subscriber holds the frontier
+  sequence). The root replays strictly above it, and the named ranges exactly. A
+  range `[3-4]` means 3 and 4 inclusive.
+- **Holes below the frontier.** By construction there are none: the frontier is
+  the highest sequence with no gap beneath it. A hole moves the frontier down to
+  just below itself and is named in the missing-list until filled.
+- **Out-of-order arrival.** A message that arrives above a still-open hole does
+  not advance the frontier; it is held, and the hole stays named until the gap
+  fills, at which point the frontier jumps to the new contiguous top.
+- **Migration and reconnect.** On reconnect the subscriber renews with its last
+  frontier and missing-list under the prior epoch; if the root is new, the new
+  epoch starts from the subscriber's frontier and the root fills forward from
+  there, so a reconnect never silently drops the gap it was carrying.
+- **Tombstones.** A killed message advances the frontier like any delivered
+  sequence — the subscriber has resolved that position — and is never re-requested.
+- **Cache truncation.** If the root has aged a named range past its 24h hold, it
+  answers with a truncation marker for that range instead of the body, so the
+  subscriber records the position resolved and stops asking. A gap the root can no
+  longer serve is closed, not retried forever.
+
 ## Delivery path
 
 The replayed messages arrive through the DELIVER→watch path, the same path as a
