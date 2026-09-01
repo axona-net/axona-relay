@@ -143,6 +143,26 @@ async function main() {
   const regionCode  = regionCodeN.toString(16).padStart(2, '0');
   const regionLabel = regionName(regionCodeN) ?? '?';
 
+  // STARTUP-READY ATTESTATION (Aster 017bae90 rule 5). Under LAT_TRACE, emit an
+  // UNCONDITIONAL armed record BEFORE any traffic — activity-independent proof of
+  // this process's EFFECTIVE runtime state (pid, start nonce, kernel version,
+  // effective LAT_TRACE, node identity), cross-platform (Windows included, where
+  // process env is not CLI-readable). The pre-arm coverage gate reads THIS joined
+  // to the live PID census, instead of assuming arming from a launch argument or
+  // waiting for pubsub-driven disc emission on an idle cold-started relay. Closes
+  // both the quiet-relay false-refusal and the Windows structural-assumption
+  // loophole that made the 2026-09-01 arm coverage-provisional.
+  if (process.env.LAT_TRACE === '1') {
+    try {
+      mkdirSync('relay-logs', { recursive: true });
+      appendFileSync(`relay-logs/disc-relay-${process.pid}.jsonl`, JSON.stringify({
+        ev: 'armed', wall: Date.now(), pid: process.pid,
+        startNonce: `${process.pid}-${Date.now()}`, kv: KERNEL_VERSION, latTrace: 1,
+        self: (identity?.id || '').slice(0, 12),
+      }) + '\n');
+    } catch { /* attestation is best-effort; a write failure surfaces as an unarmed pid at the gate */ }
+  }
+
   const present = (USE_TUI ? makeDashboard : makePlainLog)({
     version: RELAY_VERSION, kernelVersion: KERNEL_VERSION,
     bridgeUrl: BRIDGE_URL, nodeId: identity.id, region,

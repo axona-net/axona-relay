@@ -84,25 +84,20 @@ host_pids() {
   esac
 }
 
-# ARMED pids: LAT_TRACE=1 in the live relay's process ENVIRONMENT — the definitive,
-# activity-independent arming signal (David 2026-09-01, replacing disc-emission which
-# a freshly-cold-started quiet relay hasn't produced yet). Unix env is CLI-readable
-# per-pid; Windows process env is NOT, so win relays are armed BY CONSTRUCTION — a
-# cold start passes LAT_TRACE=1 through win-relay.sh to win-relay-launch.cmd's arg7
-# `if "%~7"=="1" set LAT_TRACE=1`, so every live win relay carries it. win is reported
-# as `structural` (env-unverifiable) and the arm's own emission + the analyzer VOID
-# guard are the backstop.
+# ARMED pids: the relay's UNCONDITIONAL startup-ready attestation (Aster 017bae90
+# rule 5) — src/index.js writes relay-logs/disc-relay-<pid>.jsonl with an {ev:'armed',
+# kv, latTrace:1, self, pid, startNonce} record BEFORE any traffic. Activity-independent
+# (kills the quiet-relay false-refusal) and CROSS-PLATFORM including Windows (kills the
+# structural-assumption loophole — no launch-arg trust, no env-read). A live pid is
+# ARMED iff its disc file carries an armed record with kv==EXPECT and latTrace==1.
+# Requires the fleet rolled to the attesting relay (src/index.js) — a fleet on the
+# pre-attestation relay shows 0 armed and the gate refuses, correctly demanding the roll.
 host_armed_pids() {
   local h="$1"
   case "$h" in
-    m4)
-      for p in $(pgrep -f "src/index.js" 2>/dev/null); do
-        [ "$(basename "$(ps -p "$p" -o comm= 2>/dev/null)" 2>/dev/null)" = node ] || continue
-        ps eww "$p" 2>/dev/null | grep -q 'LAT_TRACE=1' && echo "$p"
-      done ;;
-    m1)          sshw 20 m1 'for p in $(pgrep -f "src/index.js"); do [ "$(basename "$(ps -p $p -o comm=)")" = node ] || continue; ps eww $p 2>/dev/null | grep -q LAT_TRACE=1 && echo $p; done' | tr -d '\r' ;;
-    axona-linux) sshw 20 axona-linux 'for p in $(pgrep -f "src/index.js"); do case "$(readlink /proc/$p/exe 2>/dev/null)" in *node*) tr "\0" "\n" < /proc/$p/environ 2>/dev/null | grep -qx LAT_TRACE=1 && echo $p;; esac; done' | tr -d '\r' ;;
-    axona-win)   host_pids axona-win ;;   # env not CLI-readable; armed by cold-start construction (structural)
+    m4)          for f in "$M4_DIR"/relay-logs/disc-relay-*.jsonl; do [ -f "$f" ] || continue; grep -q '"ev":"armed"' "$f" 2>/dev/null && grep -q "\"kv\":\"$EXPECT\"" "$f" 2>/dev/null && grep -q '"latTrace":1' "$f" 2>/dev/null && basename "$f" | grep -oE '[0-9]+'; done 2>/dev/null ;;
+    axona-win)   winw 20 "for f in $WIN_DIR/relay-logs/disc-relay-*.jsonl; do [ -f \"\$f\" ] || continue; grep -q '\"ev\":\"armed\"' \"\$f\" && grep -q '\"kv\":\"$EXPECT\"' \"\$f\" && grep -q '\"latTrace\":1' \"\$f\" && basename \"\$f\" | grep -oE '[0-9]+'; done 2>/dev/null" | tr -d '\r' ;;
+    *)           sshw 20 "$h" "for f in $REMOTE_DIR/relay-logs/disc-relay-*.jsonl; do [ -f \"\$f\" ] || continue; grep -q '\"ev\":\"armed\"' \"\$f\" && grep -q '\"kv\":\"$EXPECT\"' \"\$f\" && grep -q '\"latTrace\":1' \"\$f\" && basename \"\$f\" | grep -oE '[0-9]+'; done 2>/dev/null" | tr -d '\r' ;;
   esac
 }
 
@@ -121,8 +116,8 @@ while :; do
     # live pids (unique)
     live="$(host_pids "$h" | grep -E '^[0-9]+$' | sort -u)"
     lc=$(printf '%s\n' "$live" | grep -cE '^[0-9]+$')
-    # armed pids (LAT_TRACE=1 in env; win = structural)
-    method="env"; [ "$h" = axona-win ] && method="structural"
+    # armed pids (startup-ready attestation record; uniform cross-platform)
+    method="attest"
     traced="$(host_armed_pids "$h" | grep -E '^[0-9]+$' | sort -u)"
     # uncovered = live not armed
     unc="$(comm -23 <(printf '%s\n' "$live" | grep -E '^[0-9]+$' | sort -u) \
