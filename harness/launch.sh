@@ -146,7 +146,17 @@ for h in m1 axona-linux; do
   done
 done
 for f in relay-logs/disc-relay-*.jsonl; do [ -f "$f" ] && cp -f "$f" "$RESULTS/relay-disc-m4-$(basename "$f")"; done 2>/dev/null || true
-# Windows collection by ssh-cat — scp chokes on the drive-letter colon.
+# WIN relay-disc (the 20 win relays ARE in the armed fleet): scp chokes on the
+# drive-letter colon AND a per-file ssh loop mis-parses the newline-joined listing,
+# so cat the whole family in ONE ssh into a single namespaced file. The analyzer is
+# line-oriented (self/pid per row), so a concatenation reads identically to per-file.
+# Without this the win relays' route_msg rx stamps are absent → the per-hop pairing
+# is one-sided for every hop whose receiver is a win relay (2026-09-01 VOID read).
+printf 'cat /c/Users/david/github/axona-relay/relay-logs/disc-relay-*.jsonl 2>/dev/null\n' \
+  | ssh -o ConnectTimeout=25 axona-win '"C:\Program Files\Git\bin\bash.exe" -s' 2>/dev/null \
+  | tr -d '\r' > "$RESULTS/relay-disc-win-all.jsonl"
+[ -s "$RESULTS/relay-disc-win-all.jsonl" ] || rm -f "$RESULTS/relay-disc-win-all.jsonl"
+# Windows sidecar collection by ssh-cat — scp chokes on the drive-letter colon.
 for i in $(seq 0 $(( NODES - 1 ))); do
   f="sidecar-$SEED-$i.jsonl"
   [ -f "$RESULTS/$f" ] && continue

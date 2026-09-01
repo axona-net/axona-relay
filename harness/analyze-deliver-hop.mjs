@@ -37,6 +37,7 @@ const files = readdirSync(DIR).filter((f) => /^relay-disc-/.test(f) && f.endsWit
 if (!files.length) { console.error(`no relay-disc-*.jsonl in ${DIR}`); process.exit(2); }
 
 const tx = new Map(), rx = new Map();
+const relaySelf = new Set();   // 12-hex prefixes of nodes that emitted stamps = INSTRUMENTED relays
 let txRows = 0, rxRows = 0, badId = 0, dupTx = 0, maxT = 0;
 for (const f of files) {
   let text; try { text = readFileSync(join(DIR, f), 'utf8'); } catch { continue; }
@@ -44,6 +45,7 @@ for (const f of files) {
     if (!line) continue;
     let r; try { r = JSON.parse(line); } catch { continue; }
     if (typeof r.t === 'number' && r.t > maxT) maxT = r.t;
+    if (typeof r.self === 'string') relaySelf.add(r.self.slice(0, 12));
     if (r.stage === 'deliver:hop_tx') {
       txRows++; if (r.hopAttemptId == null) { badId++; continue; }
       if (tx.has(r.hopAttemptId)) { dupTx++; continue; }
@@ -55,9 +57,13 @@ for (const f of files) {
 }
 
 const mismatchIds = new Set();
+// Corroborate on hopAttemptId (globally unique) + receiver id (`to`, full 66-hex on
+// both sides) + hopIdx. The sender-side `from` is NOT corroborated: the rx handler's
+// fromId is the transport's short handle, not a nodeId, so it is not comparable to the
+// tx's full-hex `from` (Aster rule 1 — identity-form limitation, stated, not a shortcut).
 const isMatched = (id, t) => {
   const r = rx.get(id); if (!r) return false;
-  if (r.hopIdx !== t.hopIdx || r.from !== t.from || r.to !== t.to) { mismatchIds.add(id); return false; }
+  if (r.hopIdx !== t.hopIdx || r.to !== t.to) { mismatchIds.add(id); return false; }
   return true;
 };
 const wilson = (k, n) => {
@@ -79,12 +85,20 @@ const p = (q) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(q / 100 * 
 const censorWindow = (lat.length ? Math.max(0, p(99)) : 0) + SKEW_MS;
 const censorCutoff = maxT - censorWindow;
 
-// PASS 2 — classify with censoring, stratify
+// PASS 2 — classify with censoring, stratify.
+// SCOPE: only hops whose RECEIVER is an instrumented relay (to-prefix ∈ relaySelf)
+// are measurable — the rx stamp lives in the routed route_msg handler, which the
+// final relay→subscriber hop bypasses (subscribers receive via the direct DELIVER
+// handler and are not instrumented). A tx to an un-instrumented receiver is neither
+// delivered-evidence nor loss-evidence; it is excluded, and counted separately.
+// This scopes the read to relay→relay ROUTED hops — the multi-hop transport path the
+// forward-push-loss hypothesis is actually about.
 const byHop = new Map(); const msgHops = new Map(); const failReasons = new Map();
-let okTx = 0, silent = 0, localFail = 0, censored = 0;
+let okTx = 0, silent = 0, localFail = 0, censored = 0, uninstrumented = 0;
 for (const [id, t] of tx) {
   if (t.writeOutcome !== 'ok') { localFail++; failReasons.set(t.reason || t.writeOutcome, (failReasons.get(t.reason || t.writeOutcome) || 0) + 1); continue; }
   if (typeof t.t === 'number' && t.t > censorCutoff) { censored++; continue; }
+  if (typeof t.to !== 'string' || !relaySelf.has(t.to.slice(0, 12))) { uninstrumented++; continue; }
   okTx++;
   const matched = isMatched(id, t);
   const v = byHop.get(t.hopIdx) || { ok: 0, lost: 0 }; if (matched) v.ok++; else { v.lost++; silent++; } byHop.set(t.hopIdx, v);
@@ -93,12 +107,32 @@ for (const [id, t] of tx) {
 let msgs = 0, msgsLost = 0; const routeLenDist = {};
 for (const [, mm] of msgHops) { msgs++; if (mm.lost) msgsLost++; routeLenDist[mm.maxHop] = (routeLenDist[mm.maxHop] || 0) + 1; }
 
+// ── VALIDITY GUARD (2026-09-01) ───────────────────────────────────────────
+// The metric assumes a tx stamped 'ok' (transport.send RESOLVED) implies the
+// receiver's route_msg handler RAN and stamped rx. On the live fleet that does
+// NOT hold: send-resolution and handler-execution are different event
+// populations. Symptom: 4698 tx vs 553 rx; 21 relays stamp tx, only 6 ever
+// stamp rx. A per-hop "loss" derived from asymmetric populations is not loss.
+// Two independent tripwires; either firing → the read is instrumentation-VOID
+// and NO transport verdict (STANDS/RETIRE) may be emitted from it:
+//   (A) receive-coverage: fraction of tx-emitting relays that also emit >=1 rx.
+//   (B) population symmetry: rx / ok-tx-to-instrumented-relay.
+const txSelf = new Set(), rxSelfIds = new Set();
+for (const [, t] of tx) if (typeof t.from === 'string') txSelf.add(t.from.slice(0, 12));
+for (const [, r] of rx) if (typeof r.to === 'string') rxSelfIds.add(r.to.slice(0, 12));
+let rxCapableSenders = 0; for (const s of txSelf) if (rxSelfIds.has(s)) rxCapableSenders++;
+const recvCoverage = txSelf.size ? rxCapableSenders / txSelf.size : 0;
+const popSymmetry = okTx ? rxRows / okTx : 0;
+const VOID_COVERAGE = 0.6, VOID_SYMMETRY = 0.5;   // pre-declared validity floors
+const instrumentationVoid = recvCoverage < VOID_COVERAGE || popSymmetry < VOID_SYMMETRY;
+
 const pooled = wilson(silent, okTx);
 console.log('\n============ PER-HOP DELIVER DROP (live 4.69.0; rules e618a19a + power ec9b4016) ============');
 console.log(`relay-disc ${files.length} files; tx ${txRows} (dup ${dupTx}, no-id ${badId}); rx ${rxRows}; pair mismatches ${mismatchIds.size}`);
 console.log(`matched-pair latency: n=${lat.length}  p50/p95/p99 = ${p(50)}/${p(95)}/${p(99)}ms; skew(pre-declared)=${SKEW_MS}ms; censor window=${censorWindow}ms; censored tx=${censored}`);
 console.log(`N_ADEQUATE (zero-loss Wilson-upper<3%) = ${N_ADEQUATE} attempts  [reporting floor n>=${MIN_REPORT} is separate]`);
-console.log(`eligible ok-write tx (denominator, post-censor): ${okTx}`);
+console.log(`instrumented relays (self-ids seen): ${relaySelf.size}; tx excluded (receiver un-instrumented, i.e. subscriber final hop): ${uninstrumented}`);
+console.log(`eligible ok-write tx to an instrumented relay (denominator, post-censor): ${okTx}`);
 console.log(`local pre-send failures (separate): ${localFail}  ${JSON.stringify(Object.fromEntries(failReasons))}`);
 console.log(`ATTEMPT-weighted per-hop silent loss (pooled): ${pooled.est}%  [95% CI ${pooled.lo}-${pooled.hi}]`);
 console.log(`MESSAGE-weighted: ${msgs ? (100 * msgsLost / msgs).toFixed(2) : '0'}%  (${msgsLost}/${msgs} msgs lost at >=1 hop)`);
@@ -116,8 +150,10 @@ for (const h of [...byHop.keys()].sort((a, b) => a - b)) {
   }
   console.log(`  hop ${h}: n=${n} lost=${v.lost} est=${ci.est}% [${ci.lo}-${ci.hi}] ${powered ? 'POWERED' : 'underpowered'} ${contrib}`);
 }
+console.log(`VALIDITY: receive-coverage=${(100 * recvCoverage).toFixed(1)}% (senders that also stamp rx: ${rxCapableSenders}/${txSelf.size}; floor ${100 * VOID_COVERAGE}%); population-symmetry rx/okTx=${(100 * popSymmetry).toFixed(1)}% (floor ${100 * VOID_SYMMETRY}%)`);
 let verdict;
-if (stands) verdict = 'TRANSPORT LOSS STANDS — a route<=3 stratum has Wilson lower bound > 3%';
+if (instrumentationVoid) verdict = 'VOID (INSTRUMENTATION) — tx (send-resolved) and rx (handler-ran) are asymmetric populations; a send stamped ok does not imply the hop arrived at an instrumented receiver. No transport loss/retire verdict can be drawn. Diagnosis remains OPEN. Fix: anchor tx and rx to the SAME transport frame event (or a transport delivered/failed callback), redeploy 4.69.0 + LAT_TRACE uniformly across the whole fleet, re-arm.';
+else if (stands) verdict = 'TRANSPORT LOSS STANDS — a route<=3 stratum has Wilson lower bound > 3%';
 else if (retire && anyRoute3) verdict = 'RETIRE forward-push-loss — every observed route<=3 stratum is adequately powered with Wilson upper < 3%';
 else verdict = 'INCONCLUSIVE — route<=3 evidence underpowered or upper CI straddles 3%; neither retire nor stands';
 console.log(`route-length distribution (delivered msgs, max hopIdx): ${JSON.stringify(routeLenDist)}`);
@@ -126,7 +162,8 @@ console.log('===================================================================
 console.log('RESULT_JSON ' + JSON.stringify({
   files: files.length, txRows, rxRows, dupTx, badId, mismatches: mismatchIds.size,
   matchedPairs: lat.length, latP50: p(50), latP95: p(95), latP99: p(99), skewMs: SKEW_MS, censorWindowMs: censorWindow, censored,
-  N_ADEQUATE, okTx, silent, localFail, pooledEst: pooled.est, pooledCI: [pooled.lo, pooled.hi],
+  N_ADEQUATE, okTx, silent, localFail, uninstrumented, pooledEst: pooled.est, pooledCI: [pooled.lo, pooled.hi],
+  recvCoverage: +(recvCoverage).toFixed(3), popSymmetry: +(popSymmetry).toFixed(3), instrumentationVoid,
   msgWeightedPct: msgs ? +(100 * msgsLost / msgs).toFixed(2) : 0,
   perHop: Object.fromEntries([...byHop.entries()].map(([h, v]) => { const ci = wilson(v.lost, v.ok + v.lost); return [h, { n: v.ok + v.lost, lost: v.lost, est: ci.est, lo: ci.lo, hi: ci.hi, powered: (v.ok + v.lost) >= N_ADEQUATE }]; })),
   routeLenDist, verdict,
