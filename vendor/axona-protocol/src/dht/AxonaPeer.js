@@ -853,6 +853,17 @@ export class AxonaPeer extends DHT {
       const { type, payload, targetId, hops, originId } = msg;
       const targetBig = asId(targetId);   // wire→internal id gate
 
+      // Paired DELIVER hop telemetry (LAT_TRACE-gated; David-approved 2026-09-01).
+      // rx here = this hop actually received the forwarded DELIVER; pairs with the
+      // sender's tx by hopAttemptId. No wire/behaviour change when the flag is off.
+      const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
+      let _hopMids = null;
+      if (_hopLt) {
+        const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
+        _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
+        this._axonaManager._deliverHopRx(_hopMids, msg.hopAttemptId ?? null, hops, fromId, toHex(node.id));
+      }
+
       // Greedy 1-hop forward — only over synapses we are actually connected
       // to (skip dead/unbound entries, e.g. the bridge after it drops; see
       // _greedyNextHopToward).  Without this a dead synapse that is XOR-near
@@ -908,13 +919,18 @@ export class AxonaPeer extends DHT {
         catch { /* fall through */ }
       }
 
+      let _hopId = null;
+      if (_hopLt) { _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(node.id).slice(-6)}`; }
       try {
         // Wire payload targetId is hex (v1.5 contract).
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
+          ...(_hopLt ? { hopAttemptId: _hopId } : {}),
         });
+        if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'ok', null);
         return downstream;
-      } catch {
+      } catch (e) {
+        if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
     }, { registry: this._b5door });
@@ -4597,15 +4613,27 @@ export class AxonaPeer extends DHT {
       catch { /* fall through; send may still route via the bridge/relay sink */ }
     }
 
+    // Origin hop (0->1) DELIVER telemetry — same LAT_TRACE gate; pairs with the
+    // first forwarder's rx by hopAttemptId. No wire/behaviour change when off.
+    const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
+    let _hopId = null, _hopMids = null;
+    if (_hopLt) {
+      const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
+      _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
+      _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(originNode.id).slice(-6)}`;
+    }
     try {
       // Wire payload `targetId` is hex (per the v1.5 contract; the
       // receiver handles either form, but hex is the canonical wire
       // shape so this also works over JSON-serialising transports).
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
+        ...(_hopLt ? { hopAttemptId: _hopId } : {}),
       });
+      if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
       return downstream;
-    } catch {
+    } catch (e) {
+      if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'fail', String(e?.message || e));
       return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
     }
   }

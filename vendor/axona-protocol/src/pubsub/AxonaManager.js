@@ -1294,6 +1294,24 @@ export class AxonaManager {
     let t = null; try { t = topicIdBig?.toString(16)?.slice(0, 12) ?? null; } catch { /* */ }
     this._log('info', 'disc', { t, ev: event, self: idHex(this.nodeId).slice(0, 12), ...extra });
   }
+
+  // Paired per-hop DELIVER telemetry (council 73db20f0/e084c12f, David-approved
+  // 2026-09-01). Same LAT_TRACE gate + lat-stage channel as _latStage, so the
+  // relay-disc capture ingests them unchanged. A tx with a matching rx (by
+  // hopAttemptId) crossed the hop; an ok-write tx with NO matching rx is silent
+  // transport loss — the numerator the push-loss diagnosis needs. writeOutcome
+  // segregates local pre-send failure (channel-closed/write-error/no-route) from
+  // that silent loss. hopIdx gives the per-hop denominator so route length is not
+  // inferred from surviving paths (survivorship bias). msgIds bounded for size.
+  _deliverHopTx(msgIds, hopAttemptId, hopIdx, fromHex, toHex, writeOutcome, reason) {
+    if (!this._latTrace) return;
+    this._log('info', 'lat-stage', { stage: 'deliver:hop_tx', hopAttemptId, hopIdx, from: fromHex, to: toHex, writeOutcome, reason: reason ?? null, msgIds, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  _deliverHopRx(msgIds, hopAttemptId, hopIdx, fromHex, toHex) {
+    if (!this._latTrace) return;
+    this._log('info', 'lat-stage', { stage: 'deliver:hop_rx', hopAttemptId, hopIdx, from: fromHex, to: toHex, msgIds, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
 }
 
 // ── Phase 2 assembly ────────────────────────────────────────────────────
