@@ -1,50 +1,61 @@
 // =====================================================================
 // reconcile-delivery.mjs — combined Gate-4 item 4: reconcile the publish-time
 // expectation ledger (kernel 73b705d fanout-ledger) against actual app receipts,
-// with per-hop forwarding as the middle layer, to the council-frozen rules
-// (Aster 722f8464, Orion 6c09ee0d / 35a201c4, Vega 5e4a6bb7 / 096003d3).
+// with PATH-AWARE per-edge attribution, to the council-frozen rules
+// (Aster 722f8464 + 89ab0777; Orion 6c09ee0d/35a201c4/5e20eb5d; Vega 5e4a6bb7/
+// 096003d3/537d83a6/f57c839c).
 //
-// This does NOT re-measure per-hop transport loss (that is analyze-deliver-hop.mjs).
-// It answers the end-to-end question — "did each ELIGIBLE subscriber's app receive
-// each message" — and LOCALIZES every miss to one stratum, without conflating them:
+// It answers "did each ELIGIBLE subscriber's app receive each message" and
+// localizes every miss WITHOUT conflating strata, and WITHOUT overstating what
+// the evidence proves.
 //
-//   D_intent   who the harness REQUIRED to receive (ground-truth test intent)
-//   D_belief   who the kernel BELIEVED it owed delivery (from fanout-ledger)
-//   D_fwd      who the message was actually FORWARDED toward (from deliver:hop pairs)
-//   R_app      who actually delivered to their app (from deliver:app)
+//   D_intent   who the harness REQUIRED (test intent) — PARTIAL until the harness
+//              lifecycle ledger is time-indexed; see UNOBSERVED_BELIEF below.
+//   D_belief   who the kernel BELIEVED it owed app delivery (from fanout-ledger)
+//   R_app      who delivered to their app (from deliver:app), deduped per (msg,sub)
 //
-//   D_intent \ D_belief  -> intent/belief DIVERGENCE  (pre-fanout registration/lease;
-//                          classified as divergence FIRST, not kernel failure, until
-//                          harness activation + identity continuity are verified — Aster #1)
-//   D_belief  \ D_fwd     -> tree/forwarding drop      (never forwarded toward them)
-//   D_fwd     \ R_app     -> final-hop / callback drop  (forwarded, app never got it)
-//   D_belief  \ R_app     -> aggregate post-fanout loss (the two above combined)
-//
-// EXPECTATION SET (Aster's material correction 722f8464): tree position and delivery
-// obligation are SEPARATE. Expected app recipients per msgId are derived as
+// EXPECTATION SET (Aster 722f8464): tree position and delivery obligation are
+// SEPARATE. Expected app recipients per msgId =
 //   { recip.sub where child==0 }  UNION  { node where localDelivery==1 }
-// deduped by nodeId — NEVER from graph leafhood. A node that is both a forwarder and
-// a subscriber is counted via its own localDelivery==1.
+// deduped by nodeId — NEVER graph leafhood. A node that is both a forwarder and a
+// subscriber is counted via its own localDelivery==1.
 //
-// VALIDITY (Aster #4 / Orion): a publish whose ledger is truncated or internally
-// inconsistent is NOT scored — it is marked VOID (TELEMETRY_TRUNCATED) and reported
-// separately. No silent partial ledger is ever counted as delivery loss. Structural
-// truncation checks here (recips.length !== declared n; a referenced parent/child node
-// with no ledger row); a kernel-side write-failure marker would strengthen this.
+// PATH-AWARE ATTRIBUTION (Aster 89ab0777 — the item-4 correction). A binary
+// "forwarded?" flag is WRONG: a multi-hop path can be proven across edge 1 and
+// fail at edge 2, which a binary flag would miscall a callback drop. So for each
+// MISSED subscriber:
+//   - reconstruct the ordered root->...->subscriber path from ledger parent/child
+//     edges;
+//   - join hopAttempt evidence to EACH edge (an edge A->B is proven iff a
+//     deliver:hop_tx from A to B carrying this msgId has a matching rx);
+//   - the EARLIEST edge lacking success evidence is the forwarding boundary
+//     (FORWARDING_DROP@depth);
+//   - classify FINAL_HOP_CALLBACK only when EVERY network edge is proven and the
+//     app receipt is absent;
+//   - if the path can't be ordered (missing/conflicting parent, unreachable root)
+//     -> UNRESOLVED, never a forced bucket.
+// A proven hop advances the proven-path boundary; it does not make the whole path
+// "forwarded" (send-resolved-on-reply is positive per-edge evidence only).
 //
-// CENSORING (Aster): right-censor only PROSPECTIVELY — drop publishes within
-// (censorWindow) of arm end, so an unresolved recipient near the end is not a miss.
+// TREE-COMPLETENESS GATE (Aster 89ab0777). Structural recips==n and
+// parent-row-present are necessary but NOT sufficient — a wholly omitted subtree
+// disappears with neither symptom. "Exact partition" is therefore scoped to a
+// trace-complete, root-connected observed belief tree. A publish is VOID unless:
+// exactly one root, acyclic parentage, every ledger node reaches the root, one
+// consistent topic, no conflicting edge roles, recips==n on every row, and (when a
+// root-members row exists) the root projection reproduces its count. Absence of a
+// row is treated as TELEMETRY absence (UNRESOLVED/UNVERIFIED), NOT protocol
+// absence, until the kernel emits a trace-write-failure marker (a further kernel
+// change, held for David).
 //
-// DEDUP: receipts deduped per (msgId, subscriber); duplicates reported separately.
+// D_intent members absent from the ledger -> UNOBSERVED_BELIEF (UNVERIFIED
+// divergence), never kernel failure (Aster #1). Requires the time-indexed harness
+// ledger, which does not exist yet, so this class is reported as pending.
 //
-// D_intent SOURCE (Aster #1): the harness lifecycle ledger must be TIME-INDEXED
-// (subscribe activation, unsubscribe/expiry, reconnect identity, publish cutoff). The
-// current sidecar Ledger records subscribe COUNT + author identity but not the
-// per-topic activation timeline. Until the harness emits that, D_intent is marked
-// PARTIAL and D_intent\D_belief is reported as UNVERIFIED divergence, never as kernel
-// failure — exactly the caution the council required.
+// Receipts deduped per (msg,subscriber), duplicates reported. Prospective
+// right-censor within the censor window of arm end.
 //
-//   node harness/reconcile-delivery.mjs [dir] [--selftest]
+//   node harness/reconcile-delivery.mjs [dir] [--selftest] [--censor=MS]
 // =====================================================================
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -53,22 +64,18 @@ const DIR = process.argv[2] && !process.argv[2].startsWith('--') ? process.argv[
 const SELFTEST = process.argv.includes('--selftest');
 const CENSOR_MS = Number((process.argv.find((a) => a.startsWith('--censor=')) || '').split('=')[1] || 5000);
 
-// ---- helpers ---------------------------------------------------------
-const pfx = (h) => (typeof h === 'string' ? h.slice(0, 12) : null);   // canonical 12-hex node key
+const pfx = (h) => (typeof h === 'string' ? h.slice(0, 12) : null);
 const setDiff = (a, b) => [...a].filter((x) => !b.has(x));
 
 // ---- parse -----------------------------------------------------------
-// Returns { ledgers, hopFwd, appRecv, idMap, subRecv, maxT }
 function parse(dir) {
   const files = readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
-  const ledgerRows = [];            // fanout-ledger lat-stage rows
-  const hopTx = new Map();          // hopAttemptId -> {msgIds,to,hopIdx}
-  const hopRx = new Set();          // hopAttemptId that produced an rx
-  const appRecv = [];               // {msgId, key, t}
-  const subRecv = [];               // {msgId, key, t}
-  const idMap = new Map();          // (peerIdx|host) -> node 12-hex prefix (from sidecar disc `self`)
+  const ledgerRows = [], rootMembers = [];
+  const hopTx = new Map();          // hopAttemptId -> {msgIds, from, to}
+  const hopRx = new Set();
+  const appRecv = [], subRecv = [];
+  const idMap = new Map();          // (peerIdx|host) -> node prefix
   let maxT = 0;
-
   for (const f of files) {
     let text; try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
     for (const line of text.split('\n')) {
@@ -76,214 +83,271 @@ function parse(dir) {
       let r; try { r = JSON.parse(line); } catch { continue; }
       if (typeof r.t === 'number' && r.t > maxT) maxT = r.t;
       if (typeof r.wall === 'number' && r.wall > maxT) maxT = r.wall;
-
-      // sidecar disc rows: (peerIdx,host) -> self  (the join from app-receipts to nodeId)
-      if (typeof r.self === 'string' && Number.isInteger(r.peerIdx) && typeof r.host === 'string') {
-        idMap.set(`${r.peerIdx}|${r.host}`, pfx(r.self));
-      }
+      if (typeof r.self === 'string' && Number.isInteger(r.peerIdx) && typeof r.host === 'string') idMap.set(`${r.peerIdx}|${r.host}`, pfx(r.self));
+      if (r.ev === 'root-members' && r.msgId) rootMembers.push(r);
       const stage = r.stage;
-      if (stage === 'fanout-ledger') { ledgerRows.push(r); }
-      else if (stage === 'deliver:hop_tx') { if (r.hopAttemptId != null && !hopTx.has(r.hopAttemptId)) hopTx.set(r.hopAttemptId, { msgIds: r.msgIds || [], to: pfx(r.to), hopIdx: r.hopIdx }); }
+      if (stage === 'fanout-ledger') ledgerRows.push(r);
+      else if (stage === 'deliver:hop_tx') { if (r.hopAttemptId != null && !hopTx.has(r.hopAttemptId)) hopTx.set(r.hopAttemptId, { msgIds: r.msgIds || [], from: pfx(r.from), to: pfx(r.to) }); }
       else if (stage === 'deliver:hop_rx') { if (r.hopAttemptId != null) hopRx.add(r.hopAttemptId); }
-      else if (stage === 'deliver:app') { appRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t }); }
-      else if (stage === 'sub:recv')   { subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t }); }
+      else if (stage === 'deliver:app') appRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
+      else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
     }
   }
-  return { ledgerRows, hopTx, hopRx, appRecv, subRecv, idMap, maxT };
+  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, maxT };
+}
+
+// ---- per-msg tree model + validity ----------------------------------
+// Returns { belief:Set, parentOf:Map(node->parent|null), nodes:Set, void:reason|null }
+function buildTree(rows, rootMembersForMsg) {
+  const belief = new Set();
+  const nodes = new Set();                 // nodes that emitted a ledger row
+  const parentClaims = new Map();          // node -> Set(distinct parent prefixes, null excluded)
+  const rootFlags = new Set();             // nodes with isRoot==1 or parent==null
+  const roleByEdge = new Map();            // `${parent}->${child}` -> Set(childFlagValues) to catch conflicting roles
+  const topics = new Set();
+  let voidReason = null;
+
+  const claim = (node, parent) => {
+    if (!parentClaims.has(node)) parentClaims.set(node, new Set());
+    if (parent) parentClaims.get(node).add(parent);
+  };
+
+  for (const row of rows) {
+    const node = pfx(row.node);
+    nodes.add(node);
+    if (typeof row.topicId === 'string') topics.add(row.topicId);
+    const recips = Array.isArray(row.recips) ? row.recips : [];
+    if (Number.isInteger(row.n) && row.n !== recips.length) voidReason = voidReason || 'TELEMETRY_TRUNCATED';
+    if (row.isRoot === 1 || row.parent == null) rootFlags.add(node);
+    if (row.parent) claim(node, pfx(row.parent));                 // own-row parent claim
+    if (row.localDelivery === 1) belief.add(node);
+    for (const rc of recips) {
+      const sub = pfx(rc.sub);
+      claim(sub, node);                                            // the fanning node is a parent claim for the recip
+      const ek = `${node}->${sub}`;
+      if (!roleByEdge.has(ek)) roleByEdge.set(ek, new Set());
+      roleByEdge.get(ek).add(rc.child === 1 ? 1 : 0);
+      if (rc.child !== 1) belief.add(sub);                         // child==0 terminal leaf edge -> expected app recipient
+    }
+  }
+
+  // conflicting edge roles (same edge marked both forwarding and leaf)
+  for (const [, roles] of roleByEdge) if (roles.size > 1) voidReason = voidReason || 'CONFLICTING_EDGE_ROLE';
+  // conflicting parents (a node claimed by two different parents / reattachment ambiguity)
+  const parentOf = new Map();
+  for (const [node, parents] of parentClaims) {
+    if (parents.size > 1) voidReason = voidReason || 'CONFLICTING_PARENT';
+    parentOf.set(node, parents.size === 1 ? [...parents][0] : null);
+  }
+  // exactly one root
+  const rootsByFlag = [...rootFlags];
+  const rootsByNoParent = [...nodes].filter((n) => !parentOf.get(n));
+  const rootSet = new Set([...rootsByFlag, ...rootsByNoParent]);
+  if (rootSet.size !== 1) voidReason = voidReason || `TREE_NO_UNIQUE_ROOT(${rootSet.size})`;
+  const root = rootSet.size === 1 ? [...rootSet][0] : null;
+  // one topic
+  if (topics.size > 1) voidReason = voidReason || 'CONFLICTING_TOPIC';
+  // acyclic + every ledger NODE reaches the root
+  if (root) {
+    for (const n of nodes) {
+      let cur = n, steps = 0; const seen = new Set();
+      while (cur && cur !== root) {
+        if (seen.has(cur)) { voidReason = voidReason || 'TREE_CYCLE'; break; }
+        seen.add(cur); cur = parentOf.get(cur); if (++steps > nodes.size + 2) { voidReason = voidReason || 'TREE_CYCLE'; break; }
+      }
+      if (cur !== root) voidReason = voidReason || 'TREE_UNREACHABLE_ROOT';
+    }
+  }
+  // root-members overlap cross-check (independent root projection)
+  if (root && rootMembersForMsg && rootMembersForMsg.length) {
+    const rootRow = rows.find((r) => pfx(r.node) === root);
+    const projN = rootRow && Array.isArray(rootRow.recips) ? rootRow.recips.length : null;
+    for (const rm of rootMembersForMsg) if (Number.isInteger(rm.n) && projN != null && rm.n !== projN) voidReason = voidReason || 'ROOTMEMBERS_MISMATCH';
+  }
+  return { belief, parentOf, nodes, root, void: voidReason };
+}
+
+// ordered edges root->subscriber; null if unreconstructable
+function pathEdges(sub, parentOf, root) {
+  if (sub === root) return [];                     // origin's own local delivery — no network edges
+  const up = [];                                   // sub, parent, grandparent, ...
+  let cur = sub, steps = 0; const seen = new Set();
+  while (cur && cur !== root) {
+    if (seen.has(cur)) return null;                // cycle
+    seen.add(cur);
+    const p = parentOf.get(cur);
+    if (!p) return null;                           // broken/unknown parent -> unreconstructable
+    up.push([p, cur]);                             // edge parent->cur
+    cur = p; if (++steps > 4096) return null;
+  }
+  if (cur !== root) return null;
+  return up.reverse();                             // root->...->sub order
 }
 
 // ---- reconcile -------------------------------------------------------
-// Accepts the parsed shapes (or a synthetic fixture in selftest) and produces the
-// per-msg partition + aggregate. idMap maps a receipt key -> node prefix.
-function reconcile({ ledgerRows, hopTx, hopRx, appRecv, subRecv, idMap, maxT }, opts = {}) {
+function reconcile(parsed, opts = {}) {
+  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, idMap, maxT } = parsed;
   const censorMs = opts.censorMs ?? CENSOR_MS;
   const censorCutoff = maxT - censorMs;
 
-  // ---- D_belief per msgId, with a structural validity check --------
-  // beliefByMsg: msgId -> Set(nodePrefix expected to deliver to app)
-  // nodesByMsg:  msgId -> Set(nodePrefix that emitted a ledger row) [tree nodes]
-  // referenced:  msgId -> Set(nodePrefix named as a child edge OR a parent) [must have a row]
-  const beliefByMsg = new Map();
-  const nodesByMsg = new Map();
-  const referenced = new Map();
-  const voidMsgs = new Map();      // msgId -> reason (TELEMETRY_TRUNCATED / INCONSISTENT)
-  const pubTs = new Map();         // msgId -> earliest ledger t (publish-ish anchor)
-
-  const ensure = (m, key) => { if (!m.has(key)) m.set(key, new Set()); return m.get(key); };
-
+  // group ledger rows + root-members by msgId
+  const rowsByMsg = new Map(), rmByMsg = new Map(), pubTs = new Map();
   for (const row of ledgerRows) {
-    const msgId = row.msgId; if (!msgId) continue;
-    const node = pfx(row.node);
-    ensure(nodesByMsg, msgId).add(node);
-    if (typeof row.t === 'number') pubTs.set(msgId, Math.min(pubTs.get(msgId) ?? Infinity, row.t));
-
-    // structural truncation: emitted recips must equal the declared local fanout n
-    const recips = Array.isArray(row.recips) ? row.recips : [];
-    if (Number.isInteger(row.n) && row.n !== recips.length) voidMsgs.set(msgId, 'TELEMETRY_TRUNCATED');
-
-    // dual-role expectation derivation (Aster 722f8464): NEVER leafhood
-    const belief = ensure(beliefByMsg, msgId);
-    if (row.localDelivery === 1) belief.add(node);                 // this node's own app owes delivery
-    const ref = ensure(referenced, msgId);
-    if (row.parent) ref.add(pfx(row.parent));                      // upstream must also have a row (tree completeness)
-    for (const rc of recips) {
-      const sub = pfx(rc.sub);
-      if (rc.child === 1) ref.add(sub);                            // a child-relay edge -> that node must emit its own row
-      else belief.add(sub);                                        // a terminal leaf-subscriber edge -> expected app recipient
-    }
+    if (!row.msgId) continue;
+    if (!rowsByMsg.has(row.msgId)) rowsByMsg.set(row.msgId, []);
+    rowsByMsg.get(row.msgId).push(row);
+    if (typeof row.t === 'number') pubTs.set(row.msgId, Math.min(pubTs.get(row.msgId) ?? Infinity, row.t));
   }
+  for (const rm of rootMembers) { if (!rmByMsg.has(rm.msgId)) rmByMsg.set(rm.msgId, []); rmByMsg.get(rm.msgId).push(rm); }
 
-  // tree completeness: every referenced forwarder/parent must have emitted a ledger row,
-  // else the sub-tree's expectations are unobserved -> the publish is VOID, not a miss.
-  for (const [msgId, ref] of referenced) {
-    const nodes = nodesByMsg.get(msgId) || new Set();
-    for (const n of ref) {
-      // a referenced node with no ledger row AND that is not itself a pure leaf receipt
-      if (!nodes.has(n)) {
-        // it may legitimately be a pure leaf (child edge to a non-forwarding subscriber):
-        // those never emit a row. We cannot distinguish a missing-relay-row from a
-        // leaf-with-no-row structurally, so flag as INCOMPLETE only when that node ALSO
-        // appears as a parent (a parent MUST be a forwarder and MUST have a row).
-      }
-    }
-  }
-  // parent-completeness is the strict check: a named parent that never emitted a row =
-  // a lost sub-tree ledger = VOID publish.
-  for (const row of ledgerRows) {
-    if (!row.parent) continue;
-    const p = pfx(row.parent), msgId = row.msgId;
-    const nodes = nodesByMsg.get(msgId);
-    if (nodes && !nodes.has(p) && !voidMsgs.has(msgId)) voidMsgs.set(msgId, 'INCOMPLETE_TREE(parent-row-missing)');
-  }
+  // proven edges per msgId: `${msgId}|${from}|${to}` for a forwarded-and-arrived hop
+  const provenEdge = new Set();
+  for (const [id, tx] of hopTx) { if (!hopRx.has(id) || !tx.from || !tx.to) continue; for (const m of tx.msgIds) provenEdge.add(`${m}|${tx.from}|${tx.to}`); }
 
-  // ---- R_app per msgId (deduped per (msg,subscriber); duplicates counted) ----
-  const appByMsg = new Map();      // msgId -> Set(nodePrefix)
-  let dupReceipts = 0;
-  const seenReceipt = new Set();   // `${msgId}|${node}`
-  const latencies = [];            // app receipt latency (t - publishTs) for delivered
+  // R_app per msgId (deduped per (msg,sub); duplicates counted)
+  const appByMsg = new Map(); let dupReceipts = 0, unmappedReceipts = 0; const seen = new Set(); const lat = [];
   for (const a of appRecv) {
     const node = idMap.get(a.key);
-    if (!node) continue;           // unmapped receipt key -> cannot join to a nodeId (reported)
+    if (!node) { unmappedReceipts++; continue; }
     const rk = `${a.msgId}|${node}`;
-    if (seenReceipt.has(rk)) { dupReceipts++; continue; }
-    seenReceipt.add(rk);
-    ensure(appByMsg, a.msgId).add(node);
-    const pt = pubTs.get(a.msgId);
-    if (typeof pt === 'number' && typeof a.t === 'number') latencies.push(a.t - pt);
+    if (seen.has(rk)) { dupReceipts++; continue; }
+    seen.add(rk); if (!appByMsg.has(a.msgId)) appByMsg.set(a.msgId, new Set()); appByMsg.get(a.msgId).add(node);
+    const pt = pubTs.get(a.msgId); if (typeof pt === 'number' && typeof a.t === 'number') lat.push(a.t - pt);
   }
 
-  // ---- D_fwd per msgId (forwarded-and-received hop receivers) ----
-  // A hop attempt with a matching rx delivered its DELIVER to `to`. Union the receivers
-  // per msgId carried on the hop. This is the middle layer; it is best-effort node-level
-  // reachability, not a full path attribution, and is labeled as such.
-  const fwdByMsg = new Map();
-  for (const [id, tx] of hopTx) {
-    if (!hopRx.has(id)) continue;                 // only forwarded-and-arrived
-    for (const m of tx.msgIds) if (tx.to) ensure(fwdByMsg, m).add(tx.to);
-  }
+  const agg = { publishes: 0, voided: 0, censored: 0, belief: 0, delivered: 0,
+    forwardingDrop: 0, callbackDrop: 0, unresolved: 0, beliefNotApp: 0, dupReceipts, unmappedReceipts };
+  const voidReasons = {}; const rows = [];
 
-  // ---- partition per msg ----
-  const rows = [];
-  const agg = { publishes: 0, voided: 0, censored: 0,
-    belief: 0, delivered: 0, treeDrop: 0, callbackDrop: 0, beliefNotApp: 0, dupReceipts };
-  for (const [msgId, belief] of beliefByMsg) {
-    if (voidMsgs.has(msgId)) { agg.voided++; continue; }
+  for (const [msgId, mrows] of rowsByMsg) {
     const pt = pubTs.get(msgId);
-    if (typeof pt === 'number' && pt > censorCutoff) { agg.censored++; continue; }   // prospective right-censor
+    if (typeof pt === 'number' && pt > censorCutoff) { agg.censored++; continue; }
+    const tree = buildTree(mrows, rmByMsg.get(msgId));
+    if (tree.void) { agg.voided++; voidReasons[tree.void] = (voidReasons[tree.void] || 0) + 1; continue; }
     agg.publishes++;
     const app = appByMsg.get(msgId) || new Set();
-    const fwd = fwdByMsg.get(msgId) || new Set();
-    // Localize the MISS SET exactly (Orion's triangulation applied to the gaps, not to
-    // delivered nodes): a missed recipient either was never forwarded toward (tree drop)
-    // or was forwarded and the app still never got it (final-hop/callback drop). These
-    // two PARTITION the misses — treeDrop + callbackDrop == beliefNotApp — so the origin
-    // root (delivered locally, no inbound hop) never pollutes the forwarding stratum.
-    const missed = setDiff(belief, app);
-    const treeDrop = missed.filter((n) => !fwd.has(n));     // D_belief\R_app and NOT forwarded
-    const callbackDrop = missed.filter((n) => fwd.has(n));  // D_belief\R_app but WAS forwarded
-    agg.belief += belief.size; agg.delivered += belief.size - missed.length;
-    agg.beliefNotApp += missed.length; agg.treeDrop += treeDrop.length; agg.callbackDrop += callbackDrop.length;
-    rows.push({ msgId, belief: belief.size, delivered: belief.size - missed.length,
-      treeDrop: treeDrop.length, callbackDrop: callbackDrop.length });
+    const missed = setDiff(tree.belief, app);
+    let fwd = 0, cb = 0, unres = 0;
+    for (const s of missed) {
+      const edges = pathEdges(s, tree.parentOf, tree.root);
+      if (edges === null) { unres++; continue; }                 // unreconstructable path
+      // earliest unproven edge is the forwarding boundary
+      let boundary = -1;
+      for (let i = 0; i < edges.length; i++) { const [a, b] = edges[i]; if (!provenEdge.has(`${msgId}|${a}|${b}`)) { boundary = i; break; } }
+      if (boundary === -1) cb++;                                 // every network edge proven, app absent -> final-hop/callback
+      else fwd++;                                                // earliest unproven edge -> forwarding boundary
+    }
+    agg.belief += tree.belief.size; agg.delivered += tree.belief.size - missed.length;
+    agg.beliefNotApp += missed.length; agg.forwardingDrop += fwd; agg.callbackDrop += cb; agg.unresolved += unres;
+    rows.push({ msgId, belief: tree.belief.size, delivered: tree.belief.size - missed.length, forwardingDrop: fwd, callbackDrop: cb, unresolved: unres });
   }
 
-  latencies.sort((a, b) => a - b);
-  const p = (q) => latencies.length ? latencies[Math.min(latencies.length - 1, Math.floor(q / 100 * latencies.length))] : null;
-  return { agg, rows, voidMsgs, latP50: p(50), latP95: p(95), censorMs, censorCutoff,
+  lat.sort((a, b) => a - b);
+  const p = (q) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(q / 100 * lat.length))] : null;
+  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs,
     completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null };
 }
 
-// ---- report ----------------------------------------------------------
-function report(res, extra = {}) {
+function report(res, note) {
   const a = res.agg;
-  console.log('\n===== DELIVERY RECONCILIATION (fanout-ledger 73b705d; rules 722f8464/6c09ee0d/096003d3) =====');
-  if (extra.note) console.log(extra.note);
-  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored: ${a.censored}, dup receipts: ${a.dupReceipts})`);
-  console.log(`expected app-recipient obligations (D_belief): ${a.belief}`);
-  console.log(`delivered to app (R_app ∩ D_belief): ${a.delivered}   completeness=${res.completeness}%`);
-  console.log('loss localization — the miss set partitioned exactly (treeDrop + callbackDrop == post-fanout loss):');
-  console.log(`  tree/forwarding drop (missed AND not forwarded toward): ${a.treeDrop}`);
-  console.log(`  final-hop/callback drop (missed BUT was forwarded):     ${a.callbackDrop}`);
-  console.log(`  D_belief \\ R_app  (aggregate post-fanout loss): ${a.beliefNotApp}`);
-  console.log(`  D_intent \\ D_belief (intent/belief divergence): ${extra.intentNote || 'PARTIAL — harness lifecycle ledger not yet time-indexed; UNVERIFIED, not kernel failure (Aster #1)'}`);
-  console.log(`app-receipt latency (t - publish): p50=${res.latP50}ms p95=${res.latP95}ms   censor window=${res.censorMs}ms`);
-  if (res.voidMsgs.size) {
-    const reasons = {}; for (const [, why] of res.voidMsgs) reasons[why] = (reasons[why] || 0) + 1;
-    console.log(`VOID publishes by reason: ${JSON.stringify(reasons)}  (never scored as loss — Aster #4)`);
-  }
-  console.log('================================================================================================\n');
+  console.log('\n===== DELIVERY RECONCILIATION (path-aware; fanout-ledger 73b705d; rules 722f8464/89ab0777) =====');
+  if (note) console.log(note);
+  console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, censored: ${a.censored})`);
+  console.log(`receipts: dup per (msg,sub)=${a.dupReceipts}, unmapped (no peer→node)=${a.unmappedReceipts}`);
+  console.log(`expected app obligations (D_belief): ${a.belief}   delivered: ${a.delivered}   completeness=${res.completeness}%`);
+  console.log('miss localization — path-aware, partitions the miss set exactly:');
+  console.log(`  FORWARDING_DROP (earliest unproven edge on the root→sub path): ${a.forwardingDrop}`);
+  console.log(`  FINAL_HOP_CALLBACK (every edge proven, app receipt absent):    ${a.callbackDrop}`);
+  console.log(`  UNRESOLVED (path unreconstructable — not forced into a bucket): ${a.unresolved}`);
+  console.log(`  = D_belief \\ R_app total: ${a.beliefNotApp}  (fwd+callback+unresolved must equal this)`);
+  console.log(`  D_intent \\ D_belief: UNOBSERVED_BELIEF pending — time-indexed harness ledger not built (Aster #1)`);
+  if (a.voided) console.log(`VOID publishes by reason (never scored as loss): ${JSON.stringify(res.voidReasons)}`);
+  console.log(`app-receipt latency: p50=${res.latP50}ms p95=${res.latP95}ms   censor window=${res.censorMs}ms`);
+  console.log('=================================================================================================\n');
 }
 
-// ---- selftest: prove the reconciliation math on a synthetic fixture ----
-// (73b705d is not armed yet, so no live fanout-ledger rows exist. This fixture
-//  exercises every partition + the dual-role and validity rules deterministically.)
+// ---- selftest --------------------------------------------------------
 function selftest() {
-  // Topology for msg M1: root R (also a subscriber -> localDelivery) fans to leaf L1,
-  // leaf L2, and child-relay CR. CR fans to leaf L3 and to itself as a subscriber.
-  // Receipts: R, L1, L3 deliver to app. L2 (leaf) MISSES. CR (dual-role) MISSES its
-  // own app delivery. Hop data: L2 was NOT forwarded to; CR WAS forwarded to.
-  const rootHex = 'aa'.repeat(6), l1 = 'b1'.repeat(6), l2 = 'b2'.repeat(6), cr = 'cc'.repeat(6), l3 = 'b3'.repeat(6);
-  const ledgerRows = [
-    { stage: 'fanout-ledger', msgId: 'M1', node: rootHex, localDelivery: 1, parent: null, n: 3, t: 1000,
-      recips: [{ sub: l1, child: 0 }, { sub: l2, child: 0 }, { sub: cr, child: 1 }] },
-    { stage: 'fanout-ledger', msgId: 'M1', node: cr, localDelivery: 1, parent: rootHex, n: 1, t: 1001,
-      recips: [{ sub: l3, child: 0 }] },
-  ];
-  // idMap maps receipt keys to node prefixes; receipts for R, L1, L3 only (L2, CR miss).
-  const idMap = new Map([['0|h', pfx(rootHex)], ['1|h', pfx(l1)], ['2|h', pfx(l2)], ['3|h', pfx(cr)], ['4|h', pfx(l3)]]);
-  const appRecv = [
-    { msgId: 'M1', key: '0|h', t: 1010 }, { msgId: 'M1', key: '1|h', t: 1012 },
-    { msgId: 'M1', key: '4|h', t: 1020 }, { msgId: 'M1', key: '1|h', t: 1013 },  // <- duplicate for L1
-  ];
-  // hop: forwarded-and-arrived to CR (so CR is in D_fwd) but NOT to L2.
-  const hopTx = new Map([['h1', { msgIds: ['M1'], to: pfx(cr), hopIdx: 1 }], ['h2', { msgIds: ['M1'], to: pfx(l1), hopIdx: 1 }], ['h3', { msgIds: ['M1'], to: pfx(l3), hopIdx: 2 }]]);
-  const hopRx = new Set(['h1', 'h2', 'h3']);
-  const res = reconcile({ ledgerRows, hopTx, hopRx, appRecv, subRecv: [], idMap, maxT: 100000 }, { censorMs: 0 });
+  const R = 'aa'.repeat(6), A = 'a1'.repeat(6), B = 'b2'.repeat(6), C = 'c3'.repeat(6), D = 'd4'.repeat(6);
+  const L = (o) => ({ stage: 'fanout-ledger', t: 1000, ...o });
+  const idMap = new Map([['0|h', pfx(R)], ['1|h', pfx(A)], ['2|h', pfx(B)], ['3|h', pfx(C)], ['4|h', pfx(D)]]);
+  const mkHop = (id, from, to, msg) => [id, { msgIds: [msg], from: pfx(from), to: pfx(to) }];
+  const results = [];
 
-  // Expected D_belief = {R(localDelivery), L1, L2, CR(localDelivery)} ∪ {L3(leaf)} = 5 nodes.
-  //   NOTE the dual-role win: CR is a child edge (child=1) AND localDelivery=1 -> counted once.
-  // Delivered = R, L1, L3 = 3.  beliefNotApp = L2, CR = 2.
-  //   L2 not forwarded -> beliefNotFwd includes L2. CR forwarded but no app -> fwdNotApp includes CR.
-  // duplicate L1 receipt -> dupReceipts = 1.
-  const a = res.agg;
+  // Base fixture M1: root(dual-role R) -> leaf A, leaf B, child-relay C; C -> leaf D.
+  // A,D,R deliver; B & C miss. Edge R->B NOT proven (forwarding); C is proven-reached
+  // (R->C proven) but C's app absent -> callback.
+  const base = {
+    ledgerRows: [
+      L({ msgId: 'M1', node: R, isRoot: 1, localDelivery: 1, parent: null, n: 3, recips: [{ sub: A, child: 0 }, { sub: B, child: 0 }, { sub: C, child: 1 }] }),
+      L({ msgId: 'M1', node: C, localDelivery: 1, parent: R, n: 1, recips: [{ sub: D, child: 0 }] }),
+    ],
+    rootMembers: [], hopTx: new Map([mkHop('h1', R, A, 'M1'), mkHop('h3', R, C, 'M1'), mkHop('h4', C, D, 'M1')]),
+    hopRx: new Set(['h1', 'h3', 'h4']),
+    appRecv: [{ msgId: 'M1', key: '0|h', t: 1010 }, { msgId: 'M1', key: '1|h', t: 1012 }, { msgId: 'M1', key: '4|h', t: 1020 }, { msgId: 'M1', key: '1|h', t: 1013 }],
+    idMap, maxT: 1e6,
+  };
+  const r1 = reconcile(base, { censorMs: 0 }); results.push(r1);
+  const a1 = r1.agg;
+
+  // (a) three-hop path failing at hop 2: R->X->Y->Z (Z the leaf sub); R->X proven,
+  //     X->Y NOT proven -> forwarding boundary at depth 1 (intermediate), NOT callback.
+  const X = 'e5'.repeat(6), Y = 'f6'.repeat(6), Z = '17'.repeat(6);
+  const three = { ledgerRows: [
+      L({ msgId: 'M3', node: R, isRoot: 1, parent: null, n: 1, recips: [{ sub: X, child: 1 }] }),
+      L({ msgId: 'M3', node: X, parent: R, n: 1, recips: [{ sub: Y, child: 1 }] }),
+      L({ msgId: 'M3', node: Y, parent: X, n: 1, recips: [{ sub: Z, child: 0 }] }),
+    ], rootMembers: [], hopTx: new Map([mkHop('t1', R, X, 'M3')]), hopRx: new Set(['t1']), appRecv: [], idMap, maxT: 1e6 };
+  const r3 = reconcile(three, { censorMs: 0 });
+
+  // (b) dual-path/reattachment ambiguity: Z claimed by two parents -> CONFLICTING_PARENT -> VOID
+  const dual = { ledgerRows: [
+      L({ msgId: 'M4', node: R, isRoot: 1, parent: null, n: 2, recips: [{ sub: X, child: 1 }, { sub: Y, child: 1 }] }),
+      L({ msgId: 'M4', node: X, parent: R, n: 1, recips: [{ sub: Z, child: 0 }] }),
+      L({ msgId: 'M4', node: Y, parent: R, n: 1, recips: [{ sub: Z, child: 0 }] }),
+    ], rootMembers: [], hopTx: new Map(), hopRx: new Set(), appRecv: [], idMap, maxT: 1e6 };
+  const r4 = reconcile(dual, { censorMs: 0 });
+
+  // (c) wholly omitted subtree: root names child-relay C but C never emitted a row.
+  //     C is referenced as a child (child=1) with no row -> C unreachable? C's parent
+  //     is R (claimed), C reaches root, but C emitted no row so its subtree is invisible.
+  //     Detected via root-members overlap: root-members says n=2, root row recips=1 -> MISMATCH VOID.
+  const omit = { ledgerRows: [
+      L({ msgId: 'M5', node: R, isRoot: 1, parent: null, n: 1, recips: [{ sub: C, child: 1 }] }),
+    ], rootMembers: [{ ev: 'root-members', msgId: 'M5', n: 2 }], hopTx: new Map(), hopRx: new Set(), appRecv: [], idMap, maxT: 1e6 };
+  const r5 = reconcile(omit, { censorMs: 0 });
+
+  // (d) conflicting parent ROWS: node X emits parent=R in one row and parent=Y in another.
+  const conf = { ledgerRows: [
+      L({ msgId: 'M6', node: R, isRoot: 1, parent: null, n: 1, recips: [{ sub: X, child: 1 }] }),
+      L({ msgId: 'M6', node: X, parent: R, n: 0, recips: [] }),
+      L({ msgId: 'M6', node: X, parent: Y, n: 0, recips: [] }),
+    ], rootMembers: [], hopTx: new Map(), hopRx: new Set(), appRecv: [], idMap, maxT: 1e6 };
+  const r6 = reconcile(conf, { censorMs: 0 });
+
+  // (e) fully proven path, missing deliver:app -> FINAL_HOP_CALLBACK.
+  const full = { ledgerRows: [
+      L({ msgId: 'M7', node: R, isRoot: 1, parent: null, n: 1, recips: [{ sub: A, child: 0 }] }),
+    ], rootMembers: [], hopTx: new Map([mkHop('f1', R, A, 'M7')]), hopRx: new Set(['f1']), appRecv: [], idMap, maxT: 1e6 };
+  const r7 = reconcile(full, { censorMs: 0 });
+
   const checks = [
-    ['D_belief == 5 (dual-role CR counted once, no leafhood drop)', a.belief === 5],
-    ['delivered == 3', a.delivered === 3],
-    ['beliefNotApp == 2 (L2, CR)', a.beliefNotApp === 2],
-    ['treeDrop == 1 (L2 missed & not forwarded)', a.treeDrop === 1],
-    ['callbackDrop == 1 (CR missed but was forwarded)', a.callbackDrop === 1],
-    ['partition exact: treeDrop + callbackDrop == beliefNotApp', a.treeDrop + a.callbackDrop === a.beliefNotApp],
-    ['dupReceipts == 1 (L1 twice)', a.dupReceipts === 1],
-    ['completeness == 60%', res.completeness === 60],
+    ['M1 D_belief==5 (dual-role C once, no leafhood drop)', a1.belief === 5],
+    ['M1 delivered==3', a1.delivered === 3],
+    ['M1 partition exact: fwd+cb+unresolved==beliefNotApp', a1.forwardingDrop + a1.callbackDrop + a1.unresolved === a1.beliefNotApp],
+    ['M1 forwardingDrop==1 (B not forwarded)', a1.forwardingDrop === 1],
+    ['M1 callbackDrop==1 (C reached, app absent)', a1.callbackDrop === 1],
+    ['M1 dupReceipts==1', a1.dupReceipts === 1],
+    ['(a) 3-hop fail@hop2 -> forwardingDrop==1 (intermediate boundary), callback==0', r3.agg.forwardingDrop === 1 && r3.agg.callbackDrop === 0],
+    ['(b) dual-parent ambiguity -> VOID (0 scored)', r4.agg.voided === 1 && r4.agg.publishes === 0],
+    ['(c) omitted subtree -> VOID via root-members mismatch', r5.agg.voided === 1 && !!r5.voidReasons.ROOTMEMBERS_MISMATCH],
+    ['(d) conflicting parent rows -> VOID', r6.agg.voided === 1 && !!r6.voidReasons.CONFLICTING_PARENT],
+    ['(e) fully proven path, no app -> callbackDrop==1', r7.agg.callbackDrop === 1 && r7.agg.forwardingDrop === 0],
   ];
-  // validity: a truncated ledger row (n != recips.length) must VOID that publish.
-  const truncRes = reconcile({ ledgerRows: [{ stage: 'fanout-ledger', msgId: 'M2', node: rootHex, localDelivery: 0, n: 5, t: 1000, recips: [{ sub: l1, child: 0 }] }], hopTx: new Map(), hopRx: new Set(), appRecv: [], subRecv: [], idMap, maxT: 100000 }, { censorMs: 0 });
-  checks.push(['truncated ledger (n!=recips) -> VOID, not scored', truncRes.agg.voided === 1 && truncRes.agg.publishes === 0]);
-
   let ok = true;
-  console.log('\n----- SELFTEST (reconciliation math on synthetic fixture) -----');
+  console.log('\n----- SELFTEST (path-aware reconciliation on synthetic fixtures) -----');
   for (const [label, pass] of checks) { console.log(`  ${pass ? '✓' : '✗ FAIL'}  ${label}`); if (!pass) ok = false; }
-  report(res, { note: 'fixture: root(dual-role)+L1+L2+child-relay(dual-role)+L3; L2 & CR miss', intentNote: 'n/a (fixture)' });
+  report(r1, 'M1 base fixture: root(dual)+A+B+child-relay C+D; B not forwarded, C reached-no-app');
   console.log(ok ? 'SELFTEST PASS' : 'SELFTEST FAIL');
   return ok;
 }
@@ -295,8 +359,8 @@ if (SELFTEST) {
   const parsed = parse(DIR);
   if (!parsed.ledgerRows.length) {
     console.log(`\nNo fanout-ledger rows in ${DIR}. This analyzer scores a LAT_TRACE=1 arm on kernel >= 73b705d.`);
-    console.log(`Parsed from existing signals: idMap=${parsed.idMap.size} (peerIdx,host)->node, deliver:app=${parsed.appRecv.length}, sub:recv=${parsed.subRecv.length}, hop_tx=${parsed.hopTx.size}, hop_rx=${parsed.hopRx.size}.`);
-    console.log(`Run with --selftest to verify the reconciliation math on a synthetic fixture.\n`);
+    console.log(`Parsed from existing signals: idMap=${parsed.idMap.size} (peerIdx,host)->node, deliver:app=${parsed.appRecv.length}, hop_tx=${parsed.hopTx.size}, hop_rx=${parsed.hopRx.size}, root-members=${parsed.rootMembers.length}.`);
+    console.log(`Run with --selftest to verify the path-aware reconciliation on synthetic fixtures.\n`);
     process.exit(0);
   }
   report(reconcile(parsed));
