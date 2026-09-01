@@ -20,22 +20,20 @@
 // deduped by nodeId — NEVER graph leafhood. A node that is both a forwarder and a
 // subscriber is counted via its own localDelivery==1.
 //
-// PATH-AWARE ATTRIBUTION (Aster 89ab0777 — the item-4 correction). A binary
-// "forwarded?" flag is WRONG: a multi-hop path can be proven across edge 1 and
-// fail at edge 2, which a binary flag would miscall a callback drop. So for each
-// MISSED subscriber:
-//   - reconstruct the ordered root->...->subscriber path from ledger parent/child
-//     edges;
-//   - join hopAttempt evidence to EACH edge (an edge A->B is proven iff a
-//     deliver:hop_tx from A to B carrying this msgId has a matching rx);
-//   - the EARLIEST edge lacking success evidence is the forwarding boundary
-//     (FORWARDING_DROP@depth);
-//   - classify FINAL_HOP_CALLBACK only when EVERY network edge is proven and the
-//     app receipt is absent;
-//   - if the path can't be ordered (missing/conflicting parent, unreachable root)
-//     -> UNRESOLVED, never a forced bucket.
-// A proven hop advances the proven-path boundary; it does not make the whole path
-// "forwarded" (send-resolved-on-reply is positive per-edge evidence only).
+// NODE-ARRIVAL localization + MUTUALLY-EXCLUSIVE partition (Aster c755397a, c6202ccb —
+// superseding the earlier per-edge attribution). A sub:recv/deliver:app proves a
+// message reached a NODE, not which edge carried it, so it cannot separate forwarding
+// loss from tree divergence — that needs the two Phase-B stamps (an edge-join receipt
+// carrying the upstream sender, and publish-time root identity). Every REQUIRED reader
+// falls in EXACTLY ONE bucket, and A+B+C+D+E == |D_required| (closure is asserted):
+//   E = req ∩ R_app                                delivered
+//   A = miss ∖ active                              activation/continuity failure
+//   B = (miss ∩ active) ∖ belief                   active-intent / kernel-belief divergence
+//   C = (miss ∩ active ∩ belief) ∖ R_node          NODE NON-ARRIVAL (the only "never reached")
+//   D = (miss ∩ active ∩ belief ∩ R_node) ∖ R_app  arrived-at-node, app absent
+// A/B are structural/control-plane and are NOT folded into C. C is trustworthy only
+// if R_node collection is complete for every required active/believed reader — NOT
+// true on a coverage-VOID arm, so C is provisional there.
 //
 // TREE-COMPLETENESS GATE (Aster 89ab0777). Structural recips==n and
 // parent-row-present are necessary but NOT sufficient — a wholly omitted subtree
@@ -380,7 +378,7 @@ function reconcile(parsed, opts = {}) {
 
   const agg = { publishes: 0, voided: 0, rootDivergence: 0, censored: 0, boundaryAmbiguous: 0, provenanceVoid: 0, belief: 0, delivered: 0,
     arrivedNoApp: 0, neverArrived: 0, beliefNotApp: 0,
-    required: 0, reqDelivered: 0, activationFailure: 0, beliefDivergence: 0, reqArrivedNoApp: 0, reqNeverArrived: 0, dupReceipts, unmappedReceipts };
+    required: 0, bE_delivered: 0, bA_activation: 0, bB_beliefDiv: 0, bC_nodeNonArrival: 0, bD_arrivedNoApp: 0, dupReceipts, unmappedReceipts };
   const voidReasons = {}; const rows = [];
 
   for (const [msgId, mrows] of rowsByMsg) {
@@ -415,15 +413,25 @@ function reconcile(parsed, opts = {}) {
       if (boundary || timingVoid) { agg.boundaryAmbiguous++; continue; }   // right-censor boundary-ambiguous / timing-void
       agg.publishes++;
       agg.required += required.size;
+      // MUTUALLY-EXCLUSIVE partition of D_required (Aster c6202ccb): every required
+      // reader falls in EXACTLY ONE bucket, and A+B+C+D+E == |D_required|. The earlier
+      // report double-counted (belief-divergent readers also entered the arrival split),
+      // so 9+5+202 != 211. Strict cascade, delivered (E) removed first:
+      //   E = req ∩ R_app             delivered
+      //   A = miss ∖ active           activation/continuity failure
+      //   B = miss ∩ active ∖ belief  active-intent / kernel-belief divergence
+      //   C = miss ∩ active ∩ belief ∖ R_node   NODE NON-ARRIVAL (only this is "never reached")
+      //   D = miss ∩ active ∩ belief ∩ R_node ∖ R_app   arrived-at-node, app absent
+      // C is trustworthy ONLY if R_node collection is complete for every required
+      // active/believed reader — NOT true on a coverage-VOID arm, so C is itself
+      // provisional here.
       for (const { st } of states) {
-        if (!st.active) { agg.activationFailure++; continue; }    // D_required \ D_active
-        if (st.node && !tree.belief.has(st.node)) agg.beliefDivergence++;   // D_active \ D_belief
-        if (st.node && app.has(st.node)) { agg.reqDelivered++; continue; }  // required AND delivered (service completeness)
-        // CLEAN localization over the app-subscriber set (D_required), not D_belief
-        // (which is contaminated by relays that receive but have no app). A required
-        // reader that missed: node received (sub:recv) -> app/callback gap; else never
-        // arrived -> forwarding-or-tree (not separable without an edge-join receipt).
-        if (st.node) { if (recvd.has(st.node)) agg.reqArrivedNoApp++; else agg.reqNeverArrived++; }
+        const node = st.node;
+        if (node && app.has(node)) { agg.bE_delivered++; continue; }        // E delivered
+        if (!st.active || !node) { agg.bA_activation++; continue; }         // A (incl. unresolved identity)
+        if (!tree.belief.has(node)) { agg.bB_beliefDiv++; continue; }       // B belief divergence
+        if (!recvd.has(node)) { agg.bC_nodeNonArrival++; continue; }        // C never reached the node
+        agg.bD_arrivedNoApp++;                                              // D arrived, app absent
       }
     } else {
       agg.publishes++;
@@ -447,7 +455,8 @@ function reconcile(parsed, opts = {}) {
   return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, band, hasSets: !!sets,
     clockValidated, timingVoid, clockNote, clockHosts: (clk && clk.hosts) || null,
     completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null,
-    serviceCompleteness: agg.required ? +(100 * agg.reqDelivered / agg.required).toFixed(2) : null };
+    serviceCompleteness: agg.required ? +(100 * agg.bE_delivered / agg.required).toFixed(2) : null,
+    partitionCloses: (agg.bA_activation + agg.bB_beliefDiv + agg.bC_nodeNonArrival + agg.bD_arrivedNoApp + agg.bE_delivered) === agg.required };
 }
 
 function report(res, note) {
@@ -459,14 +468,13 @@ function report(res, note) {
   console.log(`publishes scored: ${a.publishes}  (VOID: ${a.voided}, ROOT_DIVERGENCE flagged: ${a.rootDivergence}, censored@end: ${a.censored}, boundary/timing censored: ${a.boundaryAmbiguous}, provenance-void: ${a.provenanceVoid})`);
   console.log(`receipts: dup per (msg,sub)=${a.dupReceipts}, unmapped (no peer→node)=${a.unmappedReceipts}`);
   if (res.hasSets) {
-    console.log('THREE SETS (Aster 54d03977) — service completeness uses D_required as denominator:');
-    console.log(`  D_required obligations: ${a.required}   delivered: ${a.reqDelivered}   SERVICE COMPLETENESS=${res.serviceCompleteness}%`);
-    console.log(`  D_required \\ D_active  (subscription activation/continuity failure): ${a.activationFailure}`);
-    console.log(`  D_active   \\ D_belief  (active-intent / kernel-belief divergence):    ${a.beliefDivergence}`);
-    console.log(`  (both divergences reported, NEVER counted as transport loss)`);
-    console.log('  CLEAN miss localization over D_required (app-subscribers, not relay-contaminated D_belief):');
-    console.log(`    req ARRIVED_NO_APP (reader's node received, app absent): ${a.reqArrivedNoApp}`);
-    console.log(`    req NEVER_ARRIVED  (no receipt — forwarding-or-tree): ${a.reqNeverArrived}`);
+    console.log(`D_required MUTUALLY-EXCLUSIVE PARTITION (Aster c6202ccb) — closes: ${res.partitionCloses ? 'YES' : 'NO ✗'}  (A+B+C+D+E must == |D_required|=${a.required}):`);
+    console.log(`  E delivered (req ∩ R_app):                                  ${a.bE_delivered}   SERVICE COMPLETENESS=${res.serviceCompleteness}%`);
+    console.log(`  A activation/continuity failure (miss ∖ active):            ${a.bA_activation}`);
+    console.log(`  B belief divergence (miss ∩ active ∖ belief):               ${a.bB_beliefDiv}`);
+    console.log(`  C NODE NON-ARRIVAL (miss ∩ active ∩ belief ∖ R_node):       ${a.bC_nodeNonArrival}   ← only this is "never reached the node" (provisional unless R_node coverage complete)`);
+    console.log(`  D arrived-at-node, app absent (… ∩ R_node ∖ R_app):         ${a.bD_arrivedNoApp}`);
+    console.log(`  A/B are structural/control-plane, NOT folded into C; C vs forwarding-vs-tree needs the edge-join + root-identity stamps.`);
   } else {
     console.log(`D_required/D_active pending — no lifecycle ledger in this data (Aster 54d03977)`);
   }
@@ -623,13 +631,13 @@ function selftest() {
     ['(c) omitted subtree -> VOID via root-members mismatch', r5.agg.voided === 1 && !!r5.voidReasons.ROOTMEMBERS_MISMATCH],
     ['(d) conflicting parent rows -> VOID', r6.agg.voided === 1 && !!r6.voidReasons.CONFLICTING_PARENT],
     ['(e) node received, no app -> arrivedNoApp==1, neverArrived==0', r7.agg.arrivedNoApp === 1 && r7.agg.neverArrived === 0],
-    ['(f) required+active, node unlisted -> D_active\\D_belief divergence==1', r8.hasSets && r8.agg.beliefDivergence === 1 && r8.agg.activationFailure === 0],
-    ['(g) required, sub never resolves -> activationFailure==1', r9.hasSets && r9.agg.activationFailure === 1 && r9.agg.required === 1],
-    ['(h) disconnect, reconnect after publish -> inactive (activationFailure==1)', r10.agg.activationFailure === 1],
-    ['(i) identity replaced, no reactivation -> interval clamped, activationFailure==1', r11.agg.activationFailure === 1],
-    ['(j) repeated idempotent activation -> ONE interval, reqDelivered==1, no failure', r12.agg.required === 1 && r12.agg.reqDelivered === 1 && r12.agg.activationFailure === 0],
+    ['(f) required+active, node unlisted -> D_active\\D_belief divergence==1', r8.hasSets && r8.agg.bB_beliefDiv === 1 && r8.agg.bA_activation === 0],
+    ['(g) required, sub never resolves -> activationFailure==1', r9.hasSets && r9.agg.bA_activation === 1 && r9.agg.required === 1],
+    ['(h) disconnect, reconnect after publish -> inactive (activationFailure==1)', r10.agg.bA_activation === 1],
+    ['(i) identity replaced, no reactivation -> interval clamped, activationFailure==1', r11.agg.bA_activation === 1],
+    ['(j) repeated idempotent activation -> ONE interval, reqDelivered==1, no failure', r12.agg.required === 1 && r12.agg.bE_delivered === 1 && r12.agg.bA_activation === 0],
     ['(k) publish in clock band -> boundary-ambiguous censored (0 scored)', r13.agg.boundaryAmbiguous === 1 && r13.agg.publishes === 0],
-    ['(l) large-but-precise offset -> classified, NOT censored (reqDelivered==1)', r14.clockValidated && r14.agg.reqDelivered === 1 && r14.agg.publishes === 1],
+    ['(l) large-but-precise offset -> classified, NOT censored (reqDelivered==1)', r14.clockValidated && r14.agg.bE_delivered === 1 && r14.agg.publishes === 1],
     ['(m) small offset + high uncertainty -> wide band censors (0 scored)', r15.agg.boundaryAmbiguous === 1 && r15.agg.publishes === 0],
     ['(n) missing host provenance -> provenanceVoid==1 (0 scored)', r16.agg.provenanceVoid === 1 && r16.agg.publishes === 0],
     ['(o) drift beyond bound -> timing VOID, clockValidated=false, 0 scored', r17.timingVoid === true && r17.clockValidated === false && r17.agg.publishes === 0],
