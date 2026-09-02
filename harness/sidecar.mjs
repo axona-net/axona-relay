@@ -79,7 +79,12 @@ if (env('LAT_TRACE') === '1') {
   const LSF = `${LEDGER_DIR}/latstage-${SEED}-${PEER_IDX}.jsonl`;
   const onStage = (msg, ctx) => {
     if (msg !== 'pubsub:lat-stage' || !ctx) return;
-    try { appendFileSync(LSF, JSON.stringify({ msgId: ctx.msgId, stage: ctx.stage, t: ctx.t, mono: ctx.mono, peerIdx: PEER_IDX, host: HOST }) + '\n'); } catch { /* */ }
+    // Preserve EVERY field the kernel stamps (from/to/proc on the edge-join sub:recv,
+    // root/epoch on root:origin, recips on a sidecar-fanned ledger row) — the old hook
+    // hand-picked msgId/stage/t/mono and silently dropped the edge-join fields, so the
+    // required-reader receipts carried no upstream sender and the C-split could not run
+    // (relays kept them, sidecars did not). Spread ctx like the disc hook does.
+    try { appendFileSync(LSF, JSON.stringify({ ...ctx, peerIdx: PEER_IDX, host: HOST }) + '\n'); } catch { /* */ }
   };
   try { peer.onLog('info', onStage); } catch { /* older kernel */ }
   // disc events (became-root / sub-root / pub-root / root-members / term-verify /

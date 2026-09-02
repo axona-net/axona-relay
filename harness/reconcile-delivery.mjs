@@ -122,7 +122,7 @@ function parse(dir) {
   const ledgerRows = [], rootMembers = [];
   const hopTx = new Map();          // hopAttemptId -> {msgIds, from, to}
   const hopRx = new Set();
-  const appRecv = [], subRecv = [];
+  const appRecv = [], subRecv = [], rootOrigin = [];
   const idMap = new Map();          // (peerIdx|host) -> node prefix (last-wins; legacy)
   const selfTL = [];                // TIME-INDEXED {peerIdx, host, self, wall} — reconnect continuity
   const lifecycle = [];             // sidecar Ledger events: sub-activate / sub-end / topicmap / measure-start / end
@@ -153,10 +153,15 @@ function parse(dir) {
       else if (stage === 'deliver:hop_tx') { if (r.hopAttemptId != null && !hopTx.has(r.hopAttemptId)) hopTx.set(r.hopAttemptId, { msgIds: r.msgIds || [], from: pfx(r.from), to: pfx(r.to), srcHost }); }
       else if (stage === 'deliver:hop_rx') { if (r.hopAttemptId != null) hopRx.add(r.hopAttemptId); }
       else if (stage === 'deliver:app') appRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, t: r.t });
-      else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, self: pfx(r.self), t: r.t });
+      // EDGE-JOIN: keep `from` (upstream sender) + `to` (this receiver) so the C-split
+      // can attribute the delivering edge. Sidecars historically dropped these in the
+      // log hook (fixed 2026-09-01); relays always carried them.
+      else if (stage === 'sub:recv') subRecv.push({ msgId: r.msgId, key: `${r.peerIdx}|${r.host}`, self: pfx(r.self), from: r.from ? pfx(r.from) : null, to: r.to ? pfx(r.to) : null, t: r.t });
+      // ROOT IDENTITY: the node that ingested this publish as root (msgId = publish-instance).
+      else if (stage === 'root:origin') rootOrigin.push({ msgId: r.msgId, root: r.root ? pfx(r.root) : (r.self ? pfx(r.self) : null) });
     }
   }
-  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, idMap, selfTL, lifecycle, maxT, clock: loadClock(dir, process.env.SEED || '0') };
+  return { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv, rootOrigin, idMap, selfTL, lifecycle, maxT, clock: loadClock(dir, process.env.SEED || '0') };
 }
 
 // ---- three-set model from the harness lifecycle ledger (Aster 54d03977) ------
@@ -305,7 +310,7 @@ function buildTree(rows, rootMembersForMsg) {
     const projN = rootRow && Array.isArray(rootRow.recips) ? rootRow.recips.length : null;
     for (const rm of rootMembersForMsg) if (Number.isInteger(rm.n) && projN != null && rm.n !== projN) voidReason = voidReason || 'ROOTMEMBERS_MISMATCH';
   }
-  return { belief, parentOf, nodes, root, void: voidReason };
+  return { belief, parentOf, nodes, root, divergence, void: voidReason };
 }
 
 // ordered edges root->subscriber; null if unreconstructable
@@ -327,7 +332,7 @@ function pathEdges(sub, parentOf, root) {
 
 // ---- reconcile -------------------------------------------------------
 function reconcile(parsed, opts = {}) {
-  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv = [], idMap, selfTL = [], lifecycle = [], maxT, clock = null } = parsed;
+  const { ledgerRows, rootMembers, hopTx, hopRx, appRecv, subRecv = [], rootOrigin = [], idMap, selfTL = [], lifecycle = [], maxT, clock = null } = parsed;
   const censorMs = opts.censorMs ?? CENSOR_MS;
   const censorCutoff = maxT - censorMs;
   const FROZEN_DRIFT_BOUND = opts.driftBound ?? 500;    // pre-declared: drift beyond this VOIDs timing
@@ -372,8 +377,28 @@ function reconcile(parsed, opts = {}) {
   // relay row, else the (peerIdx,host)->node map for a sidecar row.
   const receivedByMsg = new Map();   // msgId -> Set(node that received it)
   const addRecv = (msgId, node) => { if (!msgId || !node) return; if (!receivedByMsg.has(msgId)) receivedByMsg.set(msgId, new Set()); receivedByMsg.get(msgId).add(node); };
-  for (const s of subRecv) addRecv(s.msgId, s.self || idMap.get(s.key));
+  for (const s of subRecv) addRecv(s.msgId, s.self || s.to || idMap.get(s.key));
   for (const a of appRecv) addRecv(a.msgId, idMap.get(a.key));
+
+  // ROOT IDENTITY per msg (root:origin, Aster c755397a): the set of nodes that each
+  // ingested THIS publish as root. >1 distinct origin root = genuine root-set divergence
+  // (same nonce, so definitionally the same publish independently rooted twice).
+  const originRootsByMsg = new Map();
+  for (const ro of rootOrigin) { if (!ro.msgId || !ro.root) continue; if (!originRootsByMsg.has(ro.msgId)) originRootsByMsg.set(ro.msgId, new Set()); originRootsByMsg.get(ro.msgId).add(ro.root); }
+  // topicId -> kind ('open'|'owned') from the frozen plan, so service completeness is
+  // reported per topic class — an OPEN topic carries shared network traffic (large,
+  // other-publisher denominator); an OWNED topic is sidecar-only (a controlled denominator).
+  const name2topicR = new Map(), name2kind = new Map();
+  for (const e of lifecycle) {
+    if (e.kind === 'topicmap' && e.detail?.topicId && e.detail?.name) name2topicR.set(e.detail.name, pfx(e.detail.topicId));
+    if (e.kind === 'sub-required' && e.detail?.topic && e.detail?.kind) name2kind.set(e.detail.topic, e.detail.kind);
+  }
+  const topicKind = new Map();
+  for (const [name, tp] of name2topicR) { const k = name2kind.get(name); if (k) topicKind.set(tp, k); }
+  // relay-receipt coverage signal: the fwd-vs-tree attribution inside C is only as good
+  // as how many tree-INTERNAL nodes emit a receipt. Distinct nodes that ever stamped a
+  // receipt, for a rough coverage read reported alongside the split.
+  const recvNodeSet = new Set(); for (const st of receivedByMsg.values()) for (const n of st) recvNodeSet.add(n);
 
   // R_app per msgId (deduped per (msg,sub); duplicates counted)
   const appByMsg = new Map(); let dupReceipts = 0, unmappedReceipts = 0; const seen = new Set(); const lat = [];
@@ -388,7 +413,15 @@ function reconcile(parsed, opts = {}) {
 
   const agg = { publishes: 0, voided: 0, rootDivergence: 0, censored: 0, boundaryAmbiguous: 0, provenanceVoid: 0, belief: 0, delivered: 0,
     arrivedNoApp: 0, neverArrived: 0, beliefNotApp: 0,
-    required: 0, bE_delivered: 0, bA_activation: 0, bB_beliefDiv: 0, bC_nodeNonArrival: 0, bD_arrivedNoApp: 0, dupReceipts, unmappedReceipts };
+    required: 0, bE_delivered: 0, bA_activation: 0, bB_beliefDiv: 0, bC_nodeNonArrival: 0, bD_arrivedNoApp: 0,
+    // C-SPLIT (edge attribution): node non-arrival separated into forwarding-transport
+    // loss (a healthy parent's edge dropped) vs tree divergence (unreconstructable
+    // attachment) vs root divergence (>1 origin root). fwd-vs-tree is provisional on
+    // relay-receipt coverage.
+    bC_fwdLoss: 0, bC_treeDiv: 0, bC_rootDiv: 0,
+    dupReceipts, unmappedReceipts };
+  const mkKind = () => ({ req: 0, E: 0, A: 0, B: 0, C: 0, D: 0 });
+  const byKind = { open: mkKind(), owned: mkKind() };
   const voidReasons = {}; const rows = [];
 
   for (const [msgId, mrows] of rowsByMsg) {
@@ -423,6 +456,9 @@ function reconcile(parsed, opts = {}) {
       if (boundary || timingVoid) { agg.boundaryAmbiguous++; continue; }   // right-censor boundary-ambiguous / timing-void
       agg.publishes++;
       agg.required += required.size;
+      const kagg = byKind[topicKind.get(topicId)] || null;   // owned/open service-completeness breakout
+      if (kagg) kagg.req += required.size;
+      const oroots = originRootsByMsg.get(msgId) || new Set();
       // MUTUALLY-EXCLUSIVE partition of D_required (Aster c6202ccb): every required
       // reader falls in EXACTLY ONE bucket, and A+B+C+D+E == |D_required|. The earlier
       // report double-counted (belief-divergent readers also entered the arrival split),
@@ -437,11 +473,25 @@ function reconcile(parsed, opts = {}) {
       // provisional here.
       for (const { st } of states) {
         const node = st.node;
-        if (node && app.has(node)) { agg.bE_delivered++; continue; }        // E delivered
-        if (!st.active || !node) { agg.bA_activation++; continue; }         // A (incl. unresolved identity)
-        if (!tree.belief.has(node)) { agg.bB_beliefDiv++; continue; }       // B belief divergence
-        if (!recvd.has(node)) { agg.bC_nodeNonArrival++; continue; }        // C never reached the node
-        agg.bD_arrivedNoApp++;                                              // D arrived, app absent
+        if (node && app.has(node)) { agg.bE_delivered++; if (kagg) kagg.E++; continue; }        // E delivered
+        if (!st.active || !node) { agg.bA_activation++; if (kagg) kagg.A++; continue; }         // A (incl. unresolved identity)
+        if (!tree.belief.has(node)) { agg.bB_beliefDiv++; if (kagg) kagg.B++; continue; }       // B belief divergence
+        if (!recvd.has(node)) {                                             // C never reached the node
+          agg.bC_nodeNonArrival++; if (kagg) kagg.C++;
+          // C-SPLIT by edge attribution. root divergence first (>1 origin root); else walk
+          // the believed root→node path: the first edge P→Q where P HAS the msg and Q does
+          // not is a forwarding-transport loss on a healthy parent's edge. No reconstructable
+          // path (broken/unknown parent, or no single root) → tree divergence.
+          if (oroots.size > 1) { agg.bC_rootDiv++; continue; }
+          const path = tree.root ? pathEdges(node, tree.parentOf, tree.root) : null;
+          if (!path) { agg.bC_treeDiv++; continue; }
+          const hasMsg = (n) => recvd.has(n) || n === tree.root || oroots.has(n);
+          let hit = false;
+          for (const [P, Q] of path) { if (hasMsg(P) && !hasMsg(Q)) { agg.bC_fwdLoss++; hit = true; break; } }
+          if (!hit) agg.bC_treeDiv++;
+          continue;
+        }
+        agg.bD_arrivedNoApp++; if (kagg) kagg.D++;                          // D arrived, app absent
       }
     } else {
       agg.publishes++;
@@ -462,7 +512,9 @@ function reconcile(parsed, opts = {}) {
 
   lat.sort((a, b) => a - b);
   const p = (q) => lat.length ? lat[Math.min(lat.length - 1, Math.floor(q / 100 * lat.length))] : null;
-  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, band, hasSets: !!sets,
+  const cSplitCloses = (agg.bC_fwdLoss + agg.bC_treeDiv + agg.bC_rootDiv) === agg.bC_nodeNonArrival;
+  return { agg, rows, voidReasons, latP50: p(50), latP95: p(95), censorMs, band, hasSets: !!sets, byKind,
+    recvNodes: recvNodeSet.size, cSplitCloses,
     clockValidated, timingVoid, clockNote, clockHosts: (clk && clk.hosts) || null,
     completeness: agg.belief ? +(100 * agg.delivered / agg.belief).toFixed(2) : null,
     serviceCompleteness: agg.required ? +(100 * agg.bE_delivered / agg.required).toFixed(2) : null,
@@ -486,7 +538,22 @@ function report(res, note) {
     console.log(`  B belief divergence (miss ∩ active ∖ belief):         ${a.bB_beliefDiv}  ${ci(a.bB_beliefDiv)}`);
     console.log(`  C NODE NON-ARRIVAL (miss ∩ active ∩ belief ∖ R_node): ${a.bC_nodeNonArrival}  ${ci(a.bC_nodeNonArrival)}   ← "never reached node" (provisional unless R_node coverage complete)`);
     console.log(`  D arrived-at-node, app absent (… ∩ R_node ∖ R_app):   ${a.bD_arrivedNoApp}  ${ci(a.bD_arrivedNoApp)}   ← callback drop: an UPPER BOUND at ${a.bD_arrivedNoApp} observed, NOT an elimination (Aster CALLBACK-BOUND)`);
-    console.log(`  A/B are structural/control-plane, NOT folded into C; C vs forwarding-vs-tree needs the edge-join + root-identity stamps.`);
+    // C-SPLIT (edge-join + root-identity, David-approved 2026-09-01): separate node
+    // non-arrival into transport-forwarding loss vs tree/root divergence.
+    const cci = (k) => { const w = wilson(k, req); return `${(100 * k / (req || 1)).toFixed(2)}% [${w.lo}-${w.hi}]`; };
+    console.log(`  C-SPLIT (edge attribution) — closes: ${res.cSplitCloses ? 'YES' : 'NO ✗'} (C1+C2+C3 must == C=${a.bC_nodeNonArrival}); recv-node coverage=${res.recvNodes} distinct receiving nodes:`);
+    console.log(`    C1 forwarding-transport loss (healthy parent, edge P→Q dropped): ${a.bC_fwdLoss}  ${cci(a.bC_fwdLoss)}`);
+    console.log(`    C2 tree divergence (no reconstructable single-root path to reader): ${a.bC_treeDiv}  ${cci(a.bC_treeDiv)}`);
+    console.log(`    C3 root-set divergence (>1 origin root for the publish):           ${a.bC_rootDiv}  ${cci(a.bC_rootDiv)}`);
+    console.log(`    NOTE: C1-vs-C2 attribution is PROVISIONAL on tree-internal relay-receipt coverage — a relay that received but did not stamp reads as its parent's edge dropping (biases toward C1). C3 is definitional (same-nonce double-root).`);
+    console.log(`  A/B are structural/control-plane, NOT folded into C.`);
+    // OWNED vs OPEN service-completeness — the denominators differ in kind.
+    const bk = res.byKind || {};
+    for (const kind of ['owned', 'open']) {
+      const k = bk[kind]; if (!k || !k.req) continue;
+      const kc = (n) => { const w = wilson(n, k.req); return `${(100 * n / k.req).toFixed(2)}% [${w.lo}-${w.hi}]`; };
+      console.log(`  [${kind.toUpperCase()} topics] |req|=${k.req}  E=${k.E} ${kc(k.E)} service-completeness  · A=${k.A} B=${k.B} C=${k.C} D=${k.D}`);
+    }
   } else {
     console.log(`D_required/D_active pending — no lifecycle ledger in this data (Aster 54d03977)`);
   }
