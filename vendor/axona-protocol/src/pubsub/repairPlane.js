@@ -912,6 +912,13 @@ export const repairPlaneMethods = {
         this._upstream.delete(t);
         const s = this.mySubscriptions.get(t);
         if (s) { s.interval = this.renewFastMs; s.lastRenewSent = null; }  // null = 'renew now', NOT a time (C2)
+        // EAGER REATTACH: re-emit the subscribe toward the re-resolved root NOW
+        // rather than waiting up to a full refreshTick. The upstream just closed
+        // its channel; the reseat+replay clock should start at detection. Unpinned
+        // (_upstream just deleted) so _sendSubscribe routes toward the topic id and
+        // does NOT re-arm _unpinIfWaypointDead — no recursion. Fire-and-forget; the
+        // null stamp still backstops via the next tick if this throws.
+        if (this._eagerReattach) { try { this._sendSubscribe(t); } catch { /* tick backstops */ } }
       }
     }
   },

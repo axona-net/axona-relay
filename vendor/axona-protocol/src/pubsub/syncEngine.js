@@ -150,6 +150,18 @@ export const syncEngineMethods = {
   _syncPush(targetBig, topicBig, role, policyName, { full = true } = {}) {
     const { msgs, dels } = full ? this._syncSnapshot(role) : { msgs: [], dels: [] };
     const payload = { topicId: idHex(topicBig), from: idHex(this.nodeId), msgs, dels };
+    // SUBSCRIBER-LIST REPLICATION: on a FULL push, carry the root's direct
+    // subscriber/children list so the backup can re-adopt them into its fanout on
+    // promotion (collapses the post-migration orphan window). Only from a live root
+    // (a backup has none to give), only on full pushes, size-bounded.
+    if (full && this._replicateSubs && role.isRoot && role.subscribers && role.subscribers.size) {
+      const subs = [];
+      for (const [h, s] of role.subscribers) {
+        subs.push({ id: h, since: (s && Number.isFinite(s.since)) ? s.since : 0, child: role.children?.has(h) ? 1 : 0 });
+        if (subs.length >= 256) break;   // bound the payload
+      }
+      if (subs.length) payload.subs = subs;
+    }
     if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
     return this._route(targetBig, T.REPLICATE, payload);
   },
@@ -219,6 +231,20 @@ export const syncEngineMethods = {
       this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
       await this._applyDels(role, topicBig, payload.dels);
       await this._ingestStampedBatch(role, payload.msgs);
+      // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a
+      // promoted backup can re-adopt them into its fanout + replay (rootClaim._set).
+      // STORED, not applied — a backup serves nobody until it becomes root.
+      if (this._replicateSubs && Array.isArray(payload.subs)) {
+        const selfHex = lc(idHex(this.nodeId));
+        const inh = new Map();
+        for (const e of payload.subs) {
+          if (!e || typeof e.id !== 'string' || !isHexId(lc(e.id))) continue;
+          const h = lc(e.id);
+          if (h === selfHex) continue;                       // never seed self
+          inh.set(h, { since: Number.isFinite(e.since) ? e.since : 0, child: !!e.child });
+        }
+        role._inheritedSubs = inh.size ? inh : null;
+      }
       return;
     }
 

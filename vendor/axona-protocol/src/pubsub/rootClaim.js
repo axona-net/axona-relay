@@ -225,6 +225,23 @@ export class RootClaim {
     role.isRoot = isRoot;
     this.m._log('info', 'root-transition',
       { topic: idHex(role.topicId).slice(0, 12), isRoot, why, ...ctx });
+    // SUBSCRIBER-LIST REPLICATION: on PROMOTION, re-adopt the principal's inherited
+    // subscribers into the fanout and replay the cache to each, so the orphaned
+    // readers are served immediately instead of waiting ~9s to re-subscribe (the
+    // measured post-migration orphan window). Inherited list is dropped after use.
+    if (isRoot && this.m._replicateSubs && role._inheritedSubs && role._inheritedSubs.size) {
+      const now = this.m._now();
+      let seeded = 0;
+      for (const [subHex, info] of role._inheritedSubs) {
+        if (role.subscribers.has(subHex)) continue;
+        role.subscribers.set(subHex, { since: info.since || 0, lastRenewed: now });
+        if (info.child) role.children.add(subHex);
+        seeded++;
+        try { this.m._replayTo(role, subHex, info.since || 0, true); } catch { /* best-effort */ }
+      }
+      role._inheritedSubs = null;
+      if (seeded) this.m._log('info', 'root-inherited-subs', { topic: idHex(role.topicId).slice(0, 12), seeded });
+    }
   }
 
   // ── BACKUP nature transitions (v4.26.0, Phase 7) ──────────────────────────
