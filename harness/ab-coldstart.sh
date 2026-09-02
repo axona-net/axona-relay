@@ -14,7 +14,10 @@ cd "$(dirname "$0")/.."
 K="${1:?usage: ab-coldstart.sh <kNear>}"
 REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
-ENVV="RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 RELAY_PRESENCE=1 FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1 RELAY_SYNAPTOME_KNEAR=$K LAT_TRACE=1 RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0"
+# MESH_RELAY passthrough (Part A, level-isolation): MESH_RELAY=0 pins every relay to
+# bridge-only for a closed-fleet roll; unset/1 = normal (byte-identical). Run-frame /
+# allowlist env (RUN_ID/MEMBERSHIP_EPOCH/FLEET_ALLOWLIST) is arm-time, set by the Gate-4 runbook.
+ENVV="RELAY_SYNAPTOME_MAINTAIN=1 RELAY_ADMISSION_GATE=1 RELAY_ATTEMPT_GUARD=1 RELAY_PRESENCE=1 FINDK_SKIP_DEAD=1 SUB_TERMINAL_VERIFY=1 RELAY_SYNAPTOME_KNEAR=$K LAT_TRACE=1 RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE RELAY_TUI=0 MESH_RELAY=${MESH_RELAY:-1}"
 
 echo "[coldstart] kNear=$K  $(date -u +%H:%M:%SZ)"
 
@@ -55,7 +58,7 @@ echo "[coldstart] starting win x20 (batched on-box, verify + top-up)"
 # One ssh session: census, start the deficit, wait for bind, repeat up to 3 passes
 # to 20 (each schtasks start has a ~5% miss rate, so a single pass lands ~16-19).
 { cat <<WINSTART
-export RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=1 ARM_FIX=1 RELAY_SYNAPTOME_KNEAR=$K LAT_TRACE=1
+export RELAY_REGION=$REGION BRIDGE_URL=$BRIDGE ARM_STACK=1 ARM_FIX=1 RELAY_SYNAPTOME_KNEAR=$K LAT_TRACE=1 MESH_RELAY=${MESH_RELAY:-1}
 WR=/c/Users/david/github/axona-relay/harness/win-relay.sh
 for pass in 1 2 3; do
   have=\$(\$WR census 2>/dev/null | tr -d '[:space:]'); have=\${have:-0}
