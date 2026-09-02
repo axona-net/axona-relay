@@ -72,6 +72,9 @@ export class WebSocketTransport extends Transport {
     closeConn    = null,
     onAuthReject = null,
     onAuthBound  = null,
+    // CLOSED-FLEET ALLOWLIST (Part A). Set of nodeIds a peer must PROVE via the
+    // authenticated handshake to be admitted. null/empty = dormant (allow-all).
+    nodeAllowlist = null,
   } = {}) {
     super();
     if (typeof sendToConn !== 'function' || typeof isConnOpen !== 'function') {
@@ -99,6 +102,19 @@ export class WebSocketTransport extends Transport {
     this._closeConn        = closeConn;
     this._onAuthReject     = onAuthReject;
     this._onAuthBound      = onAuthBound;
+    // CLOSED-FLEET ALLOWLIST (Part A, level-isolation spec v2; David-approved testnet
+    // build). A peer is admitted only if the nodeId it PROVES via the authenticated
+    // handshake is in this set — a version floor and host/IP are not identity. Absent
+    // or empty = dormant (allow-all), so prod and normal runs are byte-identical; the
+    // closed-fleet arm supplies FLEET_ALLOWLIST. Mirrors the directMessageTypes
+    // "configured Set, absent = open" pattern.
+    this._nodeAllowlist = (() => {
+      let src = nodeAllowlist;
+      if (src == null) { try { const e = process.env && process.env.FLEET_ALLOWLIST; if (e) src = e.split(',').map((s) => s.trim()).filter(Boolean); } catch { /* no process.env */ } }
+      if (src == null) return null;
+      const set = src instanceof Set ? src : new Set(src);
+      return set.size ? set : null;
+    })();
 
     /** @type {Map<string, {myNonce, peerNonce, pendingSig, sigSent, bound, verifying, expectNodeId}>} */
     this._authByConn = new Map();
@@ -306,6 +322,11 @@ export class WebSocketTransport extends Transport {
       if (!res.ok) { this._authReject(connId, 'peer_' + (res.reason ?? 'auth_failed')); return; }
       if (st.expectNodeId != null && res.nodeId !== st.expectNodeId) {
         this._authReject(connId, 'id_mismatch'); return;
+      }
+      // CLOSED-FLEET ALLOWLIST (Part A): reject a cryptographically-proven identity
+      // that is not on the run's allowlist. Dormant when _nodeAllowlist is null.
+      if (this._nodeAllowlist && !this._nodeAllowlist.has(res.nodeId)) {
+        this._authReject(connId, 'not_allowlisted'); return;
       }
       st.bound = true;
       this.bindPeer(res.nodeId, connId);

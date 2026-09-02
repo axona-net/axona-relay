@@ -202,6 +202,16 @@ export class MeshAuth {
         if (st.peerNodeId && res.nodeId !== st.peerNodeId) {
           this._log('auth-mesh-id-mismatch', { meshId }); return;
         }
+        // CLOSED-FLEET ALLOWLIST (Part A, level-isolation spec v2; David-approved testnet
+        // build). Admit only a proven identity that is on the run's allowlist. Absent
+        // FLEET_ALLOWLIST = dormant (allow-all), so prod/normal runs are byte-identical.
+        try {
+          const _al = process.env && process.env.FLEET_ALLOWLIST;
+          if (_al) {
+            const _set = new Set(_al.split(',').map((s) => s.trim()).filter(Boolean));
+            if (_set.size && !_set.has(res.nodeId)) { this._log('auth-mesh-not-allowlisted', { meshId, peer: res.nodeId }); return; }
+          }
+        } catch { /* no process.env (pure browser) */ }
         // Symmetric per-channel key = the sorted nonce pair.  Both endpoints
         // hold the same two nonces, so this string is IDENTICAL on each side
         // of a given channel — letting the transport deterministically pick

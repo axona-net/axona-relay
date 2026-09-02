@@ -248,6 +248,18 @@ export class AxonaManager {
     // process generation and not mix collected rows across relay restarts (the
     // win-164-pids issue). node-only concern (LAT_TRACE relays); guarded for browsers.
     try { this._procNonce = `${(typeof process !== 'undefined' && process.pid) || 0}-${Date.now()}`; } catch { this._procNonce = String(Date.now()); }
+    // TRANSITION LEDGER (Part B, level-isolation build spec v2; David-approved testnet
+    // build 2026-09-01). Run/epoch frame stamped on every ledger row so the analyzer can
+    // scope to one closed-fleet arm and close an epoch on any membership change. Values
+    // are harness-provided per arm (env), null when unset. LAT_TRACE-gated like every
+    // other stamp — no-op / byte-identical when the flag is off.
+    try {
+      this._runId = (process.env && process.env.RUN_ID) || null;
+      this._membershipEpoch = (process.env && process.env.MEMBERSHIP_EPOCH) || null;
+      this._membershipDigest = (process.env && process.env.MEMBERSHIP_DIGEST) || null;
+    } catch { this._runId = null; this._membershipEpoch = null; this._membershipDigest = null; }
+    this._ledgerSeq = 0;   // monotonic per-process ledger sequence (feeds the completeness manifest)
+    this._nodeStartEmitted = false;   // node-start census row emitted once (David 2026-09-01)
     this.refreshIntervalMs = refreshIntervalMs;
     this._cacheMax   = replayCacheSize || CACHE_MAX;
     this._cacheBytes = replayCacheBytes || CACHE_BYTES;
@@ -1339,6 +1351,71 @@ export class AxonaManager {
   _rootOrigin(msgId, epoch) {
     if (!this._latTrace || !msgId) return;
     this._log('info', 'lat-stage', { stage: 'root:origin', msgId, root: idHex(this.nodeId), epoch: Number.isFinite(epoch) ? epoch : null, proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+
+  // TRANSITION LEDGER emit (Part B, spec v2). Two independent one-way records the
+  // analyzer joins on (msgId, edgeAttemptId): a SENDER row per intended downstream edge
+  // carrying the queue-boundary timings and the classified outcome, and a RECEIVER row
+  // per arrival. Plus an end-of-run manifest so a missing tail row is distinct from a
+  // lost frame. Every row carries the run/epoch frame + process nonce + a monotonic seq.
+  // This replaces the void-prone tx/rx hop pairing (which conflated send-resolved with
+  // received): here send-outcome is recorded at the sender and arrival is recorded
+  // independently at the receiver, never inferred from the request/reply resolution.
+  _ledgerFrame() {
+    return { runId: this._runId, epoch: this._membershipEpoch, digest: this._membershipDigest,
+             proc: this._procNonce, seq: (this._ledgerSeq = (this._ledgerSeq | 0) + 1) };
+  }
+  // NODE-START census row (David 2026-09-01): a node records the ephemeral transport id
+  // it computed at startup, so the harness harvests the closed-fleet census from the
+  // files the nodes themselves generate — no precomputed keyset and no exception to the
+  // never-persist-transport-id invariant (the id is ephemeral and lives only in this
+  // run's diagnostic ledger). Emitted once, before this process's first ledger row.
+  _nodeStartLedger() {
+    if (!this._latTrace || this._nodeStartEmitted) return;
+    this._nodeStartEmitted = true;
+    this._log('info', 'lat-stage', { stage: 'node-start', transportId: idHex(this.nodeId),
+      runId: this._runId, epoch: this._membershipEpoch, digest: this._membershipDigest,
+      proc: this._procNonce, t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+  // Classify a transport.send resolution/rejection into the three send-outcome states
+  // (Aster's review): not-attempted (never hit the wire) / attempted-failed (write
+  // threw) / accepted (write went out — delivered-reply, no-reply, or downstream
+  // handler-error). Rejection reasons come from wstransport (TRANSPORT_*).
+  _txOutcome(ok, err) {
+    if (ok) return { disposition: 'accepted', outcome: 'delivered-reply', reason: null };
+    const m = String((err && (err.code || err.message)) || err || '');
+    if (/NOT_STARTED|CHANNEL_CLOSED/.test(m)) return { disposition: 'not-attempted', outcome: 'channel-unavailable', reason: m };
+    if (/WS write failed/.test(m))            return { disposition: 'attempted-failed', outcome: 'write-failed', reason: m };
+    if (/TIMEOUT/.test(m))                    return { disposition: 'accepted', outcome: 'accepted-no-reply', reason: m };
+    if (/remote handler error/.test(m))       return { disposition: 'accepted', outcome: 'handler-error', reason: m };
+    return { disposition: 'attempted-failed', outcome: 'other', reason: m };
+  }
+  _txLedger(rec) {
+    if (!this._latTrace || !rec || !rec.msgId) return;
+    this._nodeStartLedger();
+    this._log('info', 'lat-stage', { stage: 'tx-ledger', ...this._ledgerFrame(),
+      msgId: rec.msgId, publishNonce: rec.publishNonce ?? null, edgeAttemptId: rec.edgeAttemptId ?? null,
+      ordinal: rec.ordinal ?? 1, from: rec.from ?? idHex(this.nodeId), to: rec.to ?? null,
+      enqueueT: rec.enqueueT ?? null, sendAttemptT: rec.sendAttemptT ?? null,
+      disposition: rec.disposition ?? null, outcome: rec.outcome ?? null, reason: rec.reason ?? null,
+      connId: rec.connId ?? null, hopIdx: rec.hopIdx ?? null,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+  _rxLedger(rec) {
+    if (!this._latTrace || !rec || !rec.msgId) return;
+    this._nodeStartLedger();
+    this._log('info', 'lat-stage', { stage: 'rx-ledger', ...this._ledgerFrame(),
+      msgId: rec.msgId, publishNonce: rec.publishNonce ?? null, edgeAttemptId: rec.edgeAttemptId ?? null,
+      from: rec.from ?? null, to: idHex(this.nodeId), role: rec.role ?? null, topicId: rec.topicId ?? null,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
+  }
+  // End-of-run completeness manifest: first/last seq + count for this process, so the
+  // harvester distinguishes a truncated tail from a genuinely absent row. Call on shutdown.
+  _ledgerManifest() {
+    if (!this._latTrace) return;
+    this._log('info', 'lat-stage', { stage: 'ledger-manifest', runId: this._runId, epoch: this._membershipEpoch,
+      proc: this._procNonce, firstSeq: this._ledgerSeq ? 1 : 0, lastSeq: this._ledgerSeq | 0, count: this._ledgerSeq | 0,
+      t: Date.now(), mono: globalThis.performance?.now?.() ?? 0 });
   }
 
   // Publish-time EXPECTATION LEDGER (combined Gate-4 item 3; Aster a87ad414;

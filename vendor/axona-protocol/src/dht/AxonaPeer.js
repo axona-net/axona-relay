@@ -862,6 +862,8 @@ export class AxonaPeer extends DHT {
         const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
         _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
         this._axonaManager._deliverHopRx(_hopMids, msg.hopAttemptId ?? null, hops, fromId, toHex(node.id));
+        // transition-ledger: receiver arrival row per msg, joined to the sender row by edgeAttemptId
+        for (const mid of _hopMids) this._axonaManager._rxLedger({ msgId: mid, edgeAttemptId: msg.hopAttemptId ?? null, from: fromId, topicId: payload?.topicId ?? null });
       }
 
       // Greedy 1-hop forward — only over synapses we are actually connected
@@ -919,18 +921,27 @@ export class AxonaPeer extends DHT {
         catch { /* fall through */ }
       }
 
-      let _hopId = null;
-      if (_hopLt) { _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(node.id).slice(-6)}`; }
+      let _hopId = null, _fEnqT = 0, _fSendT = 0;
+      if (_hopLt) { _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(node.id).slice(-6)}`; _fEnqT = Date.now(); }
       try {
         // Wire payload targetId is hex (v1.5 contract).
+        if (_hopLt) _fSendT = Date.now();
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
           ...(_hopLt ? { hopAttemptId: _hopId } : {}),
         });
-        if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'ok', null);
+        if (_hopLt) {
+          this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'ok', null);
+          const _oc = this._axonaManager._txOutcome(true, null);
+          for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
+        }
         return downstream;
       } catch (e) {
-        if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
+        if (_hopLt) {
+          this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
+          const _oc = this._axonaManager._txOutcome(false, e);
+          for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
+        }
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
     }, { registry: this._b5door });
@@ -4616,24 +4627,34 @@ export class AxonaPeer extends DHT {
     // Origin hop (0->1) DELIVER telemetry — same LAT_TRACE gate; pairs with the
     // first forwarder's rx by hopAttemptId. No wire/behaviour change when off.
     const _hopLt = this._axonaManager?._latTrace === true && type === 'pubsub:deliver';
-    let _hopId = null, _hopMids = null;
+    let _hopId = null, _hopMids = null, _enqT = 0, _sendT = 0;
     if (_hopLt) {
       const _dm = Array.isArray(payload?.msgs) ? payload.msgs : [];
       _hopMids = _dm.map((m) => m?.msgId).filter(Boolean).slice(0, 8);
       _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(originNode.id).slice(-6)}`;
+      _enqT = Date.now();   // transition-ledger: enqueue moment (before the transport handoff)
     }
     try {
       // Wire payload `targetId` is hex (per the v1.5 contract; the
       // receiver handles either form, but hex is the canonical wire
       // shape so this also works over JSON-serialising transports).
+      if (_hopLt) _sendT = Date.now();   // hand-to-transport moment
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
         ...(_hopLt ? { hopAttemptId: _hopId } : {}),
       });
-      if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
+      if (_hopLt) {
+        this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'ok', null);
+        const _oc = this._axonaManager._txOutcome(true, null);   // transition-ledger: sender row per msg
+        for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(originNode.id), to: toHex(nextHopId), hopIdx: 1, enqueueT: _enqT, sendAttemptT: _sendT, ..._oc });
+      }
       return downstream;
     } catch (e) {
-      if (_hopLt) this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'fail', String(e?.message || e));
+      if (_hopLt) {
+        this._axonaManager._deliverHopTx(_hopMids, _hopId, 1, toHex(originNode.id), toHex(nextHopId), 'fail', String(e?.message || e));
+        const _oc = this._axonaManager._txOutcome(false, e);
+        for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(originNode.id), to: toHex(nextHopId), hopIdx: 1, enqueueT: _enqT, sendAttemptT: _sendT, ..._oc });
+      }
       return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
     }
   }
