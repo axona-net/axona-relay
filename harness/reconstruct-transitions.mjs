@@ -37,7 +37,7 @@ function wilson(k, n, z = 1.96) {
 }
 
 function parse(dir) {
-  const tx = [], rx = [], manifests = [];
+  const tx = [], rx = [], manifests = [], nodeStart = [];
   for (const f of readdirSync(dir).filter((x) => x.endsWith('.jsonl'))) {
     let text; try { text = readFileSync(join(dir, f), 'utf8'); } catch { continue; }
     for (const line of text.split('\n')) {
@@ -46,15 +46,21 @@ function parse(dir) {
       if (r.stage === 'tx-ledger') tx.push(r);
       else if (r.stage === 'rx-ledger') rx.push(r);
       else if (r.stage === 'ledger-manifest') manifests.push(r);
+      else if (r.stage === 'node-start') nodeStart.push(r);
     }
   }
-  return { tx, rx, manifests };
+  return { tx, rx, manifests, nodeStart };
 }
 
-function reconstruct({ tx, rx, manifests }, opts = {}) {
+function reconstruct({ tx, rx, manifests, nodeStart = [] }, opts = {}) {
   const runId = opts.runId ?? null, epoch = opts.epoch ?? null;
   const scoped = (r) => (runId == null || r.runId === runId) && (epoch == null || String(r.epoch) === String(epoch));
   tx = tx.filter(scoped); rx = rx.filter(scoped);
+
+  // CLOSED-FLEET CENSUS (David 2026-09-01): every node recorded the ephemeral transport
+  // id it computed at startup, so the census is HARVESTED from the files, not precomputed.
+  const censusFull = new Set(), censusPfx = new Set();
+  for (const n of nodeStart.filter(scoped)) { if (!n.transportId) continue; censusFull.add(n.transportId); censusPfx.add(pfx(n.transportId)); }
 
   // Index rx by (msgId, edgeAttemptId).
   const rxByEdge = new Map();
@@ -109,17 +115,30 @@ function reconstruct({ tx, rx, manifests }, opts = {}) {
     return { proc: m.proc, declared, note: declared === 0 ? 'empty' : 'ok' };
   });
 
+  // Two-way census check: every id that appears on an edge must be in the census (no
+  // FOREIGN node); the census itself (node-start emitters) proves every started node is
+  // present. A non-empty `foreign` = the closed fleet was not actually closed.
+  const foreign = new Set();
+  if (censusPfx.size) {
+    for (const edges of edgesByMsg.values()) for (const e of edges) {
+      if (e.from && !censusPfx.has(e.from)) foreign.add(e.from);
+      if (e.to && !censusPfx.has(e.to)) foreign.add(e.to);
+    }
+  }
+
   const onWire = tally.CROSSED + tally.ACCEPTED_NO_RX;
   const perHopRate = onWire ? +(100 * tally.CROSSED / onWire).toFixed(2) : null;
   const perHopCI = wilson(tally.CROSSED, onWire);
 
   return { tally, perMsg, completeness, onWire, perHopRate, perHopCI,
+    census: censusFull, censusSize: censusFull.size, foreign: [...foreign],
     manifests: manifests.filter(scoped).length, msgs: edgesByMsg.size, runId, epoch };
 }
 
 function report(res) {
   console.log('\n===== TRANSITION-LEDGER PATH RECONSTRUCTION (level-isolation Part B) =====');
   console.log(`run=${res.runId ?? '(all)'} epoch=${res.epoch ?? '(all)'}   messages=${res.msgs}   manifests=${res.manifests}`);
+  console.log(`closed-fleet census: ${res.censusSize} nodes (harvested from node-start rows).  FOREIGN ids on edges: ${res.foreign.length}${res.foreign.length ? ' — FLEET NOT CLOSED: ' + res.foreign.join(',') : ' (clean)'}`);
   console.log('edge classification (join on msgId+edgeAttemptId, both endpoints logged independently):');
   for (const k of ['CROSSED', 'NOT_ATTEMPTED', 'ATTEMPTED_FAILED', 'ACCEPTED_NO_RX', 'RX_ORPHAN'])
     console.log(`  ${k.padEnd(16)} ${res.tally[k]}`);
@@ -139,13 +158,16 @@ function selftest() {
   const RX = (msgId, eid, from, to) => ({ stage: 'rx-ledger', runId: 'r1', epoch: '1', proc: to.slice(-6), msgId, edgeAttemptId: eid, from, to });
   const MAN = (proc, count) => ({ stage: 'ledger-manifest', runId: 'r1', epoch: '1', proc, count });
 
+  const NS = (id) => ({ stage: 'node-start', runId: 'r1', epoch: '1', proc: id.slice(-6), transportId: id });
   // Path for M1: R->A crossed, A->B crossed, B->C accepted-no-rx (lost); plus R->X not-attempted.
+  // Census covers R,A,B only — so C, appearing on edges, is a FOREIGN id (fleet not closed).
   const parsed = {
     tx: [ TX('M1', 'e1', R, A, 1, 'accepted'), TX('M1', 'e2', A, B, 2, 'accepted'),
           TX('M1', 'e3', B, C, 3, 'accepted'), TX('M1', 'e4', R, C, 1, 'not-attempted') ],
     rx: [ RX('M1', 'e1', R, A), RX('M1', 'e2', A, B),
           RX('M1', 'e9', A, C) ],   // e9 = rx with no tx -> RX_ORPHAN
     manifests: [ MAN(R.slice(-6), 2), MAN(A.slice(-6), 3), MAN(B.slice(-6), 1) ],
+    nodeStart: [ NS(R), NS(A), NS(B) ],
   };
   const res = reconstruct(parsed, { runId: 'r1', epoch: '1' });
   const checks = [
@@ -155,6 +177,8 @@ function selftest() {
     ['RX_ORPHAN==1', res.tally.RX_ORPHAN === 1],
     ['on-wire==3 (2 crossed + 1 accepted-no-rx)', res.onWire === 3],
     ['per-hop rate==66.67%', res.perHopRate === 66.67],
+    ['census==3 (R,A,B from node-start)', res.censusSize === 3],
+    ['foreign detects C (not in census)', res.foreign.length === 1 && res.foreign[0] === pfx(C)],
     ['msgs==1', res.msgs === 1],
     ['epoch filter excludes other runs', reconstruct({ ...parsed, tx: [...parsed.tx, TX('M2','z1',R,A,1,'accepted')].map((r,i)=> i===parsed.tx.length ? {...r, epoch:'2'} : r) }, { runId:'r1', epoch:'1' }).msgs === 1],
   ];
@@ -166,5 +190,13 @@ function selftest() {
 
 const arg = process.argv[2];
 if (arg === '--selftest') { process.exit(selftest() ? 0 : 1); }
+else if (arg === '--emit-allowlist') {
+  // Harvest the census into a FLEET_ALLOWLIST string (full transport ids), for feeding
+  // active allowlist enforcement on a second pass. Prints only the list (no report).
+  const dir = process.argv[3];
+  if (!dir) { console.error('usage: node harness/reconstruct-transitions.mjs --emit-allowlist <results-dir>'); process.exit(2); }
+  const res = reconstruct(parse(dir), { runId: process.env.RUN_ID || null, epoch: process.env.EPOCH || null });
+  process.stdout.write([...res.census].join(','));
+}
 else if (arg) { report(reconstruct(parse(arg), { runId: process.env.RUN_ID || null, epoch: process.env.EPOCH || null })); }
-else { console.error('usage: [RUN_ID=..] [EPOCH=..] node harness/reconstruct-transitions.mjs <results-dir> | --selftest'); process.exit(2); }
+else { console.error('usage: [RUN_ID=..] [EPOCH=..] node harness/reconstruct-transitions.mjs <results-dir> | --emit-allowlist <dir> | --selftest'); process.exit(2); }
