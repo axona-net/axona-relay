@@ -158,7 +158,12 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
     // TODO(deploy): KERNEL_VERSION crossed 2.x→3.0.0 — confirm the live bridge's
     // peer-app floor admits 3.0.0 (a 3.x hello is now classified peer-app, not
     // kernel). Verify against bridge.axona.net / testnet before rollout.
-    meshRelay:     true,           // relay signaling for others (bridgeless help)
+    // MESH_RELAY=0 pins the relay to BRIDGE-ONLY for a closed-fleet arm (Part A,
+    // level-isolation spec v2): it disables peer-relayed signaling and the autonomous
+    // bridgeless dial (connectViaRelay), so no alternate discovery path can admit a
+    // node outside the run's allowlist. Default (unset/anything else) stays true —
+    // byte-identical to normal operation.
+    meshRelay:     !(process.env.MESH_RELAY === '0'),
     reconnect:     true,           // a relay should self-heal the bridge link
     WebSocketImpl,
     log: (event, ctx) => onLog('debug', event, ctx),
