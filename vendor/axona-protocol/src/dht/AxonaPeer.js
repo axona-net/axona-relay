@@ -148,15 +148,6 @@ export class AxonaPeer extends DHT {
     // blocked synchronous terminal verification. Candidates are unaffected; only
     // the outbound probe set is filtered. Remove the gate once armed + validated.
     this._findkSkipDead = (typeof process !== 'undefined' && process.env && process.env.FINDK_SKIP_DEAD === '1');
-    // Lookup-assisted forward escape (routing fix, David 2026-09-02; council
-    // unavailable, David-authorized direct). DEFAULT ON. route_msg's greedy walk +
-    // 2-hop lookahead stall at a last-mile LOCAL MINIMUM one neighbourhood short of
-    // the true root (measured ~41% of greedy terminals, all within ~4 leading bits —
-    // localmin-distance.mjs). When still terminal, consult the SAME iterative
-    // findKClosest subscription uses (proven origin-independent — it escapes these
-    // minima) and forward to the strictly-closer terminus rather than self-rooting.
-    // ROUTE_GREEDY_ESCAPE=0 disables (A/B baseline).
-    this._routeGreedyEscape = !(typeof process !== 'undefined' && process.env && process.env.ROUTE_GREEDY_ESCAPE === '0');
     // REF-1.1 M1: DEFAULT-OFF Boundary-1 frame-contract registry. When true, the
     // default AxonaManager arms the shadow registry over its 19 routed handlers
     // (observe-only; byte-identical flag-off; the runtime AXONA_REGISTRY_SHADOW env
@@ -901,36 +892,6 @@ export class AxonaPeer extends DHT {
           nextHopId  = closer;
           isTerminal = false;
         }
-      }
-
-      // Lookup-assisted escape: a 2-hop lookahead cannot cross a 3-4 bit last-mile
-      // gap, so greedy stalls one neighbourhood short of the root. Consult the
-      // iterative findKClosest (origin-independent) and forward to the strictly-
-      // closer terminus; the lazy openConnection below opens the channel if it is
-      // not already meshed. Distance strictly decreases -> no loop; MAX_HOPS still
-      // bounds the walk. Fires only at a true terminal, so at most one lookup per
-      // stalled message.
-      if (isTerminal && this._routeGreedyEscape) {
-        try {
-          const myDist   = node.id ^ targetBig;
-          const bridgeId = node.transport?.bridgeNodeIdBig ?? null;
-          const cand     = await this.findKClosest(targetBig, 4);
-          let best = null, bestDist = myDist;
-          if (Array.isArray(cand)) {
-            for (const id of cand) {
-              if (typeof id !== 'bigint' || id === node.id) continue;
-              if (bridgeId !== null && id === bridgeId) continue;
-              if (node._deadPeers && node._deadPeers.has(id)) continue;
-              const d = id ^ targetBig;
-              if (d < bestDist) { bestDist = d; best = id; }
-            }
-          }
-          if (best !== null) {
-            if (this._routeTrace) this._emitLog?.('info', 'route-escape', { target: toHex(targetBig).slice(0, 12), to: toHex(best).slice(0, 12), hops });
-            nextHopId  = best;
-            isTerminal = false;
-          }
-        } catch { /* best-effort escape; fall through to terminal delivery */ }
       }
 
       const meId = node.id;
@@ -4631,35 +4592,6 @@ export class AxonaPeer extends DHT {
         nextHopId  = closer;
         isTerminal = false;
       }
-    }
-
-    // Lookup-assisted escape at the ORIGIN hop — same fix as the route_msg
-    // forwarder (see the handler). Greedy + 2-hop stall at a last-mile local
-    // minimum one neighbourhood short of the target; consult the iterative
-    // findKClosest (origin-independent) and forward to the strictly-closer
-    // terminus. The lazy openConnection below opens the channel if unmeshed.
-    // Distance strictly decreases -> no loop. ROUTE_GREEDY_ESCAPE=0 disables.
-    if (isTerminal && this._routeGreedyEscape) {
-      try {
-        const myDist   = originNode.id ^ targetId;
-        const bridgeId = originNode.transport?.bridgeNodeIdBig ?? null;
-        const cand     = await this.findKClosest(targetId, 4);
-        let best = null, bestDist = myDist;
-        if (Array.isArray(cand)) {
-          for (const id of cand) {
-            if (typeof id !== 'bigint' || id === originNode.id) continue;
-            if (bridgeId !== null && id === bridgeId) continue;
-            if (originNode._deadPeers && originNode._deadPeers.has(id)) continue;
-            const d = id ^ targetId;
-            if (d < bestDist) { bestDist = d; best = id; }
-          }
-        }
-        if (best !== null) {
-          if (this._routeTrace) this._emitLog?.('info', 'route-escape-origin', { target: toHex(targetId).slice(0, 12), to: toHex(best).slice(0, 12) });
-          nextHopId  = best;
-          isTerminal = false;
-        }
-      } catch { /* best-effort escape; fall through to terminal delivery */ }
     }
 
     const result = await this._deliverRouted(type, payload, {

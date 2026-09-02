@@ -261,19 +261,6 @@ export class AxonaManager {
     this._ledgerSeq = 0;   // monotonic per-process ledger sequence (feeds the completeness manifest)
     this._nodeStartEmitted = false;   // node-start census row emitted once (David 2026-09-01)
     this.refreshIntervalMs = refreshIntervalMs;
-    // EAGER REATTACH (delivery fix, David 2026-09-02; council out, David-authorized
-    // direct). DEFAULT ON. When an upstream (the relay/root a subscription renews
-    // toward) is detected dead — a channel close via pubsubPeerDied, or a failed
-    // pinned renewal via _unpinIfWaypointDead — re-emit the subscribe toward the
-    // re-resolved root IMMEDIATELY, instead of only nulling the stamp and waiting up
-    // to a full refreshTick to re-send. The reproducer (pubsub-churn-smoke ROOT_KILL)
-    // showed the loss is post-migration reattach LATENCY: eventual delivery ~100%,
-    // but the reseat+replay clears the 4x-renewal mark and misses the 2x deadline.
-    // Starting reseat+replay at detection rather than next-tick is the lever.
-    // A/B result 2026-09-02: NULL on the ROOT_KILL reproducer (66.7% vs 61.8%,
-    // within noise) — recovery latency is downstream of subscriber re-emit, so this
-    // is DEFAULT-OFF pending localization. EAGER_REATTACH=1 to enable.
-    this._eagerReattach = (typeof process !== 'undefined' && process.env && process.env.EAGER_REATTACH === '1');
     // SUBSCRIBER-LIST REPLICATION (delivery fix, David 2026-09-02; council out,
     // David-authorized direct). DEFAULT ON. The measured loss is the post-migration
     // ORPHAN WINDOW: a warm backup inherits the CACHE (root:recv ~1ms) but NOT the
@@ -1033,11 +1020,6 @@ export class AxonaManager {
         topic: idHex(topicBig).slice(0, 12), was: deadHex.slice(0, 12),
         detail: 'renewal did not reach its pinned waypoint — re-homing unpinned',
       });
-      // EAGER REATTACH: the failed pinned renewal just proved the waypoint dead.
-      // Re-emit toward the re-resolved root NOW rather than deferring the re-home
-      // to the next refreshTick. Now unpinned, so this routes toward the topic id
-      // and does NOT re-arm _unpinIfWaypointDead — no recursion.
-      if (this._eagerReattach) { try { this._sendSubscribe(topicBig); } catch { /* tick backstops */ } }
     }).catch(() => {});   // _route cannot reject (v4.57.1); belt and braces
   }
   _emitSubscribe(topicBig, via) {
