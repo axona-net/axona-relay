@@ -92,6 +92,17 @@ done
 CAFFEINATE="${CAFFEINATE:-1}"
 echo "→ starting $N relay(s): region=$REGION bridge=$BRIDGE caffeinate=$CAFFEINATE"
 declare -a SLOT_PID SLOT_OFF
+# STAGED START (2026-09-04, David). The stop loop above is one-at-a-time, but this
+# loop USED to fire all N launches with only a 1s gap — effectively a burst. A
+# simultaneous cold-join of N relays is a storm trigger: each join makes the bridge
+# notify every other peer, so N joins at once spike its event loop into loop-stall
+# (the 2026-09-04 M1 incident — 12 relays bursting prod collapsed the browser mesh).
+# So gate each launch on the PREVIOUS relay actually MESHING — its log reaching
+# "state=open" past this launch's offset — bounded by SEAT_WAIT so a slow/broken
+# relay can't hang the script. Set SEAT_GATE=0 to restore the old fast burst (only
+# for a throwaway fleet where a transient bridge spike doesn't matter).
+SEAT_GATE="${SEAT_GATE:-1}"      # 1 = wait for each relay to mesh before launching the next
+SEAT_WAIT="${SEAT_WAIT:-30}"     # max seconds to wait for "state=open"; then proceed anyway
 for n in $(seq 1 "$N"); do
   LOG="relay-logs/relay-$n.log"
   # Logs are APPENDED across launches, so a banner from a previous run would
@@ -107,7 +118,24 @@ for n in $(seq 1 "$N"); do
   fi
   SLOT_PID[$n]=$!
   echo "   relay-$n pid ${SLOT_PID[$n]}"
-  sleep 1
+  # Stage: hold until this relay has meshed before launching the next. The final
+  # slot needs no gate — the verify step below already waits SETTLE seconds.
+  if [ "$SEAT_GATE" = "1" ] && [ "$n" -lt "$N" ]; then
+    seated=0
+    for _ in $(seq 1 "$SEAT_WAIT"); do
+      kill -0 "${SLOT_PID[$n]}" 2>/dev/null || break   # died → stop waiting; verify reports it
+      NEW=$(tail -c "+$(( ${SLOT_OFF[$n]} + 1 ))" "$LOG" 2>/dev/null || true)
+      case "$NEW" in *"state=open"*) seated=1; break ;; esac
+      sleep 1
+    done
+    if [ "$seated" = "1" ]; then
+      echo "     ↳ relay-$n meshed (state=open) — launching next"
+    else
+      echo "     ↳ relay-$n no state=open within ${SEAT_WAIT}s — launching next anyway (verify will judge)" >&2
+    fi
+  else
+    sleep 1
+  fi
 done
 
 # ---- VERIFY. Nothing below trusts the launch loop's exit status. ----
