@@ -417,7 +417,20 @@ export const wireHandlersMethods = {
     let tid;
     try { tid = await deriveTopicIdBig({ region: desc.region, owner: desc.owner, name: desc.name, write: desc.write }); }
     catch { this._log('warn', 'drop-bad-descriptor'); return { ok: false, reason: 'bad-descriptor' }; }
-    if (tid !== role.topicId) { this._log('warn', 'drop-topic-mismatch'); return { ok: false, reason: 'topic-mismatch' }; }
+    if (tid !== role.topicId) {
+      // Diagnostic detail (GH #26): the bare event can't tell a stale cross-network
+      // kill from a real mismatch. Emit the computed id, the id this root actually
+      // holds, the full descriptor that produced the computed id, and the msgId —
+      // enough for a publisher to match against their own published-data record
+      // (present → real; absent → a kill from another session/network).
+      this._log('warn', 'drop-topic-mismatch', {
+        computed: tid.toString(16),
+        held: role.topicId.toString(16),
+        region: desc.region, owner: desc.owner, name: desc.name, write: desc.write,
+        msgId: env.msgId
+      });
+      return { ok: false, reason: 'topic-mismatch' };
+    }
     if (desc.write === 'owner' && (!env.signerPubkey || lc(env.signerPubkey) !== lc(desc.owner))) {
       this._log('warn', 'drop-write-policy', { topic: desc.name }); return { ok: false, reason: 'write-policy' };
     }
