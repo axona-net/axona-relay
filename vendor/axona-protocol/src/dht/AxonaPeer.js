@@ -55,7 +55,7 @@ export const ANONYMOUS = Symbol.for('axona.publish.anonymous');
 import { buildEnvelope }  from '../pubsub/envelope.js';
 import { buildKill }      from '../pubsub/kill.js';
 import { buildTouch }     from '../pubsub/touch.js';
-import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES, isRegionLockEnforced } from '../pubsub/AxonaManager.js';
+import { AxonaManager, MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from '../pubsub/AxonaManager.js';
 import { metricTopic, isMetricTopicName, dataTopicIdOf } from '../pubsub/metrics.js';
 import { authorClassTopic, buildAuthorClass, verifyAuthorClass } from '../pubsub/authorClass.js';
 import { AxonaError, PublishError, SubscribeError, KillError, TouchError, PullError, MetricsError, ErrorCodes } from '../errors.js';
@@ -2278,7 +2278,6 @@ export class AxonaPeer extends DHT {
   async pub(topic, message, opts = {}) {
     const desc = await this._resolveTopicOrThrow(topic, 'pub');
     const am   = this._requireAxonaManager('pub');
-    await this._assertRegionUsable(desc.topicIdBig, PublishError, 'pub');   // region-occupancy rule
 
     // Signer (design v0.3 §5/§6): opts.signWith is an AUTHOR identity, or the
     // ANONYMOUS sentinel for a deliberately unsigned publish. There is NO default
@@ -2497,7 +2496,6 @@ export class AxonaPeer extends DHT {
     const desc       = await this._resolveReadTopic(topic, 'sub');
     const am         = this._requireAxonaManager('sub');
     const topicIdBig = desc.topicIdBig;
-    await this._assertRegionUsable(topicIdBig, SubscribeError, 'sub');   // region-occupancy rule
 
     // Apply `since` mode by seeding AxonaManager's per-topic lastSeenTs
     // BEFORE the subscribe call.  AxonaManager passes lastSeenTs in the
@@ -2553,35 +2551,6 @@ export class AxonaPeer extends DHT {
     this._metricsPublisherSet = true;
     am.setMetricsPublisher((dataTopicIdHex, snapshot) =>
       this.pub(metricTopic(dataTopicIdHex), JSON.stringify(snapshot), { signWith: ANONYMOUS }));
-  }
-
-  // REGION RULE (region occupancy): a topic is served only by nodes IN ITS REGION.
-  // You may pub/sub to any region, but if the topic's region has no operational
-  // (reachable) node, there's no valid root — refuse rather than let a neighbouring
-  // region absorb it (which would hotspot that region). Fast-fail BEFORE sending, so
-  // it's a pre-send guard, not a delivery ack. If we can't yet tell (cold/isolated
-  // lookup), we don't false-refuse — the kernel still won't root an out-of-region
-  // topic, so the worst case is a silent no-op, never a wrong-region hotspot.
-  async _assertRegionUsable(topicIdBig, ErrCls, opName) {
-    // Gated (v4.15.0): the region-occupancy rule is OFF by default pre-critical-mass —
-    // most regions have no node yet, so refusing empty-region pub/sub would break nearly
-    // everything. When off, this guard is a no-op and the nearest node roots (pre-4.13.0).
-    // configureRegionLock({ enforce: true }) turns it back on once coverage exists.
-    if (!isRegionLockEnforced()) return;
-    // node.id is a BigInt by construction (DHTNode gate); asId() keeps the topic arg
-    // honest whether it arrived as a BigInt or a hex id, without any local type-guessing.
-    const selfRegion  = (this._node?.id != null) ? extractS2Prefix(asId(this._node.id)) : null;
-    const topicRegion = extractS2Prefix(asId(topicIdBig));
-    if (selfRegion === topicRegion) return;          // we ARE an in-region node → the region is populated
-    let closest = null;
-    try { const a = await this.findKClosest(asId(topicIdBig), 1); closest = (Array.isArray(a) && a.length) ? asId(a[0]) : null; }
-    catch { closest = null; }
-    if (closest == null) return;                     // indeterminate — don't false-refuse
-    if (extractS2Prefix(closest) !== topicRegion) {
-      throw new ErrCls(ErrorCodes.REGION_UNPOPULATED,
-        `peer.${opName}: region 0x${topicRegion.toString(16)} has no operational node — a topic is served only by nodes in its own region`,
-        { context: { topicRegion } });
-    }
   }
 
   /**
@@ -2655,15 +2624,6 @@ export class AxonaPeer extends DHT {
       return { ok: true, scope: 'keyspace' };
     }
     const desc = await this._resolveTopicOrThrow(topic, 'host');
-    // REGION RULE: hosting a specific topic makes this node its root — only valid
-    // if the topic is in THIS node's region (no node roots a foreign region).
-    const selfRegion = (this._node?.id != null) ? extractS2Prefix(this._node.id) : null;
-    const topicRegion = extractS2Prefix(desc.topicIdBig);
-    if (selfRegion !== topicRegion) {
-      throw new PublishError(ErrorCodes.REGION_UNPOPULATED,
-        `peer.host: cannot host a topic in region 0x${topicRegion.toString(16)} from a node in region 0x${(selfRegion ?? 0).toString(16)} — a node roots/hosts only topics in its own region`,
-        { context: { topicRegion, selfRegion } });
-    }
     // ADDRESS RULE — hosting and owning are DISJOINT properties.
     //
     // A node may host a topic only if its own ADDRESS puts it in that topic's

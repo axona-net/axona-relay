@@ -26,7 +26,7 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T } from './constants.js';
+import { T, METRICS_LEASE_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
@@ -162,6 +162,18 @@ export const syncEngineMethods = {
       }
       if (subs.length) payload.subs = subs;
     }
+    // METRICS-LEASE REPLICATION (#47): on a full push, carry the root's remaining
+    // publish lease so a promoted backup keeps emitting metricTopic(T) snapshots across
+    // the transition instead of going metrics-dark until a METRICSON renewal re-routes
+    // to it — which a lingering dead-root can still swallow (#28). Sent as a DURATION,
+    // not an absolute expiry: the backup re-bases it on its own clock, so a constant
+    // offset between separated relays (M4/M1) cancels instead of arming a subscriber-
+    // stale lease or refusing a live one (Vega, review of 3e8537f). ALWAYS present on a
+    // full push (0 = no/lapsed lease) so a push that finds the lease gone CLEARS the
+    // backup's inherited value rather than letting a last-seen expiry outlive demand.
+    if (full && this._replicateSubs && role.isRoot) {
+      payload.metricsRemainingMs = role.metricsOn > this._now() ? (role.metricsOn - this._now()) : 0;
+    }
     if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
     return this._route(targetBig, T.REPLICATE, payload);
   },
@@ -244,6 +256,17 @@ export const syncEngineMethods = {
           inh.set(h, { since: Number.isFinite(e.since) ? e.since : 0, child: !!e.child });
         }
         role._inheritedSubs = inh.size ? inh : null;
+      }
+      // METRICS-LEASE REPLICATION (#47): re-base the principal's remaining lease onto
+      // THIS node's clock and store it for promotion (rootClaim._set). Present ⟺ full
+      // push (0 = principal's lease lapsed → CLEAR, so a stale expiry can't outlive
+      // demand — Vega/Aster release condition). Clamped to METRICS_LEASE_MS so a bad
+      // remaining can never arm a longer-than-legal lease (Aster guard 1). Receiver-now
+      // + remaining adds at most handoff transit, bounded by latency not clock offset —
+      // soft-state tolerance, not exact expiry preservation. Never acted on as a backup.
+      if (this._replicateSubs && Number.isFinite(payload.metricsRemainingMs)) {
+        const rem = Math.min(Math.max(0, payload.metricsRemainingMs), METRICS_LEASE_MS);
+        role._inheritedMetricsOn = rem > 0 ? (this._now() + rem) : 0;
       }
       return;
     }

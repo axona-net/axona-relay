@@ -19,8 +19,6 @@ import {
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
-import { extractS2Prefix } from '../utils/hexid.js';
-import { isRegionLockEnforced } from './constants.js';
 
 export const rootElectionMethods = {
   // ── Root beacon (Pubsub-Root-Beacon-v0.1) ───────────────────────────────
@@ -358,7 +356,6 @@ export const rootElectionMethods = {
           let cBig; try { cBig = idBig(id); } catch { return; }
           if (cBig === this.nodeId) return;                       // confirmed: I am the terminus
           if ((cBig ^ t) >= (this.nodeId ^ t)) return;            // not strictly closer → keep the claim
-          if (isRegionLockEnforced() && extractS2Prefix(cBig) !== extractS2Prefix(t)) return;
           const live = this.axonRoles.get(t);
           if (!live || !live.isRoot) return;                      // already demoted meanwhile
           const hex = lc(idHex(cBig));

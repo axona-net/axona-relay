@@ -195,8 +195,6 @@ export const ErrorCodes = Object.freeze({
   PUBLISH_PAYLOAD_TOO_LARGE: 'PUBLISH_PAYLOAD_TOO_LARGE',
   PUBLISH_INVALID_MESSAGE:   'PUBLISH_INVALID_MESSAGE',
 
-  // Region occupancy (a topic can only be served by nodes in its own region)
-  REGION_UNPOPULATED:        'REGION_UNPOPULATED',              // pub/sub/host to a region with no reachable in-region node
   HOST_NOT_IN_NEIGHBOURHOOD: 'HOST_NOT_IN_NEIGHBOURHOOD',       // host(topic) for a topic this node's ADDRESS is not close to
 
   // Subscribe

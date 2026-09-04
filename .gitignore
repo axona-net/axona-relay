@@ -17,3 +17,8 @@ relay-logs/
 # addresses to this public repo. The durable public record of any override is
 # the #council post announcing it, which is where it belonged all along.
 .council/
+
+# Large local harness/soak output — never commit (GitHub 100MB cap)
+harness/results/
+harness/results-archive-pre72/
+*.jsonl

@@ -242,6 +242,20 @@ export class RootClaim {
       role._inheritedSubs = null;
       if (seeded) this.m._log('info', 'root-inherited-subs', { topic: idHex(role.topicId).slice(0, 12), seeded });
     }
+    // METRICS-LEASE INHERITANCE (#47): a promoted backup adopts the principal's
+    // active publish lease so metricTopic(T) snapshots continue without waiting on a
+    // METRICSON renewal (which a lingering dead-root can swallow). Complements the
+    // path-node seed in promote() (_metricsWanted) — that only covers nodes the
+    // METRICSON transited; a replicated backup was never on that path. Take the
+    // later expiry so neither source clobbers a fresher lease.
+    if (isRoot && this.m._replicateSubs && role._inheritedMetricsOn) {
+      const now = this.m._now();
+      if (role._inheritedMetricsOn > now && role._inheritedMetricsOn > (role.metricsOn || 0)) {
+        role.metricsOn = role._inheritedMetricsOn;
+        this.m._log('info', 'root-inherited-metrics', { topic: idHex(role.topicId).slice(0, 12), until: role.metricsOn });
+      }
+      role._inheritedMetricsOn = 0;
+    }
   }
 
   // ── BACKUP nature transitions (v4.26.0, Phase 7) ──────────────────────────
@@ -325,7 +339,7 @@ export class RootClaim {
     m._announceRoot(role.topicId);
     role.formedAt = m._now(); role.lastVerify = 0;   // promoted claims get an early self-verify too
     const w = m._metricsWanted.get(role.topicId) || 0;
-    if (w > m._now()) role.metricsOn = w;
+    if (w > m._now() && w > (role.metricsOn || 0)) role.metricsOn = w;   // take the later of path-flag vs replicated lease (#47)
   }
 
   // Yield the claim to a strictly-closer live root: demote, pin upstream to it,

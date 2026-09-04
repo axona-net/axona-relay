@@ -45,13 +45,11 @@
 // fan-out, root sets, the old recruit/adopt/promote/dissolve + msgsync/kill-sync.
 // =====================================================================
 
-import { extractS2Prefix }   from '../utils/hexid.js';
 import { RootClaim, roleNature } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { DurabilityLedger } from './durability.js';
-import { isRegionLockEnforced as _regionLock,
-         T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
+import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
          BEACON_FANOUT, BEACON_LAYERS, PENDING_PUB_TTL_MS, COLD_BURST_TRIES,
          COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES,
@@ -75,8 +73,7 @@ import { shadowEnabled } from '../registry/index.js';
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
 // unchanged — AxonaPeer, std/chunk, and src/index.js import them from this
 // module as the stable surface.
-export { MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES,
-         configureRegionLock, isRegionLockEnforced } from './constants.js';
+export { MAX_PUBLISH_BYTES, MAX_RELIABLE_PUBLISH_BYTES } from './constants.js';
 
 
 
@@ -405,21 +402,6 @@ export class AxonaManager {
     this._log('warn', 'undeliverable', { topic: idHex(topicBig).slice(0, 12), type, why });
   }
 
-  // True iff a topic (or any id) shares this node's region byte (S2 prefix). The
-  // region byte is the high byte of every 264-bit id; only same-region nodes may
-  // form a topic's axon-tree infrastructure (root + child relays).
-  _sameRegion(idBigVal) {
-    try { return extractS2Prefix(idBigVal) === extractS2Prefix(this.nodeId); }
-    catch { return false; }
-  }
-
-  // The region GATE used by every enforcement site. When the region lock is off
-  // (default, pre-critical-mass) this is always true → an out-of-region node may
-  // root/relay/host any topic (nearest node wins, pre-4.13.0 behavior). When on,
-  // it collapses to the strict same-region check.
-  _regionOk(idBigVal) {
-    return !_regionLock() || this._sameRegion(idBigVal);
-  }
 
   // ── Axonic admission control (v4.46.0) ─────────────────────────────────
   // ONE gate, THREE reasons, TWO tiers. The neuromorphic layer has had the
@@ -1181,11 +1163,6 @@ export class AxonaManager {
   }
 
   pubsubHost(topicId) {
-    // REGION RULE backstop (when enforced): a node hosts/roots only topics in its region.
-    if (!this._regionOk(topicId)) {
-      this._log('warn', 'host-refused-foreign-region', { topic: idHex(topicId).slice(0, 12) });
-      return;
-    }
     this._hostedTopics.add(topicId);
     // Participate so the node won't be torn down and can root the topic if closest.
     // Route the announce through _sendSubscribe (lookup-assisted → the true root, and

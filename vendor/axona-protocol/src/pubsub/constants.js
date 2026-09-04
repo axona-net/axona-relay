@@ -12,23 +12,12 @@
 export const MAX_PUBLISH_BYTES = 256 * 1024;         // absolute hard ceiling (chars)
 export const MAX_RELIABLE_PUBLISH_BYTES = 15 * 1024; // WebRTC-interop reliable floor (O-5)
 
-// ── Region-occupancy enforcement (v4.13.0), gated (v4.15.0) ─────────────
-// The region rule — a topic may only be rooted by a node IN ITS REGION, and a
-// pub/sub to a region with no reachable in-region node is refused — is correct
-// long-term (it prevents cross-region hotspots). But PRE-critical-mass most
-// regions, even populated ones, have no nodes yet, so enforcing it would refuse
-// nearly every real pub/sub. So it is OFF BY DEFAULT: when disabled, an
-// out-of-region node may root a topic (pre-4.13.0 behavior — nearest node wins),
-// and the peer-side REGION_UNPOPULATED pre-send guard is a no-op. Flip it on with
-// configureRegionLock({ enforce: true }) once the network has enough regional
-// coverage. Gates BOTH layers (manager _regionOk + peer _assertRegionUsable) so
-// disabling it never leaves an empty-region topic silently un-rooted.
-let _regionLockEnforced = false;
-export function configureRegionLock({ enforce } = {}) {
-  _regionLockEnforced = !!enforce;
-  return _regionLockEnforced;
-}
-export function isRegionLockEnforced() { return _regionLockEnforced; }
+// Region is a PLACEMENT HINT ONLY (the S2 high byte folded into every id for
+// routing locality). It is never an eligibility predicate: no code compares
+// regions to gate admission, rooting, seating, storage, repair, or delivery. The
+// closest reachable node roots a topic whatever its region. (The region-occupancy
+// wall and its configureRegionLock/isRegionLockEnforced flag were removed in
+// v4.75.0 — they were never part of the protocol's intent.)
 
 // ── Renewal / attachment (the adaptive-renewal policy) ──────────────────
 export const RENEW_MS        = 60_000;          // re-subscribe cadence CEILING (stable state)

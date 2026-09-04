@@ -159,20 +159,17 @@ export const wireHandlersMethods = {
       if (idBig(via[0]) === this.nodeId) return this.axonRoles.has(idBig(payload.topicId)) ? 'handle' : 'reroute';
       return meta.isTerminal ? 'reroute' : 'forward';      // waypoint dead; I'm just closest to it
     }
-    // Bare topic id → only the terminus handles. REGION RULE: a topic may only be
-    // rooted by a node IN ITS REGION. If I'm the routing terminus but out-of-region,
-    // the topic's region has no node — REFUSE rather than root it here (which would
-    // pull a foreign region's traffic into mine and hotspot my region). The handlers
-    // treat 'reject' as "drop, don't seat/store/root."
+    // Bare topic id → only the terminus handles. The closest reachable node roots
+    // the topic whatever its region — region is a placement hint folded into the id,
+    // never an eligibility gate.
     if (!meta.isTerminal) return 'forward';
-    return this._regionOk(idBig(payload.topicId)) ? 'handle' : 'reject';
+    return 'handle';
   },
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
   async _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -266,7 +263,6 @@ export const wireHandlersMethods = {
   _onUnsub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.UNSUB, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
     if (role) { const s = lc(payload.subscriberId); role.subscribers.delete(s); role.children.delete(s); role.sync.pulledLw.delete(s); }
@@ -321,13 +317,11 @@ export const wireHandlersMethods = {
   // ≥2 leaves. Returning false tells _accept to deepen (delegate to a child)
   // instead of seating the newcomer over capacity.
   _promoteChild(role) {
-    // REGION RULE: the tree's relay infrastructure must be IN-REGION. Only promote
-    // an in-region leaf to a child relay; foreign leaves stay as direct leaves of
-    // the root (they still receive, they just never relay for a region not theirs).
+    // Any leaf may be promoted to a child relay — region is not an eligibility
+    // predicate (it is only a placement hint folded into the id).
     const leaves = [];
     for (const s of role.subscribers.keys()) {
       if (role.children.has(s)) continue;
-      if (!this._regionOk(idBig(s))) continue;   // out-of-region subscriber: never a relay child (when region lock on)
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -353,10 +347,6 @@ export const wireHandlersMethods = {
   _onAdopt(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // routed to me specifically
     const topicBig = idBig(payload.topicId);
-    // REGION RULE: never become a child relay for a topic outside my region (the
-    // tree infrastructure is region-homogeneous). A correct parent won't delegate
-    // here, but refuse defensively so a stale/foreign ADOPT can't spill the tree.
-    if (!this._regionOk(topicBig)) return 'consumed';
     const role = this._rootClaim.adoptChild(topicBig, lc(payload.parent));
     for (const s of (Array.isArray(payload.subs) ? payload.subs : [])) {
       const sh = lc(s.subscriberId);
@@ -371,7 +361,6 @@ export const wireHandlersMethods = {
   async _onPub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -1037,7 +1026,6 @@ export const wireHandlersMethods = {
   async _onKill(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
@@ -1101,7 +1089,6 @@ export const wireHandlersMethods = {
   _onTouch(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.TOUCH, payload); return 'consumed'; }
     return 'consumed';
   },
@@ -1128,7 +1115,6 @@ export const wireHandlersMethods = {
     }
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: topic's region has no node → don't root/seat/store here
     if (d === 'reroute') { this._reroute(T.PULL, payload); return 'consumed'; }
     // Terminus (root/closest) fall-through: answer if we hold it, else a genuine null.
     const hit = role ? (payload.postHash ? role.cache.find(c => c.msgId === payload.postHash) : role.cache[role.cache.length - 1]) : null;
@@ -1215,7 +1201,6 @@ export const wireHandlersMethods = {
     const now = this._now();
     const d = this._topicDecision(payload, meta);
     if (d === 'reroute') { this._reroute(T.METRICSON, payload); return 'consumed'; }
-    if (d === 'reject') return 'consumed';   // out-of-region terminus: no in-region root to arm a metrics lease on
     if (d === 'handle') {
       // Root-beacon last-mile correction (METRICSON): a metrics lease must arm
       // the TRUE root, not mint a competing one at a near-miss node.
