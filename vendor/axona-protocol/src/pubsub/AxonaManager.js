@@ -48,7 +48,7 @@
 import { RootClaim, roleNature } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
-import { DurabilityLedger } from './durability.js';
+import { RoleScopedDurability } from './durability.js';
 import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
          BEACON_FANOUT, BEACON_LAYERS, PENDING_PUB_TTL_MS, COLD_BURST_TRIES,
@@ -194,7 +194,15 @@ export class AxonaManager {
     // one flag carrying two facts: _deliverToApp confirmed the pending entry, so
     // observing DELIVERY discharged DURABILITY. Nothing on the delivery path can
     // reach 'verified' — there is deliberately no function here for it to call.
-    this._durability = new DurabilityLedger({ now });
+    // Per-Role durability (GH #26, council-unanimous): obligations live ON each
+    // Role (role.durability); this facade routes mutations there, enforces the
+    // node budget, and aggregates observationally. Lazy role closures — axonRoles
+    // is initialized below and only read at call time.
+    this._durability = new RoleScopedDurability({
+      now,
+      roles: () => (this.axonRoles ? this.axonRoles.values() : []),
+      roleFor: (t) => this.axonRoles?.get(t) ?? null,
+    });
 
     // REF-1.1 S2.0c Phase 3 — DEFAULT-OFF shadow wiring of the accepted tombstone
     // authorization core (src/pubsub/tombstoneAuth.js). When the flag is set, ONE

@@ -396,7 +396,7 @@ export const repairPlaneMethods = {
       // was the gap Aster found — record() ran only at ingress, so the lifecycle
       // this module documents was never actually executed.
       this._replicateRole(keys[idx], role, bridge, now, budget, idx)
-        .then((rep) => { if (rep) this._durability.recordTopic(keys[idx], rep); })
+        .then((rep) => { if (rep) this._durability.recordTopic(role, rep); })
         .catch(() => {});   // async (findKClosest); never rejects into the tick
     }
     // The first role the budget defers sets this._replicateCursor to its own

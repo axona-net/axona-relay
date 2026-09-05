@@ -30,8 +30,9 @@
 // oldest-first, because a diagnostic that outgrows what it describes stops being
 // a diagnostic — the same lesson as role.attempted.
 
-export const DURABILITY_MAX      = 4096;   // ledger cap; terminal entries evict first
+export const DURABILITY_MAX      = 4096;   // node-wide ledger budget; terminal entries evict first
 export const DURABILITY_ATTEMPTS = 6;      // replication attempts before `expired`
+export const DURABILITY_PER_ROLE_MAX = 1024; // per-Role admission cap (constraint 4) so one hot topic cannot consume the node-wide budget
 
 export class DurabilityLedger {
   constructor({ now = () => Date.now(), max = DURABILITY_MAX,
@@ -228,6 +229,96 @@ export class DurabilityLedger {
       this._m.delete(k);
     }
   }
+
+  // Node-pressure reclamation (constraint 4): drop THIS role's terminal entries
+  // oldest-first to free slack toward the node-wide budget. Role-local — a role
+  // only ever evicts its OWN terminals; live (pending) obligations are untouched.
+  reclaimTerminal() {
+    const terminal = [];
+    for (const [k, e] of this._m) if (e.state !== 'pending') terminal.push([k, e.at]);
+    terminal.sort((a, b) => a[1] - b[1]);
+    for (const [k] of terminal) this._m.delete(k);
+    return terminal.length;
+  }
+}
+
+// =====================================================================
+// RoleScopedDurability — node-wide FACADE over per-Role durability ledgers.
+//
+// David's invariant (council-unanimous, GH #26): a node's topics are TOTALLY
+// independent, so the durability obligation is per-topic state and lives ON the
+// Role (role.durability), never in one manager-global msgId table. There, two
+// topics sharing a content-derived msgId (msgId = sha256({publisher,message}),
+// topic excluded) collided: the second topic's open() no-op'd and its verdict
+// polluted the first's obligation. msgId is unique WITHIN a role, so per-role
+// keying is collision-free by construction — the structural fix, not a composite
+// key masking one node-wide table.
+//
+// This facade holds NO obligation state. It routes every MUTATION to the owning
+// Role's ledger (taken as a Role, never a bare msgId — constraint 1), enforces
+// the node-wide budget at admission with role-local terminal reclaim under
+// pressure (constraint 4), and AGGREGATES the read-only views observationally
+// (constraint 2). Durability never rides HANDOFF (constraint 3) — it is
+// node-local bookkeeping the leaver drains and the heir re-opens for new stamps.
+// =====================================================================
+export class RoleScopedDurability {
+  constructor({ now = () => Date.now(), nodeMax = DURABILITY_MAX,
+                perRoleMax = DURABILITY_PER_ROLE_MAX, maxAttempts = DURABILITY_ATTEMPTS,
+                roles, roleFor } = {}) {
+    this._now = now;
+    this._nodeMax = nodeMax;
+    this._perRoleMax = perRoleMax;
+    this._maxAttempts = maxAttempts;
+    this._roles = roles || (() => []);          // () => iterable<Role> (this node's roles)
+    this._roleFor = roleFor || (() => null);    // (topicBig) => Role | null
+  }
+
+  // Get-or-create the Role's own ledger. No obligation ever lives off a Role.
+  _ledger(role) {
+    if (!role) return null;
+    if (!role.durability) {
+      role.durability = new DurabilityLedger({ now: this._now, max: this._perRoleMax, maxAttempts: this._maxAttempts });
+    }
+    return role.durability;
+  }
+
+  _nodeSize() { let n = 0; for (const r of this._roles()) n += (r.durability?.size ?? 0); return n; }
+
+  // Admit a new obligation, scoped to the Role. Node-wide hard budget: at the
+  // ceiling, ask each role to reclaim its own terminal slack (role-local), then
+  // refuse if the node is still full of LIVE obligations — never thin live work.
+  open(role, msgId) {
+    const L = this._ledger(role);
+    if (!L) return;
+    if (this._nodeSize() >= this._nodeMax) {
+      for (const r of this._roles()) r.durability?.reclaimTerminal();
+      if (this._nodeSize() >= this._nodeMax) return;   // saturated with live obligations
+    }
+    L.open(msgId, role.topicId);
+  }
+
+  record(role, msgId, opts)       { return this._ledger(role)?.record(msgId, opts) ?? null; }
+  recordOne(role, msgId, rep)     { return this._ledger(role)?.recordOne(msgId, rep) ?? null; }
+  recordTopic(role, rep)          { return this._ledger(role)?.recordTopic(role.topicId, rep) ?? null; }
+  noCohortConfigured(role, msgId) { this._ledger(role)?.noCohortConfigured(msgId); }
+  cancel(role, msgId)             { this._ledger(role)?.cancel(msgId); }
+
+  // READ-ONLY diagnostic inspection. Every MUTATION (open/record/cancel) is
+  // strictly role-scoped — that is the #26 fix and constraint 1. A read is
+  // different: it locates an obligation by msgId across this node's roles and
+  // changes nothing, so it cannot recreate the collision. Under a cross-topic
+  // msgId collision it returns the first match — a diagnostic ambiguity, never a
+  // data hazard. Prefer role.durability.state(msgId) when the Role is in hand.
+  _find(msgId) { for (const r of this._roles()) { const e = r.durability?.get(msgId); if (e) return e; } return null; }
+  state(msgId) { return this._find(msgId)?.state ?? null; }
+  get(msgId)   { return this._find(msgId) ?? null; }
+
+  // Observational aggregations (constraint 2): read across roles, mutate nothing.
+  pending()   { let n = 0; for (const r of this._roles()) n += (r.durability?.pending()   ?? 0); return n; }
+  undurable() { let n = 0; for (const r of this._roles()) n += (r.durability?.undurable() ?? 0); return n; }
+  get size()  { return this._nodeSize(); }
+
+  clear() { for (const r of this._roles()) r.durability?.clear(); }
 }
 
 export default DurabilityLedger;

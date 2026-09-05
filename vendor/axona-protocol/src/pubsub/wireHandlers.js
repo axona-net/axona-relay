@@ -456,11 +456,11 @@ export const wireHandlersMethods = {
     // The DURABILITY obligation opens at the stamp and can only be discharged
     // by a cohort verdict below. The DELIVERY leg is _pendingPub and moves
     // independently — that separation is the whole point (Aster, seq 123).
-    this._durability.open(env.msgId, role.topicId);
+    this._durability.open(role, env.msgId);
     // rootReplicas = 0 means cohort replication is NOT configured, so the gate
     // below never runs and nothing could ever discharge this entry. Choose the
     // terminal state explicitly rather than leaving it pending forever.
-    if (!this._rootReplicas) this._durability.noCohortConfigured(env.msgId);
+    if (!this._rootReplicas) this._durability.noCohortConfigured(role, env.msgId);
     this._latStage(env.msgId, 'root:fanout');
     this._rootOrigin(env.msgId, role.epoch);   // publish-time origin-root identity (Aster c755397a)
     if (this._latTrace) this._disc(role.topicId, 'root-members', { msgId: env.msgId, n: role.subscribers.size, members: [...role.subscribers.keys()].map((k) => String(k).slice(0, 12)) });
@@ -531,7 +531,7 @@ export const wireHandlersMethods = {
       // written by me one commit after "capability is DECLARED, never inferred", which
       // is how deeply the habit runs. recordOne shares _classify with the periodic
       // path, so the two callers cannot drift and neither can restate the rule wrong.
-      this._durability.recordOne(env.msgId, rep);
+      this._durability.recordOne(role, env.msgId, rep);
       if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
           topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
@@ -959,7 +959,7 @@ export const wireHandlersMethods = {
     // A retracted message has no durability obligation left. Cancel it BEFORE
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
-    this._durability?.cancel(target);
+    this._durability?.cancel(role, target);
     const killTs = m.killTs ?? this._now();
     const seq = m.seq;                                 // root-assigned dense counter for this kill
     if (role && Number.isFinite(seq) && seq > role.seq) role.seq = seq;   // recover counter (kill occupied a slot)
