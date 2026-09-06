@@ -927,25 +927,142 @@ export class AxonaManager {
     };
   }
 
-  // Subscribe — always sent SYNCHRONOUSLY and immediately (fast path, never blocked
-  // on the network). Pinned (steady state) → via the relay. Unpinned → greedy ([])
-  // toward the bare topic id, every hop routing by its own synaptome.
+  // Subscribe. Pinned (steady state) → renew via the relay, sent immediately.
+  // Unpinned (a fresh or stranded subscriber) → STEER toward the topic-closest
+  // root instead of a bare greedy walk that strands at a local minimum on a
+  // cold/sparse synaptome and replays nothing (measured: fresh since:'all'
+  // ~25-55% vs established 100% — GH #418/#397; cold-subscribe read loss).
   //
-  // NO root-hint via on the unpinned path (v4.64.0). A cached hint pins a waypoint
-  // that was the closest root at ELECTION time; the neuromorphic layer restructures
-  // the mesh continuously, so on resubscribe that waypoint can go from the optimal
-  // path to a poor one — the SUB forced through a node the synaptome has already
-  // routed around. Greedy + synaptome finds the current-best terminal on its own;
-  // trust that. (_rootHint_ still runs its background lookup to warm the WRITE-path
-  // cache — pub/kill/pull/metrics/repair — which is unchanged.)
-  _sendSubscribe(topicBig) {
+  // The v4.64.0 change dropped the root hint from THIS send path (bare greedy
+  // via:[]) on the theory that the synaptome finds the current-best terminal on
+  // its own. On a warm mesh it does; on a COLD one the greedy walk never reaches
+  // the true root, so a fresh subscriber's SUB is never seated and no history is
+  // replayed. Reads have no PENDING_PUB equivalent, so nothing re-sends them.
+  // Two measured recoveries, restored here as one funnel:
+  //
+  //  (a) WARM-HINT FIRST. _rootHint_ background-warms the true-root hint (beacon
+  //      or iterative K-closest). When it has a hint, route the SUB through it —
+  //      synchronously. refreshTick renews unpinned subs every renewFastMs
+  //      (repairPlane §1, `attached ? interval : renewFastMs` → _sendSubscribe),
+  //      so each fast renewal re-routes toward the freshly-resolved root — that
+  //      IS the bounded-read-retry half, no separate retry loop needed.
+  //
+  //  (b) COLD FIRST ATTEMPT, no warm hint yet. Emit the first SUB GREEDY *now*
+  //      (never delayed), THEN run a BOUNDED iterative NETWORK lookup (escapes the
+  //      cold synaptome's local minima — the origin-independent oracle), raced
+  //      against SUB_LOOKUP_MS, and STEER a follow-up SUB toward the resolved root
+  //      if it names a different reachable node. The first SUB is NEVER blocked on
+  //      the lookup: rootElection.js:208 — a SUB that waits on an unbounded lookup
+  //      and misses the join window is never sent → 0% delivery (observed live).
+  //      Emitting greedy first satisfies that invariant unconditionally (the SUB is
+  //      always on the wire immediately); the bounded steer only ADDS reach. An
+  //      earlier draft awaited the lookup BEFORE the first emit — bounded, but it
+  //      still deferred every cold subscribe (including a node subscribing to a
+  //      topic it itself roots) by up to SUB_LOOKUP_MS, a real latency regression.
+  //      Emit-then-steer keeps the first SUB synchronous and reaches the same root.
+  //
+  // Steady state (pinned) is unchanged: no lookup, no hint — renew via the pin.
+  async _sendSubscribe(topicBig) {
     const pinned = this._upstream.get(topicBig) || [];
-    const via = pinned;   // [] when unpinned → greedy toward the topic id
+    let via = pinned;   // [] when unpinned → greedy toward the topic id
+    let steer = false;
+    if (!pinned.length) {
+      // (a) Warm hint (beacon / background-resolved root) — synchronous, if present.
+      const hint = this._rootHint_(topicBig);
+      if (hint) via = [hint];
+      // (b) No warm hint yet → emit greedy now, then steer via a bounded lookup.
+      else if (typeof this.dht.lookup === 'function' || typeof this.dht.findKClosest === 'function') steer = true;
+    }
     const sent = this._emitSubscribe(topicBig, via.slice(0, MAX_VIA));
+    if (steer) this._steerColdSubscribe(topicBig);
     // Only a PINNED renewal can teach us the pin is dead. An unpinned SUB routes
     // toward the topic id itself, and its failure says the mesh is unreachable,
     // not that a waypoint is stale — there is nothing to drop.
     if (pinned.length) this._unpinIfWaypointDead(topicBig, pinned[0], sent);
+  }
+
+  // (b) helper: bounded iterative resolve of the true root for a cold subscribe,
+  // then a follow-up SUB steered toward it. Fire-and-forget from _sendSubscribe so
+  // the first (greedy) SUB is never delayed. Bounded by SUB_LOOKUP_MS. This is the
+  // origin-independent oracle that escapes the greedy local minimum on a cold mesh.
+  //
+  // The greedy first SUB can strand at a spurious terminal that SELF-ROOTS and pins
+  // us to it (the self-root split) — so "am I pinned?" is NOT a sufficient reason to
+  // skip: a pin to a node FARTHER from the topic than the resolved root is exactly
+  // the wrong-root strand we must correct. Steer when unpinned OR when the resolved
+  // root is strictly closer to the topic than our current pin (the root-election
+  // invariant: XOR-closest-to-topic wins). On an idealized/warm mesh the greedy SUB
+  // already reaches the closest node, so b == pin and this is a no-op.
+  _steerColdSubscribe(topicBig) {
+    const SUB_LOOKUP_MS = Number(process.env.SUB_LOOKUP_MS || 600);
+    // Bounded FAST-RETRY burst: the greedy first SUB strands ~60% cold, and a single
+    // steer only covers the case where the lookup resolves on the first try within a
+    // few seconds. refreshTick re-sends unpinned subs only at renewFastMs (~5s), too
+    // slow to beat a fresh reader's window. So burst-retry the resolve+steer at
+    // SUB_RETRY_MS while unattached, up to SUB_RETRY_TRIES — the PENDING_PUB write-path
+    // pattern applied to reads. Cancels the instant a DELIVER pins us (_upstream set)
+    // or the subscription is dropped. Timers unref'd so they never keep the loop alive.
+    const SUB_RETRY_MS = Number(process.env.SUB_RETRY_MS || 1500);
+    const SUB_RETRY_TRIES = Number(process.env.SUB_RETRY_TRIES || 5);
+    // Prefer the iterative NETWORK lookup (crosses the mesh, escapes the cold
+    // synaptome's local minima); fall back to findKClosest. Normalize through
+    // Promise.resolve so an adapter that returns a value SYNCHRONOUSLY (or throws)
+    // is handled identically to an async one — same tolerance _rootHint_ relies on.
+    const resolver = (typeof this.dht.lookup === 'function')
+      ? () => this.dht.lookup(topicBig)
+      : (typeof this.dht.findKClosest === 'function')
+        ? () => this.dht.findKClosest(topicBig, 1)
+        : null;
+    if (!resolver) return;
+    // ONE BUDGET PER COLD CYCLE + GENERATION TOKEN (council bounds, 4.76.1).
+    // repairPlane re-enters _sendSubscribe every renewFastMs (~5s) while a burst still
+    // has retries left — do NOT stack a second steer on a live cycle; the active
+    // bounded budget continues (map presence == a live cycle). A same-topic RESUBSCRIBE
+    // (after unwatch, which eagerly releases the entry) starts a fresh cycle whose gen
+    // obsoletes any late timer still pending from the prior one.
+    if (!this._coldSteerGen) this._coldSteerGen = new Map();
+    if (this._coldSteerGen.has(topicBig)) return;                       // one budget per cold cycle
+    const gen = (this._coldSteerSeq = (this._coldSteerSeq | 0) + 1);
+    this._coldSteerGen.set(topicBig, gen);
+    const mine = () => this._coldSteerGen.get(topicBig) === gen;        // false once superseded/released
+    const release = () => { if (mine()) this._coldSteerGen.delete(topicBig); };
+    const wants = () => this.mySubscriptions.has(topicBig) || this._hostedTopics.has(topicBig) || this._backupTopics.has(topicBig);
+    const reschedule = (n) => {
+      if (n + 1 < SUB_RETRY_TRIES && wants() && mine()) { const t = setTimeout(() => attempt(n + 1), SUB_RETRY_MS); if (t && typeof t.unref === 'function') t.unref(); }
+      else release();                                                   // budget spent / unsubscribed / superseded → free the cycle
+    };
+    const attempt = (n) => {
+      if (!wants() || !mine()) { release(); return; }          // unsubscribed or superseded → stop + free
+      const probe = Promise.resolve().then(resolver).then((r) => {
+        if (r && Array.isArray(r.path)) return r.path.length ? r.path[r.path.length - 1] : null;  // lookup: { path }
+        if (Array.isArray(r)) return r.length ? r[0] : null;                                       // findKClosest: [ids]
+        return null;
+      });
+      Promise.race([
+        probe,
+        new Promise((res) => { const t = setTimeout(() => res(null), SUB_LOOKUP_MS); if (t && typeof t.unref === 'function') t.unref(); }),
+      ]).then((id) => {
+        if (!wants() || !mine()) { release(); return; }
+        let done = false;                                      // DONE = pinned to a node closer-or-equal to the true root (not merely "has a pin" — a pin to a FARTHER decoy is the self-root-split strand we must correct)
+        if (id != null) {
+          try {
+            const b = idBig(id);
+            if (b === this.nodeId) done = true;                // we are the terminus — greedy already lands here
+            else {
+              const pin = this._upstream.get(topicBig) || [];
+              if (pin.length) {
+                let closer = true; try { closer = (b ^ topicBig) < (idBig(pin[0]) ^ topicBig); } catch { closer = true; }
+                if (closer) this._emitSubscribe(topicBig, [lc(idHex(b))]);   // pinned to a FARTHER node → steer toward the true root
+                else done = true;                              // pin already closer-or-equal to the true root → correctly seated
+              } else this._emitSubscribe(topicBig, [lc(idHex(b))]);          // unpinned → steer toward the true root
+            }
+          } catch { /* */ }
+        }
+        if (!done) reschedule(n);                              // timeout/miss/steered → try again until correctly seated or budget spent
+        else release();                                        // correctly seated → free the cycle
+      }).catch(() => reschedule(n));
+    };
+    attempt(0);
   }
 
   // A subscriber must not renew forever toward a corpse.
@@ -1115,6 +1232,7 @@ export class AxonaManager {
 
   pubsubUnsubscribe(topicId) {
     this.mySubscriptions.delete(topicId);
+    this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle so a resubscribe starts clean
     const via = this._upstream.get(topicId) || [];
     this._send(T.UNSUB, { topicId: idHex(topicId), via, subscriberId: idHex(this.nodeId) });
     this.pubsubResetTopicConsumption(topicId);
@@ -1181,6 +1299,7 @@ export class AxonaManager {
   }
   pubsubUnhost(topicId) {
     this._hostedTopics.delete(topicId);
+    this._coldSteerGen?.delete(topicId);   // release any live cold-steer cycle
     const role = this.axonRoles.get(topicId);
     if (role) { const me = lc(idHex(this.nodeId)); role.subscribers.delete(me); role.children.delete(me); }
   }
@@ -1200,7 +1319,7 @@ export class AxonaManager {
     this._send(T.KILL, { topicId: idHex(topicId), via: hint ? [hint] : [], kill });
   }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)
-  pubsubTouch(topicId, touch) { this._send(T.TOUCH, { topicId: idHex(topicId), via: [], touch }); }
+  pubsubTouch(topicId, touch) { const hint = this._rootHint_(topicId); this._send(T.TOUCH, { topicId: idHex(topicId), via: hint ? [hint] : [], touch }); }
 
   requestPull(topicId, postHash = null, { timeoutMs = 1000 } = {}) {
     const corrId = idHex(this.nodeId).slice(0, 8) + ':' + (++this._pullSeq);
@@ -1269,6 +1388,7 @@ export class AxonaManager {
     this._upstream.clear();
     this._rootHint.clear();
     this._pendingPub?.clear();
+    this._coldSteerGen?.clear();
     this._lookupInflight?.clear();
     this._rootBeacons.clear();
     this._beaconSeen.clear();
