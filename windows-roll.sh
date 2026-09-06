@@ -76,11 +76,16 @@ for i in $(seq 1 "$N"); do
   echo "  ✓ slot $i/$N: heir up (kernel v$EXPECT_KERNEL, bridge open) → retired old pid $old"
 done
 
-# 4. verify: exactly N live, every captured old pid gone
+# 4. verify: exactly N live, and N NEW-generation relays writing their logs.
+#    We do NOT re-check the retired old PIDs directly: Windows recycles PIDs, so a
+#    fresh relay can be handed a just-freed old PID and a raw-PID check would false-
+#    abort. census==N (only reachable if all N kills landed) plus N live new-gen
+#    logs is the sound, PID-reuse-immune proof.
 [ "$rolled" -eq "$N" ] || fail "rolled $rolled of $N"
 sleep 3
 AFTER="$(census)"
-alive_old=0; for p in "${OLD_PIDS[@]}"; do tasklist //FI "PID eq $p" 2>/dev/null | grep -q "\b$p\b" && alive_old=$((alive_old+1)) || true; done
 [ "$AFTER" -eq "$N" ] || fail "post-roll census $AFTER != $N — read the logs, do not assume"
-[ "$alive_old" -eq 0 ] || fail "$alive_old old relay(s) still alive — roll incomplete"
-echo "✓ WINDOWS ROLL COMPLETE: $N/$N on kernel v$EXPECT_KERNEL; all $N prior relays retired (node-datachannel $ndc)"
+live=0; now=$(date +%s)
+for f in "relay-logs/$GEN"-*.log; do m=$(stat -c %Y "$f" 2>/dev/null || echo 0); [ $((now-m)) -lt 120 ] && live=$((live+1)); done
+[ "$live" -eq "$N" ] || fail "only $live/$N new-generation relays writing logs — roll incomplete"
+echo "✓ WINDOWS ROLL COMPLETE: $N/$N on kernel v$EXPECT_KERNEL (new gen $GEN); node-datachannel $ndc"
