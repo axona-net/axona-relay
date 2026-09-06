@@ -34,6 +34,11 @@ fail(){ echo "✗ ABORT: $*" >&2; exit 1; }
 census(){ tasklist //FI "IMAGENAME eq node.exe" 2>/dev/null | grep -c "node.exe" || true; }
 pids(){ tasklist //FI "IMAGENAME eq node.exe" //FO CSV //NH 2>/dev/null | sed 's/"//g' | awk -F, '{print $2}' | grep -E '^[0-9]+$' || true; }
 
+# Fleet cadence standard v1 — two-tier ready gate + jitter (lib rides the checkout).
+source "$(dirname "$0")/fleet-cadence.sh"
+# Reader for the standard: echo a relay gen-log's most-recent state line.
+read_state(){ grep -oE "state=[a-z]+ peers=[0-9]+ synaptome=[0-9]+ mesh\(open/bound\)=[0-9]+/[0-9]+" "$1" 2>/dev/null | tail -1; }
+
 N="${N:?N=<live relay count> is REQUIRED — no default (the roll-fleet rule)}"
 [ -n "${EXPECT_KERNEL:-}" ] || fail "EXPECT_KERNEL=<x.y.z> is REQUIRED"
 
@@ -64,16 +69,14 @@ rolled=0
 for i in $(seq 1 "$N"); do
   LOG="relay-logs/$GEN-$i.log"
   RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 nohup node src/index.js >> "$LOG" 2>&1 &
-  ok=0
-  for _ in $(seq 1 "$GRACE"); do
-    if grep -q "kernel v$EXPECT_KERNEL" "$LOG" 2>/dev/null && grep -q "bridge-socket-open" "$LOG" 2>/dev/null; then ok=1; break; fi
-    sleep 1
-  done
-  [ "$ok" -eq 1 ] || fail "slot $i: new relay ($LOG) showed no 'kernel v$EXPECT_KERNEL' + 'bridge-socket-open' within ${GRACE}s — NOT retiring any old relay"
+  # ADVANCE gate: the heir must bridge+bond before its predecessor is retired.
+  await_advance read_state "$LOG" || fail "slot $i: heir ($LOG) failed ADVANCE gate — NOT retiring any old relay"
+  grep -q "kernel v$EXPECT_KERNEL" "$LOG" 2>/dev/null || fail "slot $i: heir ($LOG) missing 'kernel v$EXPECT_KERNEL' banner — NOT retiring any old relay"
   old="${OLD_PIDS[$((i-1))]}"
   taskkill //PID "$old" //F >/dev/null 2>&1 || echo "  (warn: taskkill pid $old nonzero — end census will catch a discrepancy)"
   rolled=$((rolled+1))
-  echo "  ✓ slot $i/$N: heir up (kernel v$EXPECT_KERNEL, bridge open) → retired old pid $old"
+  echo "  ✓ slot $i/$N: heir bridged+bonded (kernel v$EXPECT_KERNEL) → retired old pid $old"
+  cadence_jitter
 done
 
 # 4. verify: exactly N live, and N NEW-generation relays writing their logs.
@@ -85,7 +88,8 @@ done
 sleep 3
 AFTER="$(census)"
 [ "$AFTER" -eq "$N" ] || fail "post-roll census $AFTER != $N — read the logs, do not assume"
-live=0; now=$(date +%s)
-for f in "relay-logs/$GEN"-*.log; do m=$(stat -c %Y "$f" 2>/dev/null || echo 0); [ $((now-m)) -lt 120 ] && live=$((live+1)); done
-[ "$live" -eq "$N" ] || fail "only $live/$N new-generation relays writing logs — roll incomplete"
-echo "✓ WINDOWS ROLL COMPLETE: $N/$N on kernel v$EXPECT_KERNEL (new gen $GEN); node-datachannel $ndc"
+# OPEN backstop — every new-gen relay must reach full state=open or the roll HALTS.
+for i in $(seq 1 "$N"); do
+  await_open read_state "relay-logs/$GEN-$i.log" || fail "slot $i (relay-logs/$GEN-$i.log) never reached state=open — HALT"
+done
+echo "✓ WINDOWS ROLL COMPLETE: $N/$N on kernel v$EXPECT_KERNEL, all state=open (new gen $GEN); node-datachannel $ndc"
