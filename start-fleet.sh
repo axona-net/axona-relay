@@ -27,6 +27,11 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 SETTLE="${SETTLE:-10}"     # seconds to wait before verifying; raise on a slow host
 mkdir -p relay-logs
 
+# Fleet cadence standard v1 (ops/FLEET-CADENCE.md): start-fleet already stages —
+# SEAT_GATE holds each launch until the prior relay's state=open. It adopts the
+# shared lib for cadence_jitter between staged launches.
+source "$(dirname "$0")/fleet-cadence.sh"
+
 # Resolve node ONCE, up front, and fail loud. Launching N processes that each
 # die on a missing interpreter produces N identical errors buried in N logs;
 # one check produces one message naming the fix.
@@ -136,6 +141,7 @@ for n in $(seq 1 "$N"); do
   else
     sleep 1
   fi
+  cadence_jitter
 done
 
 # ---- VERIFY. Nothing below trusts the launch loop's exit status. ----

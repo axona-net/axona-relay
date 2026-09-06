@@ -28,6 +28,12 @@ BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
 EXPECT_KERNEL="${EXPECT_KERNEL:-}"
 
 census() { tasklist //FI "IMAGENAME eq node.exe" 2>/dev/null | grep -c "node.exe" || true; }
+fail(){ echo "✗ ABORT: $*" >&2; exit 1; }
+
+# Fleet cadence standard v1 (ops/FLEET-CADENCE.md): staged start gated on
+# bridged+bond, then an open backstop. No burst.
+source "$(dirname "$0")/fleet-cadence.sh"
+read_state(){ grep -oE "state=[a-z]+ peers=[0-9]+ synaptome=[0-9]+ mesh\(open/bound\)=[0-9]+/[0-9]+" "$1" 2>/dev/null | tail -1; }
 
 if [ "${1:-}" = "census" ]; then
   echo "node.exe processes: $(census)"
@@ -41,29 +47,25 @@ BEFORE=$(census)
 [ "$BEFORE" -eq 0 ] || { echo "ABORT: $BEFORE node.exe already running — this script cold-starts only. A live fleet needs the roll analog (not yet written)."; exit 1; }
 
 mkdir -p relay-logs
-echo "→ starting $N relay(s): region=$REGION bridge=$BRIDGE (Windows/git-bash)"
+echo "→ starting $N relay(s) STAGED: region=$REGION bridge=$BRIDGE (Windows/git-bash)"
+GEN="win-$(date +%Y%m%d-%H%M%S)"   # fresh per-run logs so banner/state greps can't hit stale content
 declare -a SLOT_LOG
 for n in $(seq 1 "$N"); do
-  LOG="relay-logs/relay-win-$n.log"
+  LOG="relay-logs/$GEN-$n.log"
   SLOT_LOG[$n]="$LOG"
   RELAY_REGION="$REGION" BRIDGE_URL="$BRIDGE" RELAY_TUI=0 \
     nohup node src/index.js >> "$LOG" 2>&1 &
-  echo "   relay-win-$n launched"
-  sleep 1
+  echo "   relay-win-$n launched ($LOG)"
+  # STAGED (no burst): gate on this relay bridging+bonding before the next.
+  await_advance read_state "$LOG" || fail "relay-win-$n did not bridge+bond within ${ADVANCE_CAP}s ($LOG)"
+  grep -q "kernel v$EXPECT_KERNEL" "$LOG" 2>/dev/null || fail "relay-win-$n missing kernel v$EXPECT_KERNEL banner ($LOG)"
+  cadence_jitter
 done
 
-echo "→ verifying (12s settle)…"
-sleep 12
-OK=0
+echo "→ OPEN backstop + census…"
 for n in $(seq 1 "$N"); do
-  if grep -q "kernel v$EXPECT_KERNEL" "${SLOT_LOG[$n]}" 2>/dev/null; then
-    OK=$((OK + 1))
-  else
-    echo "   ✗ relay-win-$n: no banner with kernel v$EXPECT_KERNEL — check ${SLOT_LOG[$n]}"
-  fi
+  await_open read_state "${SLOT_LOG[$n]}" || fail "relay-win-$n never reached state=open — HALT (${SLOT_LOG[$n]})"
 done
 AFTER=$(census)
-echo "banners verified: $OK/$N   node.exe census: $AFTER"
-[ "$OK" -eq "$N" ] && [ "$AFTER" -eq "$N" ] && { echo "✓ fleet up — $N/$N verified"; exit 0; }
-echo "✗ fleet INCOMPLETE — do not assume; read the logs."
-exit 1
+[ "$AFTER" -eq "$N" ] || fail "census $AFTER != $N — read the logs, do not assume"
+echo "✓ fleet up — $N/$N bridged, bonded, state=open (gen $GEN)"

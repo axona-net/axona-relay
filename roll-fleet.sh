@@ -49,9 +49,15 @@ cd "$(dirname "$0")"
 
 REGION="${REGION:-eagle}"
 BRIDGE="${BRIDGE:-wss://testnet.axona.net}"
-INTEGRATE_TIMEOUT="${INTEGRATE_TIMEOUT:-90}"   # s to wait for a replacement to join
+INTEGRATE_TIMEOUT="${INTEGRATE_TIMEOUT:-180}"  # s for a replacement to reach state=open (warm-root reconcile can take minutes; was 90)
 LEAVE_TIMEOUT="${LEAVE_TIMEOUT:-45}"           # s to wait for a graceful leave
-SETTLE="${SETTLE:-3}"                          # s between slots, after both checks pass
+SETTLE="${SETTLE:-3}"                          # (retained; inter-slot pacing is now cadence_jitter)
+
+# Fleet cadence standard v1 (ops/FLEET-CADENCE.md): roll-fleet PREDATES and
+# EXCEEDS the standard — it gates each replacement on full state=open + bound
+# mesh BEFORE retiring its predecessor (stricter than the two-tier ADVANCE
+# gate). It adopts the shared lib only for cadence_jitter (inter-slot pacing).
+source "$(dirname "$0")/fleet-cadence.sh"
 
 fail() { echo "✗ ABORT: $*" >&2; exit 1; }
 
@@ -147,7 +153,7 @@ for old in "${OLD_PIDS[@]}"; do
   NOW="$(live_pids | wc -l | tr -d ' ')"
   [ "$NOW" -eq "$EXPECT" ] || fail "slot $slot: census reads $NOW, expected $EXPECT. Stopping so you can look before anything else moves."
   echo "  ✓ slot $slot/$MEASURED: pid $old → $newpid  (census $NOW/$EXPECT)"
-  sleep "$SETTLE"
+  cadence_jitter
 done
 
 # ── Final verification: count + every new banner ────────────────────────────
