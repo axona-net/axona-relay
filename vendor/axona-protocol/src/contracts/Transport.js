@@ -202,7 +202,11 @@ export class Transport {
    * Register a callback for peer-died events. Multiple handlers
    * allowed; each receives every event.
    *
-   * @param {(peerId: bigint) => void} handler
+   * The optional second argument is the transport-level close reason
+   * (e.g. 'pong-timeout', 'send-failed', 'pc-closed', 'peer-left',
+   * 'bridge-closed'); transports that cannot attribute a cause omit it.
+   *
+   * @param {(peerId: bigint, reason?: string) => void} handler
    * @returns {() => void} function to unsubscribe this handler
    */
   onPeerDied(handler) {

@@ -1,0 +1,67 @@
+storm-correlation canary — kernel 4.67.1 (checkout) → wss://testnet.axona.net
+arm: maintenance ON (kNear=5, tick=5000ms, maxPerTick=3); guard OFF (the historical configuration); run 1200s
+connected: synaptome=8 in=0 ready={"ready":true,"peers":8,"ms":1519,"reason":"minPeers"}
+[13:53:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:53:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:54:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:54:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:55:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:55:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:56:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:56:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:57:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:57:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:58:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:58:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:59:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[13:59:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:00:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:00:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:01:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:01:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:02:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:02:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:03:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:03:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:04:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:04:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:05:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:05:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:06:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:06:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:07:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:07:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:08:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:08:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:09:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:09:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:10:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:10:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:11:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:11:47] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+[14:12:17] syn=23 cand=14 neverBind=7 attempts=22 maxNB=1 overBudget=0
+
+=== FINAL ===
+{
+ "guard": false,
+ "syn": 23,
+ "inSyn": 0,
+ "candidates": 14,
+ "neverBinders": 7,
+ "attemptsTotal": 22,
+ "boundEvents": 23,
+ "diedEvents": 0,
+ "maxAttemptsAnyCand": 5,
+ "maxAttemptsNeverBinder": 1,
+ "neverBindersOverBudget": 0,
+ "neverBinderAttemptBuckets": {
+  "1": 7,
+  "2-4": 0,
+  "5-9": 0,
+  "10-19": 0,
+  "20+": 0
+ }
+}
+
+VERDICT INPUTS: never-binders=7; max attempts to a never-binder=1; unguarded (over-budget count = the live storm signal)
+jsonl: results/storm-canary-armA-unguarded.jsonl

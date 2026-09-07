@@ -1048,8 +1048,13 @@ export class MeshManager {
     // went open → closed; retiring a never-opened peer (failed ICE) does not
     // count as a peer death because no one was using it.
     if (notifyLost && wasOpen) {
+      // Carry the close reason (pong-timeout / send-failed / pc-closed /
+      // peer-left / negotiation-timeout / dispose / reset / disconnect) to the
+      // listener. The reason is computed at every _retire call site but was
+      // dropped here until 4.76.3, so an eviction was a nameless death in the
+      // logs — see peer-died-evicted enrichment in AxonaPeer.
       for (const cb of this._peerLostListeners) {
-        try { cb(peerId); }
+        try { cb(peerId, reason); }
         catch (err) {
           this._log('peer-lost-listener-threw', {
             peerId, err: err.message,

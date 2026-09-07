@@ -17,6 +17,10 @@
 import '../src/polyfill.js';
 process.env.LAT_TRACE = '1';                      // MUST be set before the kernel constructs
 import { connectPeer } from '../src/ops.js';
+import { deriveTopicIdBig } from '../vendor/axona-protocol/src/pubsub/post.js';
+import { idBig } from '../vendor/axona-protocol/src/pubsub/ids.js';
+
+const HOST_SUB = process.env.HOST_SUB === '1';    // confirmation #1: make the sub peer the root
 
 const BRIDGE   = process.env.BRIDGE || 'wss://testnet.axona.net';
 const REGION   = process.env.REGION || 'eagle';
@@ -41,9 +45,29 @@ for (const [tag, h] of [['sub', sub], ['pub', pub]]) {
 }
 console.error('connected', sub.author.authorId.slice(0, 6), pub.author.authorId.slice(0, 6));
 
+// Confirmation #1: pick a topic NAME whose id is closest to the sub peer's nodeId
+// (over K tries) so the sub peer wins the keyspace address rule and roots the
+// topic locally. Then pub:send→root:recv isolates publish→root routing, and
+// root:recv→deliver:app is local ingest+deliver — no remote root→sub leg.
+const grindTopicNear = async (nodeBig, label) => {
+  let best = null;
+  for (let k = 0; k < 6000; k++) {
+    const name = `harness/lat-${label}-h${k}`;
+    const tid = await deriveTopicIdBig({ region: REGION, name });
+    const d = tid ^ nodeBig;
+    if (best === null || d < best.d) best = { name, d };
+  }
+  return best.name;
+};
+
 const runPhase = async (label, settleMs) => {
-  const topic = `harness/lat-${label}-${sub.author.authorId.slice(0, 6)}`;
+  let topic = `harness/lat-${label}-${sub.author.authorId.slice(0, 6)}`;
+  if (HOST_SUB) topic = await grindTopicNear(idBig(sub.nodeId), label);
   const desc = { region: REGION, name: topic };
+  if (HOST_SUB) {
+    try { const r = await sub.peer.host(desc); console.error(`[${label}] hosted (sub is root):`, JSON.stringify(r)); }
+    catch (e) { console.error(`[${label}] host REFUSED (${e?.code || e?.message}) — sub not root, root:* will be a fleet relay`); }
+  }
   const got = new Map();                              // msgId -> app-callback wall ms
   await sub.peer.sub(desc, (env) => { const id = env?.msgId; if (id) got.set(id, Date.now()); }, { since: 'all' });
   if (settleMs) { console.error(`[${label}] settling ${settleMs}ms`); await sleep(settleMs); }
@@ -70,6 +94,11 @@ const HOPS = [
   ['pub:send', 'sub:recv', 'WIRE + fleet forward tree (black box)'],
   ['sub:recv', 'deliver:app', 'subscriber-local dispatch'],
   ['deliver:app', 'deliver:cb', 'app callback'],
+  // Confirmation #1 split (present only when the root is one of our peers):
+  ['pub:send', 'root:recv', 'publish → ROOT routing'],
+  ['root:recv', 'root:verified', 'root sig verify'],
+  ['root:verified', 'root:fanout', 'root ingest → fanout'],
+  ['root:fanout', 'deliver:app', 'root local deliver (sub==root)'],
   ['pub:built', 'deliver:cb', 'END-TO-END'],
 ];
 

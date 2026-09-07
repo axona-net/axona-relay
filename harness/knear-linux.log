@@ -1,0 +1,12 @@
+[axona-linux] arm-roll START target=5 01:06:34Z
+[axona-linux] --- armed roll 1/5 01:06:34Z ---
+[axona-linux]   post-roll census=5 (want 5)
+[axona-linux] --- armed roll 2/5 01:08:00Z ---
+[axona-linux]   post-roll census=5 (want 5)
+[axona-linux] --- armed roll 3/5 01:09:26Z ---
+[axona-linux]   post-roll census=5 (want 5)
+[axona-linux] --- armed roll 4/5 01:10:53Z ---
+[axona-linux]   post-roll census=5 (want 5)
+[axona-linux] --- armed roll 5/5 01:12:19Z ---
+[axona-linux]   post-roll census=5 (want 5)
+[axona-linux] arm-roll DONE 01:13:45Z

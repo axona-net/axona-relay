@@ -1,0 +1,70 @@
+storm-correlation canary — kernel 4.67.1 (checkout) → wss://testnet.axona.net
+arm: maintenance ON (kNear=5, tick=5000ms, maxPerTick=3); guard OFF (the historical configuration); run 1200s
+connected: synaptome=19 in=0 ready={"ready":true,"peers":10,"ms":1506,"reason":"minPeers"}
+induced churn: dropping 3 nearest every 25000ms (canary-side only)
+[20:23:41] syn=18 cand=5 neverBind=5 attempts=13 maxNB=5 overBudget=2
+[20:24:11] syn=16 cand=8 neverBind=7 attempts=29 maxNB=5 overBudget=4
+[20:24:41] syn=13 cand=8 neverBind=7 attempts=32 maxNB=5 overBudget=4
+[20:25:11] syn=10 cand=8 neverBind=7 attempts=38 maxNB=5 overBudget=4
+[20:25:41] syn=7 cand=8 neverBind=7 attempts=44 maxNB=5 overBudget=4
+[20:26:11] syn=1 cand=8 neverBind=7 attempts=50 maxNB=5 overBudget=4
+[20:26:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:27:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:27:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:28:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:28:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:29:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:29:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:30:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:30:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:31:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:31:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:32:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:32:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:33:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:33:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:34:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:34:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:35:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:35:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:36:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:36:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:37:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:37:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:38:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:38:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:39:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:39:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:40:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:40:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:41:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:41:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:42:11] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+[20:42:41] syn=0 cand=8 neverBind=7 attempts=54 maxNB=5 overBudget=4
+
+=== FINAL ===
+{
+ "guard": false,
+ "syn": 0,
+ "inSyn": 0,
+ "candidates": 8,
+ "neverBinders": 7,
+ "attemptsTotal": 54,
+ "boundEvents": 22,
+ "diedEvents": 2,
+ "maxAttemptsAnyCand": 31,
+ "maxAttemptsNeverBinder": 5,
+ "neverBindersOverBudget": 4,
+ "churnRounds": 47,
+ "churnDrops": 22,
+ "neverBinderAttemptBuckets": {
+  "1": 3,
+  "2-4": 0,
+  "5-9": 4,
+  "10-19": 0,
+  "20+": 0
+ }
+}
+
+VERDICT INPUTS: never-binders=7; max attempts to a never-binder=5; unguarded (over-budget count = the live storm signal)
+jsonl: results/storm-canary-churnA-unguarded.jsonl

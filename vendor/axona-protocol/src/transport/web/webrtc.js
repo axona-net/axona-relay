@@ -55,7 +55,7 @@ const MAX_REQ_ID = 0x7fffffff;
  * @typedef {object} MeshLike
  * @property {(meshId: string, msg: any) => void}     send
  * @property {(cb: (meshId: string, msg: any) => void) => () => void} onMessage
- * @property {(cb: (meshId: string) => void) => () => void}           onPeerLost
+ * @property {(cb: (meshId: string, reason?: string) => void) => () => void} onPeerLost
  * @property {(cb: (peers: any[]) => void) => () => void}              onChange
  * @property {(meshId: string) => boolean}                              isConnected
  * @property {(meshId: string) => number}                               getLatency
@@ -158,7 +158,7 @@ export class WebRTCTransport extends Transport {
         { context: { localNodeId: String(this._localNodeId) } });
     }
     this._unsubMessage  = this._mesh.onMessage((peerId, msg) => this._onMessage(peerId, msg));
-    this._unsubPeerLost = this._mesh.onPeerLost((peerId)      => this._onPeerLost(peerId));
+    this._unsubPeerLost = this._mesh.onPeerLost((peerId, reason) => this._onPeerLost(peerId, reason));
     this._started = true;
     this._log('transport-started', { localNodeId: String(this._localNodeId) });
   }
@@ -454,7 +454,7 @@ export class WebRTCTransport extends Transport {
       return false;
     }
     for (const h of this._peerDiedHandlers) {
-      try { h(nodeId); }
+      try { h(nodeId, 'peer-departed-hint'); }
       catch (err) { this._log('peer-died-handler-threw', { reportedId: String(nodeId), err: err.message }); }
     }
     return true;
@@ -567,7 +567,7 @@ export class WebRTCTransport extends Transport {
     });
   }
 
-  _onPeerLost(meshId) {
+  _onPeerLost(meshId, reason) {
     const nodeId = this._nodeIdByMeshId.get(meshId);
     // Only fire peer-died when this channel is the ACTIVE route for its
     // identity.  A deduped-duplicate loser had its reverse mapping cleared
@@ -578,7 +578,7 @@ export class WebRTCTransport extends Transport {
     const isActiveRoute = nodeId !== undefined && this._meshIdByNodeId.get(nodeId) === meshId;
     if (isActiveRoute) {
       for (const h of this._peerDiedHandlers) {
-        try { h(nodeId); }
+        try { h(nodeId, reason); }
         catch (err) {
           this._log('peer-died-handler-threw', { reportedId: String(nodeId), err: err.message });
         }

@@ -1,0 +1,18 @@
+[axona-win] arm-roll START target=12 16:49:22Z
+[axona-win] --- armed roll 1/12 16:49:22Z ---
+WARNING: Task may not run because /ST is earlier than current time.
+[axona-win]   post-roll census=20 (want 12)
+[axona-win] --- armed roll 2/12 16:50:23Z ---
+WARNING: Task may not run because /ST is earlier than current time.
+[axona-win]   post-roll census=20 (want 12)
+[axona-win] --- armed roll 3/12 16:51:25Z ---
+WARNING: Task may not run because /ST is earlier than current time.
+[axona-win]   post-roll census=20 (want 12)
+[axona-win] --- armed roll 4/12 16:52:26Z ---
+WARNING: Task may not run because /ST is earlier than current time.
+[axona-win]   post-roll census=20 (want 12)
+[axona-win] --- armed roll 5/12 16:53:27Z ---
+WARNING: Task may not run because /ST is earlier than current time.
+[axona-win]   post-roll census=20 (want 12)
+[axona-win] --- armed roll 6/12 16:54:29Z ---
+WARNING: Task may not run because /ST is earlier than current time.

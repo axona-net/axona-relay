@@ -539,7 +539,7 @@ export class AxonaPeer extends DHT {
     // routing table honest (every synapse is a live channel) the moment a peer
     // goes; the synapse re-admits via onPeerBound if the channel re-forms.
     if (transport && typeof transport.onPeerDied === 'function') {
-      this._onPeerDiedUnsub = transport.onPeerDied((peerBig) => {
+      this._onPeerDiedUnsub = transport.onPeerDied((peerBig, reason) => {
         try {
           const dead = (typeof peerBig === 'bigint') ? peerBig
             : (typeof peerBig === 'string' && isHexId(peerBig)) ? fromHex(peerBig) : null;
@@ -551,7 +551,10 @@ export class AxonaPeer extends DHT {
           node.connections?.delete(dead);
           (node._deadPeers ??= new Set()).add(dead);
           this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
-          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead) });
+          // reason (4.76.3): the transport-level close cause, threaded through
+          // mesh _retire → onPeerLost. Transports that do not supply one (sim,
+          // pre-4.76.3) log 'unknown'. Makes eviction churn attributable.
+          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
           this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
 
         } catch (err) {

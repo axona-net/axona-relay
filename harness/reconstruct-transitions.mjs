@@ -62,33 +62,41 @@ function reconstruct({ tx, rx, manifests, nodeStart = [] }, opts = {}) {
   const censusFull = new Set(), censusPfx = new Set();
   for (const n of nodeStart.filter(scoped)) { if (!n.transportId) continue; censusFull.add(n.transportId); censusPfx.add(pfx(n.transportId)); }
 
-  // Index rx by (msgId, edgeAttemptId).
+  // Index rx by exact edge (msgId,edgeAttemptId) AND by msgId (fallback for driver-emitted
+  // sender rows that carry no edgeAttemptId — each probe msgId is unique, so a single-edge
+  // L1 probe joins exactly on msgId).
   const rxByEdge = new Map();
-  for (const r of rx) { if (!r.msgId || !r.edgeAttemptId) continue; rxByEdge.set(`${r.msgId}|${r.edgeAttemptId}`, r); }
-  const txSeen = new Set();
+  const rxByMsg = new Map();
+  for (const r of rx) {
+    if (!r.msgId) continue;
+    if (r.edgeAttemptId) rxByEdge.set(`${r.msgId}|${r.edgeAttemptId}`, r);
+    if (!rxByMsg.has(r.msgId)) rxByMsg.set(r.msgId, []); rxByMsg.get(r.msgId).push(r);
+  }
+  const rxConsumed = new Set();     // rx objects already matched to a tx
 
   const tally = { CROSSED: 0, NOT_ATTEMPTED: 0, ATTEMPTED_FAILED: 0, ACCEPTED_NO_RX: 0, RX_ORPHAN: 0 };
   const edgesByMsg = new Map();     // msgId -> [{from,to,klass,outcome}]
   const addEdge = (msgId, e) => { if (!edgesByMsg.has(msgId)) edgesByMsg.set(msgId, []); edgesByMsg.get(msgId).push(e); };
 
   for (const t of tx) {
-    if (!t.msgId || !t.edgeAttemptId) continue;
-    const key = `${t.msgId}|${t.edgeAttemptId}`;
-    txSeen.add(key);
-    const r = rxByEdge.get(key);
+    if (!t.msgId) continue;
+    // A tx WITH an edgeAttemptId must join that exact edge — a missing exact rx is loss,
+    // never a msgId-fallback (which would grab an unrelated receipt). Only edgeAttemptId-less
+    // driver rows fall back to a msgId join (each probe msgId is unique → exact for L1).
+    let r;
+    if (t.edgeAttemptId) r = rxByEdge.get(`${t.msgId}|${t.edgeAttemptId}`) || null;
+    else r = (rxByMsg.get(t.msgId) || []).find((x) => !rxConsumed.has(x)) || null;
     let klass;
-    if (r) klass = 'CROSSED';
+    if (r) { klass = 'CROSSED'; rxConsumed.add(r); }
     else if (t.disposition === 'not-attempted') klass = 'NOT_ATTEMPTED';
     else if (t.disposition === 'attempted-failed') klass = 'ATTEMPTED_FAILED';
     else klass = 'ACCEPTED_NO_RX';
     tally[klass]++;
     addEdge(t.msgId, { from: pfx(t.from), to: pfx(t.to), hopIdx: t.hopIdx ?? null, klass, outcome: t.outcome ?? null });
   }
-  // rx rows with no matching tx = sender-side coverage gap
+  // rx rows never matched to any tx = sender-side coverage gap
   for (const r of rx) {
-    if (!r.msgId || !r.edgeAttemptId) continue;
-    const key = `${r.msgId}|${r.edgeAttemptId}`;
-    if (txSeen.has(key)) continue;
+    if (!r.msgId || rxConsumed.has(r)) continue;
     tally.RX_ORPHAN++;
     addEdge(r.msgId, { from: pfx(r.from), to: pfx(r.to), hopIdx: null, klass: 'RX_ORPHAN', outcome: null });
   }
