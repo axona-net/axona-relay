@@ -312,6 +312,14 @@ export const BEACON_SEEN_MS  = 60_000;          // flood-dedup retention
 // node ⇒ seed a VERIFIED root pointer + demote + re-home + push cache up.
 // Batched per tick so a many-rooted relay doesn't storm lookups; each lookup is
 // fired non-blocking (NEVER awaited in the tick — the 4.18.1 lesson).
+// Routed-outcome observability (#58 D3). routeMessage reports failure by
+// resolving {consumed:false} and logs nothing, so routed reachability was
+// unmeasurable in production. Counts are tallied at the single _route
+// containment point and reported in bulk, never per failure — a node that
+// cannot reach a nominee retries every tick, so per-failure lines would flood.
+export const ROUTE_FAIL_TRACK_MAX = 16;         // distinct failing targets retained (bounded map)
+export const ROUTE_REPORT_TOP     = 3;          // worst offenders named in each summary
+
 export const ROOT_VERIFY_FIRST_MS = 6_000;      // first verify after root-formed
 export const ROOT_VERIFY_MS       = 45_000;     // steady-state re-verify cadence
 export const ROOT_VERIFY_BATCH    = 3;          // max verify lookups launched per tick

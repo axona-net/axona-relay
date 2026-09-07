@@ -225,6 +225,43 @@ async function main() {
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
+  // OBSERVABILITY (#58/#60): an on-demand health dump, because a headless relay
+  // had NO query surface at all. health() carries per-role children counts and
+  // the mesh view, but RELAY_TUI=0 means nothing renders it and the process
+  // listens on no port — so in production the values existed and could not be
+  // reached. Asked and answered on 2026-09-07: whether a yielding root has a
+  // seated subtree was unanswerable on the live fleet.
+  //
+  // A SIGNAL, deliberately, not an HTTP endpoint: no listener, no port, no auth
+  // surface, no new dependency, and it rides the log pipeline that is already
+  // collected. Query with:
+  //     systemctl kill -s SIGUSR1 axona-relay@<region>.service
+  // then read the `health-dump` line from journalctl. Read-only; it cannot
+  // change relay behaviour, and a throw here must never reach the relay.
+  process.on('SIGUSR1', () => {
+    try {
+      if (!peer) { onLog('warn', 'health-dump-unavailable', { why: 'peer not yet connected' }); return; }
+      const h = peer.health();
+      const roles = Array.isArray(h?.roles) ? h.roles : [];
+      onLog('info', 'health-dump', {
+        peers: h?.peers?.length ?? h?.synaptomeSize ?? null,
+        synaptome: h?.synaptomeSize ?? null,
+        subscriptions: h?.subscriptions ?? null,   // this node's OWN subs — NOT seated downstream
+        roles: roles.length,
+        // The quantity #60 turns on: seated downstream per role. `subs` in the
+        // status line never measured this; these are role.children counts.
+        seated: roles.map((r) => ({
+          topic: String(r.topicId ?? '').slice(0, 12),
+          isRoot: !!r.isRoot,
+          nature: r.nature ?? null,
+          kids: Array.isArray(r.children) ? r.children.length : (r.children ?? null),
+        })),
+      });
+    } catch (e) {
+      try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ }
+    }
+  });
+
   // Resilient startup: a bridge that's down or restarting (ECONNREFUSED / 502 /
   // handshake timeout) must not kill the relay. webTransport's reconnect:true
   // only self-heals AFTER a first successful bind — a failed FIRST connect does

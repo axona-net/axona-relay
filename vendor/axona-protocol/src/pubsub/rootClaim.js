@@ -223,8 +223,19 @@ export class RootClaim {
     // BACKUP only through a fresh REPLICATE from the new live principal.)
     if (isRoot && role.backupOf !== null) this.retireBackup(role.topicId, role, 'promoted');
     role.isRoot = isRoot;
+    // OBSERVABILITY (#60): a transition is the moment a seat changes hands, and
+    // the one question it must answer is whether anything was seated beneath it.
+    // role.subscribers and role.children already hold that; nothing logged them,
+    // so production could not tell an empty yield from one that abandoned a
+    // subtree. The relay status line's subs= is mySubscriptions (this node's OWN
+    // subscriptions) and never measured this — an exclusion drawn from it on
+    // 2026-09-07 was wrong for exactly that reason. Counts only: no ids, no
+    // sizes that could correlate a subscriber to a topic beyond what the
+    // transition already names.
+    const seatedSubs = role.subscribers?.size ?? 0;
+    const seatedKids = role.children?.size ?? 0;
     this.m._log('info', 'root-transition',
-      { topic: idHex(role.topicId).slice(0, 12), isRoot, why, ...ctx });
+      { topic: idHex(role.topicId).slice(0, 12), isRoot, why, subs: seatedSubs, kids: seatedKids, ...ctx });
     // SUBSCRIBER-LIST REPLICATION: on PROMOTION, re-adopt the principal's inherited
     // subscribers into the fanout and replay the cache to each, so the orphaned
     // readers are served immediately instead of waiting ~9s to re-subscribe (the
@@ -313,7 +324,13 @@ export class RootClaim {
     role.formedAt = m._now(); role.lastVerify = 0;
     m.axonRoles.set(topicBig, role);
     m._log('info', 'root-formed', { topic: idHex(topicBig).slice(0, 12) });
-    m._log('info', 'root-transition', { topic: idHex(topicBig).slice(0, 12), isRoot: true, why, born: true });
+    // Same seated counts as _set (#60). A born root has nothing seated yet, but
+    // the fields are emitted as 0 rather than omitted: a consumer parsing
+    // root-transition must not have to distinguish "no subtree" from "this
+    // emission site forgot to say". This is the SECOND transition emitter —
+    // _set is the other — and they must agree on shape.
+    m._log('info', 'root-transition', { topic: idHex(topicBig).slice(0, 12), isRoot: true, why,
+      subs: role.subscribers?.size ?? 0, kids: role.children?.size ?? 0, born: true });
     m._announceRoot(topicBig);
     // Empty-self-root cohort pull (v4.24.0): a root born with no history must
     // PULL from whoever holds it — nothing reliably tells the holder about a

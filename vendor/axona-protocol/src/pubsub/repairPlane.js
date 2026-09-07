@@ -23,6 +23,7 @@ import {
   ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
   HELLO_DEADLINE_MS,
   INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
+  ROUTE_REPORT_TOP,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
@@ -266,6 +267,7 @@ export const repairPlaneMethods = {
     //    inbound pointer + flood-dedup caches by their TTLs.
     if (now - this._lastBeaconAt >= BEACON_MS) { this._lastBeaconAt = now; this._emitRootBeacons(); }
     this._verifyRoots(now);   // root self-verification (non-blocking lookups; batched)
+    this._reportRouteOutcomes();
     for (const [t, b] of this._rootBeacons) if (b.exp <= now) this._rootBeacons.delete(t);
     for (const [id, exp] of this._beaconSeen) if (exp <= now) this._beaconSeen.delete(id);
 
@@ -372,6 +374,27 @@ export const repairPlaneMethods = {
   // farther ones retired. On root churn the now-closest backup already holds everything
   // and promotes (via _onSub-terminal when a joiner routes to it, or the stale-promote
   // check below) with no gap.
+  // OBSERVABILITY (#58 D3): one routed-outcome summary per tick, and ONLY when
+  // something failed. Silence here means every routed send that reported a
+  // verdict was consumed — which is the reading production could not previously
+  // make, because failure resolves {consumed:false} and logged nothing.
+  //
+  // Counters are drained on report, so each line covers the interval since the
+  // last one rather than all time. `top` names the worst offenders by id prefix,
+  // which is what turns "routing is failing" into "routing to THIS id is
+  // failing" — the same move that made replicate-all-failed attributable in
+  // 4.76.2. Non-reporting adapters resolve no verdict and appear nowhere.
+  _reportRouteOutcomes() {
+    const s = this._routeStats;
+    if (!s || s.fail === 0) { if (s) { s.ok = 0; s.by.clear(); } return; }
+    const top = [...s.by.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, ROUTE_REPORT_TOP)
+      .map(([id, n]) => ({ id, n }));
+    this._log('info', 'routed-outcomes', { ok: s.ok, failed: s.fail, tracked: s.by.size, top });
+    s.ok = 0; s.fail = 0; s.by.clear();
+  },
+
   _replicateRoots() {
     if (!this._rootReplicas) return;
     const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;

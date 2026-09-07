@@ -58,7 +58,7 @@ import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          METRICS_COALESCE_MS,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
-         TICK_LAG_WINDOW, OBLIGATIONS } from './constants.js';
+         TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -357,10 +357,43 @@ export class AxonaManager {
     try {
       return Promise.resolve(
         this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET }),
-      ).catch(fail);
+      ).catch(fail).then((r) => this._tallyRoute(targetBig, r));
     } catch (e) {
-      return Promise.resolve(fail(e));   // synchronous throw out of routeMessage
+      return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
     }
+  }
+
+  // OBSERVABILITY (#58 D3): routing reports failure by RESOLVING {consumed:false}
+  // and emits nothing, so "no routed-failure lines" means UNLOGGED, not no
+  // failures — reachability by routing was unmeasurable in production. This is
+  // the single containment point every routed send already passes through, so
+  // the tally is exact and costs one branch.
+  //
+  // COUNTS ONLY, REPORTED IN BULK. A line per failure would flood: a node that
+  // cannot reach a nominee retries it every tick. repairPlane emits one summary
+  // per tick and only when something failed (see _reportRouteOutcomes).
+  // Verdict shape is routing's own, unchanged; this reads it and returns it
+  // untouched, so no caller's contract moves.
+  _tallyRoute(targetBig, r) {
+    try {
+      const s = (this._routeStats ??= { ok: 0, fail: 0, by: new Map() });
+      // A non-reporting adapter resolves undefined/a push count — that is NOT a
+      // failure verdict and must not be counted as one (the 4.58.0 lesson: only
+      // an EXPLICIT verdict is evidence either way).
+      if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
+        if (r.consumed) { s.ok++; return r; }
+        s.fail++;
+        const k = idHex(targetBig).slice(0, 12);
+        s.by.set(k, (s.by.get(k) || 0) + 1);
+        // Bound the map: a churning mesh must not grow it without limit.
+        if (s.by.size > ROUTE_FAIL_TRACK_MAX) {
+          let worst = null, worstN = Infinity;
+          for (const [id, n] of s.by) if (n < worstN) { worstN = n; worst = id; }
+          if (worst !== null) s.by.delete(worst);
+        }
+      }
+    } catch { /* observability must never break routing */ }
+    return r;
   }
   // Pop a dead waypoint and keep routing. When the via chain empties, _send
   // falls through to the TOPIC ID — that is deliberate and load-bearing: it is
