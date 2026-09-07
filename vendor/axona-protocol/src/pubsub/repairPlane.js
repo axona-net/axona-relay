@@ -777,7 +777,7 @@ export const repairPlaneMethods = {
     // snapshot carries whether the payload contained the role's state: only a
     // FULL push can testify about a message. See the nil() header above.
     const out = { attempted: want.length, verified: 0, failed: 0, unsupported: 0, violation: 0,
-                  dispatched: true, snapshot: !!full };
+                  dispatched: true, snapshot: !!full, failures: [] };
     // role.attempted is a BOUNDED DIAGNOSTICS RECORD, deliberately outside
     // role.replicas and outside every repair, confirm and handoff decision path.
     // It exists so the difference between "no evidence" and "evidence of failure"
@@ -790,6 +790,7 @@ export const repairPlaneMethods = {
         continue;
       }
       out[verdict]++;
+      out.failures.push({ id: hex.slice(0, 12), v: verdict });   // WHO the push failed to + its dispatch verdict — replication-failure attribution (#45/#432/#397)
       role.attempted.set(hex, { at: now, via: verdict });
       if (verdict === 'violation') {
         this._log('error', 'pubsub:dispatch-contract-violation', {

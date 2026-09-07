@@ -513,7 +513,7 @@ export const wireHandlersMethods = {
         // the periodic path retries. Nothing is silently swallowed; it is simply not
         // counted as an attempt that happened.
         .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0,
-                         dispatched: false, snapshot: false, noCohort: false,
+                         dispatched: false, snapshot: false, noCohort: false, failures: [],
                          reason: String(e?.message || e) }));
       // v4.58.0 FAIL-CLOSED. Confirm requires POSITIVE evidence: attempted > 0
       // demands verified > 0. The previous gate also required unreported === 0,
@@ -534,7 +534,9 @@ export const wireHandlersMethods = {
       this._durability.recordOne(role, env.msgId, rep);
       if (rep.attempted > 0 && rep.verified === 0) {
         this._log('warn', 'pubsub:replicate-all-failed', {
-          topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+          topic: idHex(role.topicId).slice(0, 12), attempted: rep.attempted,
+          failed: rep.failed, unsupported: rep.unsupported, violation: rep.violation,
+          targets: rep.failures,   // [{id,v}] — WHO the push failed to + its dispatch verdict (attribution: reach/contract, and which cohort members)
         });
         // INGEST happened (cached, stamped, fanned) — the ack below still
         // fires; durability is the cohort's job and the tick keeps retrying
@@ -1017,11 +1019,13 @@ export const wireHandlersMethods = {
         // effect, so a tombstone whose every replication push failed must not
         // report durable either.
         this._replicateRole(topicBig, role, bridge, this._now())
-          .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, reason: String(e?.message || e) }))
+          .catch((e) => ({ attempted: 1, verified: 0, failed: 1, unsupported: 0, violation: 0, failures: [], reason: String(e?.message || e) }))
           .then((rep) => {
             if (rep.attempted > 0 && rep.verified === 0) {
               this._log('warn', 'pubsub:kill-replicate-all-failed', {
-                topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted, failed: rep.failed,
+                topic: idHex(topicBig).slice(0, 12), attempted: rep.attempted,
+                failed: rep.failed, unsupported: rep.unsupported, violation: rep.violation,
+                targets: rep.failures,
               });
               return;                 // leave pending → the killer keeps retrying
             }
