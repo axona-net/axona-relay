@@ -193,12 +193,19 @@ async function main() {
     if (level === 'debug' && !INTERESTING.test(event)) return;
     const tag = level === 'error' ? '{red-fg}ERR{/}'
               : level === 'warn'  ? '{yellow-fg}WRN{/}' : '';
-    // armed-* events (armed-modules, armed-ledger) are the canary soak's
-    // retained evidence: the runbook's thresholds are read from this JSONL,
-    // and a truncated line is a threshold not evidenced. Full JSON for those;
-    // the 120-char cap stays for everything else (chatty transport events).
+    // Two event families are EVIDENCE, and a truncated line is evidence that
+    // was not recorded:
+    //   armed-* (armed-modules, armed-ledger) — the canary soak runbook reads
+    //     its thresholds out of this JSONL.
+    //   health-dump — the SIGUSR1 answer. Its payload is a `seated` ARRAY, one
+    //     entry per role; at 120 chars the cap severed it inside the FIRST
+    //     entry, so every dump on 0.117.1 reported its counts and then dropped
+    //     the per-topic detail the dump exists to carry. Found 2026-09-07 by
+    //     reading an actual production dump instead of trusting the commit.
+    // The cap stays for everything else — transport events are chatty.
     const json = ctx ? JSON.stringify(ctx) : '';
-    const detail = ctx ? ' ' + (event.startsWith('armed-') ? json : json.slice(0, 120)) : '';
+    const untruncated = event.startsWith('armed-') || event === 'health-dump';
+    const detail = ctx ? ' ' + (untruncated ? json : json.slice(0, 120)) : '';
     present.logLine(`${tag ? tag + ' ' : ''}${event}${detail}`);
   };
 
