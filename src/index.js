@@ -242,19 +242,29 @@ async function main() {
     try {
       if (!peer) { onLog('warn', 'health-dump-unavailable', { why: 'peer not yet connected' }); return; }
       const h = peer.health();
-      const roles = Array.isArray(h?.roles) ? h.roles : [];
+      // CONTRACT (verified at AxonaPeer.js:3178-3190, 3246-3258): health()
+      // returns `axonRoles`, NOT `roles`, and each entry is
+      // { topic, isRoot, children:<count>, cacheSize }. The first cut of this
+      // handler read h.roles and mapped r.topicId/r.nature — all three wrong —
+      // so it emitted roles:0 seated:[] unconditionally, and I misread that
+      // empty output as "the relay just restarted". Vega caught it. Read the
+      // shape, do not assume it.
+      //
+      // NOTE the limit: health() drops role.subscribers, so this gives CHILD
+      // relay counts only. The seated-SUBSCRIBER count at the moment it matters
+      // comes from the root-transition log (subs=), not from here.
+      const roles = Array.isArray(h?.axonRoles) ? h.axonRoles : [];
       onLog('info', 'health-dump', {
-        peers: h?.peers?.length ?? h?.synaptomeSize ?? null,
+        peers: Array.isArray(h?.peers) ? h.peers.length : (h?.synaptomeSize ?? null),
         synaptome: h?.synaptomeSize ?? null,
         subscriptions: h?.subscriptions ?? null,   // this node's OWN subs — NOT seated downstream
         roles: roles.length,
-        // The quantity #60 turns on: seated downstream per role. `subs` in the
-        // status line never measured this; these are role.children counts.
+        rooted: roles.filter((r) => r.isRoot).length,
         seated: roles.map((r) => ({
-          topic: String(r.topicId ?? '').slice(0, 12),
+          topic: String(r.topic ?? '').slice(0, 12),
           isRoot: !!r.isRoot,
-          nature: r.nature ?? null,
-          kids: Array.isArray(r.children) ? r.children.length : (r.children ?? null),
+          kids: typeof r.children === 'number' ? r.children : null,
+          cache: r.cacheSize ?? null,
         })),
       });
     } catch (e) {
