@@ -68,6 +68,7 @@ import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 import { shadowEnabled } from '../registry/index.js';
+import { envNum, envStr } from '../utils/env.js';
 
 // Constants, wire types, and the region-lock switch live in constants.js
 // (refactor Phase 2); the caps and region-lock functions are re-exported here
@@ -258,11 +259,9 @@ export class AxonaManager {
     // scope to one closed-fleet arm and close an epoch on any membership change. Values
     // are harness-provided per arm (env), null when unset. LAT_TRACE-gated like every
     // other stamp — no-op / byte-identical when the flag is off.
-    try {
-      this._runId = (process.env && process.env.RUN_ID) || null;
-      this._membershipEpoch = (process.env && process.env.MEMBERSHIP_EPOCH) || null;
-      this._membershipDigest = (process.env && process.env.MEMBERSHIP_DIGEST) || null;
-    } catch { this._runId = null; this._membershipEpoch = null; this._membershipDigest = null; }
+    this._runId = envStr('RUN_ID');
+    this._membershipEpoch = envStr('MEMBERSHIP_EPOCH');
+    this._membershipDigest = envStr('MEMBERSHIP_DIGEST');
     this._ledgerSeq = 0;   // monotonic per-process ledger sequence (feeds the completeness manifest)
     this._nodeStartEmitted = false;   // node-start census row emitted once (David 2026-09-01)
     this.refreshIntervalMs = refreshIntervalMs;
@@ -790,7 +789,7 @@ export class AxonaManager {
       const probe = (typeof this.dht.lookup === 'function')
         ? this.dht.lookup(topicBig).then((r) => (r && Array.isArray(r.path) && r.path.length) ? r.path[r.path.length - 1] : null)
         : this.dht.findKClosest(topicBig, 1).then((a) => (Array.isArray(a) && a.length) ? a[0] : null);
-      const TERM_VERIFY_MS = Number(process.env.TERM_VERIFY_MS || 500);
+      const TERM_VERIFY_MS = envNum('TERM_VERIFY_MS', 500);
       const id = await Promise.race([
         probe,
         new Promise((res) => { const t = setTimeout(() => res('__t__'), TERM_VERIFY_MS); if (t && typeof t.unref === 'function') t.unref(); }),
@@ -1027,7 +1026,7 @@ export class AxonaManager {
   // invariant: XOR-closest-to-topic wins). On an idealized/warm mesh the greedy SUB
   // already reaches the closest node, so b == pin and this is a no-op.
   _steerColdSubscribe(topicBig) {
-    const SUB_LOOKUP_MS = Number(process.env.SUB_LOOKUP_MS || 600);
+    const SUB_LOOKUP_MS = envNum('SUB_LOOKUP_MS', 600);
     // Bounded FAST-RETRY burst: the greedy first SUB strands ~60% cold, and a single
     // steer only covers the case where the lookup resolves on the first try within a
     // few seconds. refreshTick re-sends unpinned subs only at renewFastMs (~5s), too
@@ -1035,8 +1034,8 @@ export class AxonaManager {
     // SUB_RETRY_MS while unattached, up to SUB_RETRY_TRIES — the PENDING_PUB write-path
     // pattern applied to reads. Cancels the instant a DELIVER pins us (_upstream set)
     // or the subscription is dropped. Timers unref'd so they never keep the loop alive.
-    const SUB_RETRY_MS = Number(process.env.SUB_RETRY_MS || 1500);
-    const SUB_RETRY_TRIES = Number(process.env.SUB_RETRY_TRIES || 5);
+    const SUB_RETRY_MS = envNum('SUB_RETRY_MS', 1500);
+    const SUB_RETRY_TRIES = envNum('SUB_RETRY_TRIES', 5);
     // Prefer the iterative NETWORK lookup (crosses the mesh, escapes the cold
     // synaptome's local minima); fall back to findKClosest. Normalize through
     // Promise.resolve so an adapter that returns a value SYNCHRONOUSLY (or throws)
