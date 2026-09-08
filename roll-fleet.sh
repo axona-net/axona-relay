@@ -76,14 +76,10 @@ fail() { echo "✗ ABORT: $*" >&2; exit 1; }
 # bare word "caffeinate" on every macOS. Verified against a live 3-relay
 # fleet: old predicate 0, this one 3.
 live_pids() {
-  for pid in $(pgrep -f "src/index.js" 2>/dev/null || true); do
-    [ "$(ps -p "$pid" -o comm= 2>/dev/null)" != "caffeinate" ] && echo "$pid"
-  done
-  # Explicit success: without this, the loop's LAST iteration testing a
-  # caffeinate wrapper leaves the function returning 1, and set -e kills the
-  # whole script with no message — a silent abort found by negative-testing
-  # this very script before its first real run.
-  return 0
+  # Delegated to relay-census.sh — one definition, because this count has been
+  # written wrong by hand twice (caffeinate wrappers on mac, self-matching
+  # pattern on linux) and this gate is what caught it both times.
+  bash "$(dirname "$0")/relay-census.sh" --pids
 }
 
 VENDORED="$(node -p "require('./vendor/axona-protocol/package.json').version" 2>/dev/null || echo MISSING)"

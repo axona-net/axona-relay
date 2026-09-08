@@ -36,16 +36,10 @@ fail() { echo "✗ ABORT: $*" >&2; exit 1; }
 [ -n "${TARGET:-}" ]        || fail "TARGET=<n> is REQUIRED (the count you want AFTER this run)."
 [ -n "${EXPECT_KERNEL:-}" ] || fail "EXPECT_KERNEL=<x.y.z> is REQUIRED — the kernel you believe you are launching."
 
-# The ONLY correct census on a mac host: `caffeinate -i nohup node src/index.js`
-# ALSO matches "src/index.js", so a naive pgrep counts every relay twice. That
-# error put Air at 6 and M1 at 8 in the fleet census when they were 3 and 4, and
-# it is why roll-fleet.sh refused a roll on 2026-09-08 (it was right).
-live_pids() {
-  for pid in $(pgrep -f "src/index.js" 2>/dev/null || true); do
-    [ "$(ps -p "$pid" -o comm= 2>/dev/null)" != "caffeinate" ] && echo "$pid"
-  done
-  return 0
-}
+# Census delegated to relay-census.sh — the single definition. It has been got
+# wrong twice by hand (caffeinate wrappers double-counting on mac; the pattern
+# matching the shell running it on linux), so nothing re-implements it.
+live_pids() { bash "$(dirname "$0")/relay-census.sh" --pids; }
 
 VENDORED="$(node -p "require('./vendor/axona-protocol/package.json').version" 2>/dev/null || echo MISSING)"
 [ "$VENDORED" = "$EXPECT_KERNEL" ] || fail "vendored kernel is $VENDORED, you said EXPECT_KERNEL=$EXPECT_KERNEL. Pull/re-vendor first."
