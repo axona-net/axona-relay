@@ -37,6 +37,7 @@ import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
 import { autoDetectRegion } from './geolocate.js';
 import { resolveBridgeUrl } from './network.js';
+import { renderCtx } from './logctx.js';
 import { readFile } from 'node:fs/promises';
 import { appendFileSync, mkdirSync } from 'node:fs';
 
@@ -71,6 +72,9 @@ const USE_TUI = process.env.RELAY_TUI != null
 
 // Transport 'debug' events worth surfacing (skips ping/pong chatter).
 const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|error|signal/i;
+
+// How a ctx is rendered — and what may be cut — lives in logctx.js, because
+// the rule is now on the content's SHAPE and needs a fence around it.
 
 const DEFAULT_REGION = { lat: 37.77, lng: -122.42 };  // SF (us-west / grizzly)
 
@@ -193,19 +197,7 @@ async function main() {
     if (level === 'debug' && !INTERESTING.test(event)) return;
     const tag = level === 'error' ? '{red-fg}ERR{/}'
               : level === 'warn'  ? '{yellow-fg}WRN{/}' : '';
-    // Two event families are EVIDENCE, and a truncated line is evidence that
-    // was not recorded:
-    //   armed-* (armed-modules, armed-ledger) — the canary soak runbook reads
-    //     its thresholds out of this JSONL.
-    //   health-dump — the SIGUSR1 answer. Its payload is a `seated` ARRAY, one
-    //     entry per role; at 120 chars the cap severed it inside the FIRST
-    //     entry, so every dump on 0.117.1 reported its counts and then dropped
-    //     the per-topic detail the dump exists to carry. Found 2026-09-07 by
-    //     reading an actual production dump instead of trusting the commit.
-    // The cap stays for everything else — transport events are chatty.
-    const json = ctx ? JSON.stringify(ctx) : '';
-    const untruncated = event.startsWith('armed-') || event === 'health-dump';
-    const detail = ctx ? ' ' + (untruncated ? json : json.slice(0, 120)) : '';
+    const detail = ctx ? ' ' + renderCtx(event, ctx) : '';
     present.logLine(`${tag ? tag + ' ' : ''}${event}${detail}`);
   };
 
