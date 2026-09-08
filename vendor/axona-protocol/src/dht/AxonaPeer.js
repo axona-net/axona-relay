@@ -3989,6 +3989,42 @@ export class AxonaPeer extends DHT {
     const node = this._node;
     const target = asId(targetId);   // wire→internal id gate
     const myDist = node.id ^ target;
+
+    // WE ARE THE DESTINATION. Return null WITHOUT probing (council 2026-09-08,
+    // four seats; measured by ops/lookahead-control.mjs).
+    //
+    // This is not a behaviour change — it returns the value the body below is
+    // ARITHMETICALLY REQUIRED to return, without the network round trips. Both
+    // scoring tests are `d < bestDist`, bestDist starts at myDist, and myDist is
+    // 0 here. XOR distance is unsigned, so `d < 0` is unsatisfiable: neither the
+    // probe loop nor the incomingSynapses loop can assign bestPeerId. The result
+    // is fixed before the first packet leaves.
+    //
+    // What it cost. Both callers (the route_msg handler at :893 and routeMessage
+    // at :4553) reach here whenever greedy finds nobody closer — and at the
+    // destination greedy CANNOT find anybody closer, because nothing beats
+    // distance 0. So every routed message ran a Promise.allSettled fan-out over
+    // the WHOLE synaptome (63-72 peers, unfiltered — no isConnected, no
+    // _deadPeers, no bridge, unlike greedy 20 lines above) on arrival, and
+    // allSettled waits for the slowest. One connected-but-silent peer therefore
+    // cost DEFAULT_REQUEST_TIMEOUT_MS (5_000) before the local handler was
+    // reached, and route_msg is recursive-await, so that wait blocked every
+    // upstream node back to the publisher.
+    //
+    // Paired control, same peer / same payload / one hop, n=40 per arm:
+    //   transport.send  p50    1.0ms   p90     2.9ms
+    //   routeMessage    p50  536.2ms   p90 5,001.0ms   — 531x, 15/40 at the timer
+    // Two of five destinations paid the full 5s on EVERY delivery while
+    // answering a direct probe in ~1ms.
+    //
+    // Deliberately narrow. The genuine local-minimum case (myDist > 0, no closer
+    // neighbour) still probes: that is what lookahead is FOR, and on a sparse
+    // mesh it is how routing escapes a dead end. Filter parity, top-K and a
+    // shorter lookahead timeout were all considered and are NOT bundled here —
+    // Aster's objection stands that degree is not global completeness and a
+    // timeout chosen off one RTT sample is a constant chosen off a sample.
+    if (myDist === 0n) return null;
+
     let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
     let bestDist   = myDist;
 
