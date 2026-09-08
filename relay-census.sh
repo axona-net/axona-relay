@@ -25,6 +25,7 @@
 #   bash relay-census.sh            # → the count, nothing else
 #   bash relay-census.sh --pids     # → one relay pid per line
 #   bash relay-census.sh --verbose  # → count plus what was seen and skipped
+#   bash relay-census.sh --kernels  # → what the RUNNING relays actually loaded
 #
 # Windows relays run as bare node.exe with no pgrep available in git-bash, so
 # that platform is counted with tasklist. Same script, same answer, one call.
@@ -55,8 +56,35 @@ relay_pids() {
   return 0
 }
 
+# What each RUNNING relay actually loaded — NOT what the checkout would launch.
+# fleet.sh status reported the repo's vendored version and so showed axona-win as
+# 4.78.0 while 8 of its 22 relays were still on the old kernel, because a roll had
+# died half way. A version column that cannot show a half-rolled host is worse
+# than none: it reads as confirmation. Resolved per-pid from the log the process
+# still holds open, so it describes the process and not the directory.
+running_kernels() {
+  if is_windows; then
+    # git-bash cannot resolve an open fd to a path. Fall back to the honest
+    # proxy: how many relays were started by the newest roll generation.
+    local newest
+    newest=$(ls -t relay-logs/roll-*.log 2>/dev/null | head -1 | sed -E 's/.*roll-([0-9]+-[0-9]+)-.*/\1/')
+    [ -z "$newest" ] && { echo "unknown (no roll logs)"; return 0; }
+    echo "$(ls relay-logs/roll-$newest-*.log 2>/dev/null | grep -c .)/$(relay_pids | grep -c .) started by generation $newest"
+    return 0
+  fi
+  local pid log k
+  for pid in $(relay_pids); do
+    if [ -r "/proc/$pid/fd/1" ]; then log=$(readlink "/proc/$pid/fd/1" 2>/dev/null)
+    else log=$(lsof -p "$pid" -a -d 1 -Fn 2>/dev/null | sed -n 's/^n//p' | head -1); fi
+    k=""
+    [ -n "$log" ] && [ -r "$log" ] && k=$(grep -m1 -o "kernel v[0-9][0-9.]*" "$log" 2>/dev/null)
+    echo "${k:-kernel unknown}"
+  done | sort | uniq -c | sed 's/^ */  /'
+}
+
 case "$MODE" in
   count)   relay_pids | grep -c . ;;
+  --kernels|kernels) running_kernels ;;
   --pids|pids) relay_pids ;;
   --verbose|verbose)
     n=$(relay_pids | grep -c .)
