@@ -82,10 +82,37 @@ function newLookaheadStats() {
     // CONCENTRATE in the nearest targets. If they do, top-K keeps them and the
     // 67-wide fan-out can shrink; if the rate is flat across rank, top-K cannot
     // work and the redundancy needs a different mechanism.
-    rankSent:   new Array(RANK_BINS).fill(0),
-    rankCloser: new Array(RANK_BINS).fill(0),
+    rankSent:      new Array(RANK_BINS).fill(0),
+    rankCloser:    new Array(RANK_BINS).fill(0),
+    // OUTCOME PARTITION PER RANK (Aster, council 938e4162). closer/sent alone
+    // cannot tell "every probe was REJECTED" from "every reply was non-closer",
+    // and those have opposite meanings: the first says the target was dead, the
+    // second says it was alive and unhelpful. Rank 0 read as a structural blind
+    // spot on the unpartitioned data; it may simply be an unreachable entry.
+    rankRejected:  new Array(RANK_BINS).fill(0),
+    rankTerminal:  new Array(RANK_BINS).fill(0),
+    rankNonCloser: new Array(RANK_BINS).fill(0),
+    // PER-CALL top-K viability. Counting closer REPLIES lost to a cut-off
+    // overstates the damage, because a call needs only ONE closer reply and may
+    // receive several — discarding surplus costs nothing. What decides top-K is
+    // whether the NEAREST closer reply of each call falls inside K.
+    callsWithAnyCloser: 0,
+    answeredWithinK: Object.fromEntries(K_PROBES.map(k => [k, 0])),
+    // Does the raw synaptome contain peers GREEDY would have taken? Greedy
+    // filters CONNECTED/dead/bridge; probeTargets does not. If this is ever
+    // non-zero, "greedy failed, so every probe target is farther than self" is
+    // false, and rank 0 is not what I claimed it was.
+    targetsNearerThanSelf: 0,
+    // Could the free incoming pass have answered ON ITS OWN? The old
+    // answeredByIncoming only fired when probes returned NOTHING, so its zero
+    // proved only that probes always found something.
+    incomingCouldAnswer: 0,
+    incomingWonFinal: 0,
   };
 }
+
+/** Cut-offs evaluated for top-K viability. */
+const K_PROBES = [1, 2, 4, 8, 16, 32];
 
 /** ranks 0..7 map to bins 0..7; then 8-15 -> 8, 16-31 -> 9, 32+ -> 10. */
 const RANK_BINS = 11;
@@ -4086,17 +4113,23 @@ export class AxonaPeer extends DHT {
       // order and every target is still probed — this computes each one's rank
       // without changing who is asked, so the measurement cannot alter the
       // behaviour it is measuring.
-      const ranks = new Array(probeTargets.length);
+      const rawRank = new Array(probeTargets.length);   // exact rank — K needs it
+      const ranks   = new Array(probeTargets.length);   // bucket — histograms use it
       {
         const byDist = probeTargets.map((p, i) => [i, p ^ target]);
         // BigInt: subtracting into a Number would lose precision at 256 bits.
         byDist.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
         for (let r = 0; r < byDist.length; r++) {
-          const bin = rankBin(r);
-          ranks[byDist[r][0]] = bin;
-          LS.rankSent[bin]++;
+          const idx = byDist[r][0];
+          rawRank[idx] = r;
+          ranks[idx]   = rankBin(r);
+          LS.rankSent[ranks[idx]]++;
+          // A probe target NEARER than self is one greedy would have taken had
+          // it been eligible — so its presence here means the two sets differ.
+          if (byDist[r][1] < myDist) LS.targetsNearerThanSelf++;
         }
       }
+      let minCloserRank = Infinity;
       const settled = await Promise.allSettled(
         probeTargets.map(peerId =>
           node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
@@ -4107,32 +4140,53 @@ export class AxonaPeer extends DHT {
       // to; we score by ITS distance but forward to the FIRST HOP (probeTargets[i]).
       for (let i = 0; i < settled.length; i++) {
         const r = settled[i];
-        if (r.status !== 'fulfilled') { LS.probesRejected++; continue; }
+        if (r.status !== 'fulfilled') { LS.probesRejected++; LS.rankRejected[ranks[i]]++; continue; }
         LS.probesFulfilled++;
-        if (!r.value || r.value.terminal) { LS.probesTerminal++; continue; }
+        if (!r.value || r.value.terminal) { LS.probesTerminal++; LS.rankTerminal[ranks[i]]++; continue; }
         const d = r.value.peerId ^ target;
         // "Useful" is measured against MY distance, not against the running
         // bestDist: whether a given reply carried a closer node is a property of
         // the reply, and scoring it against a value that moves as the loop runs
         // would make the count depend on arrival order.
-        if (d < myDist) { LS.probesCloserThanMe++; LS.rankCloser[ranks[i]]++; }
+        if (d < myDist) {
+          LS.probesCloserThanMe++;
+          LS.rankCloser[ranks[i]]++;
+          if (rawRank[i] < minCloserRank) minCloserRank = rawRank[i];
+        } else {
+          LS.rankNonCloser[ranks[i]]++;
+        }
         if (d < bestDist) {
           bestDist   = d;
           bestPeerId = probeTargets[i];   // adjacent next hop, not the 2-hop node
         }
+      }
+      if (minCloserRank !== Infinity) {
+        LS.callsWithAnyCloser++;
+        for (const k of K_PROBES) if (minCloserRank < k) LS.answeredWithinK[k]++;
       }
     }
     // Did the FAN-OUT produce the answer, or would we have had it anyway? The
     // incomingSynapses pass below costs no network at all, so an answer it could
     // have supplied on its own is an answer the probes did not buy.
     const answeredByProbe = bestPeerId !== null;
+    const probeBest = bestPeerId;
 
     // incomingSynapses are reverse channels — the peer IS directly connected,
     // so the peer id itself is a valid (adjacent) next hop.
+    //
+    // TWO SEPARATE QUESTIONS, and the old counter conflated them (Aster,
+    // 938e4162; Vega 260f527b; Orion d0c04f27). `answeredByIncoming` only ever
+    // fired when the probes returned NOTHING, so its zero proved that probes
+    // always found something — not that this free pass could not have answered.
+    //   incomingCouldAnswer : an incoming link beats MY distance, independent of
+    //                         what the probes did. This is the free answer.
+    //   incomingWonFinal    : it also beat the probes' best.
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
+      if (d < myDist) LS.incomingCouldAnswer++;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
+    if (bestPeerId !== null && bestPeerId !== probeBest) LS.incomingWonFinal++;
 
     if (bestPeerId === null)          LS.answeredNull++;
     else if (answeredByProbe)         LS.answeredByProbe++;
@@ -4200,8 +4254,36 @@ export class AxonaPeer extends DHT {
         rank: label,
         sent: s.rankSent[i],
         closer: s.rankCloser[i],
+        // Partitioned, because closer/sent alone cannot separate "the target was
+        // dead" from "the target was alive and had nothing".
+        rejected: s.rankRejected[i],
+        terminal: s.rankTerminal[i],
+        nonCloser: s.rankNonCloser[i],
         rate: s.rankSent[i] ? +(s.rankCloser[i] / s.rankSent[i]).toFixed(4) : 0,
+        // Rate over LIVE, NON-TERMINAL replies — the population that could have
+        // carried an answer at all.
+        rateOfAnswerable: (s.rankSent[i] - s.rankRejected[i] - s.rankTerminal[i]) > 0
+          ? +(s.rankCloser[i] / (s.rankSent[i] - s.rankRejected[i] - s.rankTerminal[i])).toFixed(4)
+          : 0,
       })).filter(b => b.sent > 0),
+      // THE TOP-K ANSWER, per CALL rather than per reply. `retained` is the
+      // fraction of answerable calls whose NEAREST closer reply falls inside K,
+      // which is what decides whether a cut-off at K keeps routing working.
+      // Counting lost replies instead overstates the damage, because a call
+      // needs one closer reply and may receive several.
+      callsWithAnyCloser: s.callsWithAnyCloser,
+      topK: K_PROBES.map(k => ({
+        k,
+        answered: s.answeredWithinK[k],
+        retained: s.callsWithAnyCloser
+          ? +(s.answeredWithinK[k] / s.callsWithAnyCloser).toFixed(4) : 0,
+      })),
+      // Was the raw synaptome ever holding a peer greedy would have taken?
+      // Non-zero falsifies "greedy failed, so every probe target is farther".
+      targetsNearerThanSelf: s.targetsNearerThanSelf,
+      // The free pass, measured independently of what the probes did.
+      incomingCouldAnswer: s.incomingCouldAnswer,
+      incomingWonFinal: s.incomingWonFinal,
     };
     if (opts.reset) this._resetLookaheadStats();
     return out;
