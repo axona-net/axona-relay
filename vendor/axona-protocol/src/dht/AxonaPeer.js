@@ -77,7 +77,24 @@ function newLookaheadStats() {
     probesEmitted: 0, probesFulfilled: 0, probesRejected: 0, probesTerminal: 0,
     probesCloserThanMe: 0,
     answeredByProbe: 0, answeredByIncoming: 0, answeredNull: 0,
+    // Per-XOR-rank accounting. RANK_BINS-1 buckets: ranks 0-7 individually,
+    // then 8-15, 16-31, 32+. The question is whether informative replies
+    // CONCENTRATE in the nearest targets. If they do, top-K keeps them and the
+    // 67-wide fan-out can shrink; if the rate is flat across rank, top-K cannot
+    // work and the redundancy needs a different mechanism.
+    rankSent:   new Array(RANK_BINS).fill(0),
+    rankCloser: new Array(RANK_BINS).fill(0),
   };
+}
+
+/** ranks 0..7 map to bins 0..7; then 8-15 -> 8, 16-31 -> 9, 32+ -> 10. */
+const RANK_BINS = 11;
+const RANK_LABELS = ['0', '1', '2', '3', '4', '5', '6', '7', '8-15', '16-31', '32+'];
+function rankBin(r) {
+  if (r < 8) return r;
+  if (r < 16) return 8;
+  if (r < 32) return 9;
+  return 10;
 }
 
 // REF-1.1 E3: a transport can receive dispatch either through the legacy
@@ -4065,6 +4082,21 @@ export class AxonaPeer extends DHT {
     if (probeTargets.length > 0) {
       LS.probingCalls++;
       LS.probesEmitted += probeTargets.length;
+      // XOR RANK, FOR ACCOUNTING ONLY. probeTargets is left in its original
+      // order and every target is still probed — this computes each one's rank
+      // without changing who is asked, so the measurement cannot alter the
+      // behaviour it is measuring.
+      const ranks = new Array(probeTargets.length);
+      {
+        const byDist = probeTargets.map((p, i) => [i, p ^ target]);
+        // BigInt: subtracting into a Number would lose precision at 256 bits.
+        byDist.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+        for (let r = 0; r < byDist.length; r++) {
+          const bin = rankBin(r);
+          ranks[byDist[r][0]] = bin;
+          LS.rankSent[bin]++;
+        }
+      }
       const settled = await Promise.allSettled(
         probeTargets.map(peerId =>
           node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
@@ -4083,7 +4115,7 @@ export class AxonaPeer extends DHT {
         // bestDist: whether a given reply carried a closer node is a property of
         // the reply, and scoring it against a value that moves as the loop runs
         // would make the count depend on arrival order.
-        if (d < myDist) LS.probesCloserThanMe++;
+        if (d < myDist) { LS.probesCloserThanMe++; LS.rankCloser[ranks[i]]++; }
         if (d < bestDist) {
           bestDist   = d;
           bestPeerId = probeTargets[i];   // adjacent next hop, not the 2-hop node
@@ -4161,6 +4193,15 @@ export class AxonaPeer extends DHT {
       answeredNull: s.answeredNull,
       usefulProbeRate: probing ? +(s.answeredByProbe / probing).toFixed(4) : 0,
       closerReplyRate: s.probesFulfilled ? +(s.probesCloserThanMe / s.probesFulfilled).toFixed(4) : 0,
+      // THE TOP-K QUESTION. rate = closer replies / probes sent, per XOR-rank
+      // bucket. Concentrated in the low ranks => a narrow K keeps the answers.
+      // Flat => top-K cannot work, whatever K is chosen.
+      byRank: RANK_LABELS.map((label, i) => ({
+        rank: label,
+        sent: s.rankSent[i],
+        closer: s.rankCloser[i],
+        rate: s.rankSent[i] ? +(s.rankCloser[i] / s.rankSent[i]).toFixed(4) : 0,
+      })).filter(b => b.sent > 0),
     };
     if (opts.reset) this._resetLookaheadStats();
     return out;
