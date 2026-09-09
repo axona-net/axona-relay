@@ -66,6 +66,16 @@ export function buildHealthDump(h) {
     tickStalls:      cap?.tickStalls ?? null,     // ticks whose lag exceeded the hello deadline
     worstObligation: cap?.worstObligation ?? null,
     overdueFrac:     cap?.overdueFrac ?? null,
+    // EMIT-SIDE LOOKAHEAD (kernel 4.81.0). The receive-side census showed
+    // lookahead_probe is 83% of all inbound mesh frames; this says whether the
+    // fan-out that produces it earns its traffic. It cannot be read from a
+    // browser — a browser is a leaf and emits zero probes — so a relay is the
+    // only place the answer exists.
+    //
+    // Emitted as a nested object rather than flattened: the fields are only
+    // meaningful together (a rate without its denominator is not a rate), and
+    // logctx.js renders a structured ctx whole.
+    lookahead:       h?.lookahead ?? null,
     seated: roles.map((r) => ({
       topic: String(r.topic ?? '').slice(0, 12),
       isRoot: !!r.isRoot,

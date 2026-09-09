@@ -35,6 +35,10 @@ const full = {
     { topic: 'jokes-abcdef0123', isRoot: true,  children: 3, cacheSize: 12 },
     { topic: 'council',          isRoot: false, children: 0, cacheSize: 0  },
   ],
+  lookahead: {
+    calls: 120, bypassedAtDestination: 40, probingCalls: 80,
+    probesEmitted: 5600, probesPerCall: 70, usefulProbeRate: 0.0125,
+  },
   admission: {
     roles: 2, maxRoles: 96, seated: true, saturated: false,
     capacity: {
@@ -63,6 +67,13 @@ console.log('A. a healthy, complete shape');
   ok(d.tickStalls === 2, 'tickStalls surfaced', d.tickStalls);
   ok(d.saturated === false, 'admission verdict surfaced', d.saturated);
   ok(d.worstObligation === 'renewal', 'worstObligation surfaced', d.worstObligation);
+  // The emit-side census is the ONLY place the probe question can be answered —
+  // a browser emits zero probes, so if the relay dump drops this field there is
+  // nowhere else to read it. It was dropped once: health() carried `lookahead`
+  // while this builder emitted an explicit field list that did not include it.
+  ok(d.lookahead && d.lookahead.usefulProbeRate === 0.0125,
+     'lookahead census surfaced whole', d.lookahead);
+  ok(d.lookahead.probesEmitted === 5600, 'probesEmitted carried', d.lookahead?.probesEmitted);
 }
 
 // THE TRAP. Zero is the HEALTHY reading for both pressures, and it is a real
@@ -94,6 +105,8 @@ console.log('C. a kernel with no admission/capacity still yields roles');
   ok(threw === null, 'no throw when admission is absent', threw && threw.message);
   ok(d.roles === 2, 'roles still reported', d && d.roles);
   ok(d.helloPressure === null, 'helloPressure reports null, not 0', d && d.helloPressure);
+  ok(buildHealthDump({ ...full, lookahead: undefined }).lookahead === null,
+     'lookahead reports null when the kernel has no census');
   ok(d.saturated === null, 'saturated reports null', d && d.saturated);
 
   const noCap = structuredClone(full); delete noCap.admission.capacity;
