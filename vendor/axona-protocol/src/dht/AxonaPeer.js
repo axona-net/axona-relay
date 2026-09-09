@@ -106,8 +106,15 @@ function newLookaheadStats() {
     // Could the free incoming pass have answered ON ITS OWN? The old
     // answeredByIncoming only fired when probes returned NOTHING, so its zero
     // proved only that probes always found something.
-    incomingCouldAnswer: 0,
-    incomingWonFinal: 0,
+    // UNITS ARE IN THE NAMES (Aster fc8146ed, ratified Orion 3d723228). The
+    // previous `incomingCouldAnswer` incremented once PER QUALIFYING SYNAPSE,
+    // so it could exceed `calls` and could not be divided by them — while
+    // `incomingWonFinal` was per call. Two different units under names that
+    // implied one. Anything ending in Links counts links; anything ending in
+    // Calls counts calls.
+    incomingCandidateLinks: 0,   // qualifying reverse links, summed over calls
+    incomingCouldAnswerCalls: 0, // calls where >=1 incoming link beat MY distance
+    incomingWonFinalCalls: 0,    // calls where incoming beat the probes' best
   };
 }
 
@@ -4178,15 +4185,19 @@ export class AxonaPeer extends DHT {
     // 938e4162; Vega 260f527b; Orion d0c04f27). `answeredByIncoming` only ever
     // fired when the probes returned NOTHING, so its zero proved that probes
     // always found something — not that this free pass could not have answered.
-    //   incomingCouldAnswer : an incoming link beats MY distance, independent of
-    //                         what the probes did. This is the free answer.
-    //   incomingWonFinal    : it also beat the probes' best.
+    //   incomingCandidateLinks   : qualifying reverse LINKS, summed over calls
+    //   incomingCouldAnswerCalls : CALLS where at least one such link existed —
+    //                              the free answer, per call, comparable to
+    //                              probingCalls
+    //   incomingWonFinalCalls    : CALLS where incoming also beat the probes
+    let incomingQualifies = false;
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
-      if (d < myDist) LS.incomingCouldAnswer++;
+      if (d < myDist) { LS.incomingCandidateLinks++; incomingQualifies = true; }
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
-    if (bestPeerId !== null && bestPeerId !== probeBest) LS.incomingWonFinal++;
+    if (incomingQualifies) LS.incomingCouldAnswerCalls++;
+    if (bestPeerId !== null && bestPeerId !== probeBest) LS.incomingWonFinalCalls++;
 
     if (bestPeerId === null)          LS.answeredNull++;
     else if (answeredByProbe)         LS.answeredByProbe++;
@@ -4259,18 +4270,34 @@ export class AxonaPeer extends DHT {
         rejected: s.rankRejected[i],
         terminal: s.rankTerminal[i],
         nonCloser: s.rankNonCloser[i],
+        // PRIMARY. closer / sent — the rate a selection decision actually faces.
         rate: s.rankSent[i] ? +(s.rankCloser[i] / s.rankSent[i]).toFixed(4) : 0,
-        // Rate over LIVE, NON-TERMINAL replies — the population that could have
-        // carried an answer at all.
-        rateOfAnswerable: (s.rankSent[i] - s.rankRejected[i] - s.rankTerminal[i]) > 0
-          ? +(s.rankCloser[i] / (s.rankSent[i] - s.rankRejected[i] - s.rankTerminal[i])).toFixed(4)
+        // PRIMARY. closer / replies that came back at all. Excludes only the
+        // UNREACHABLE.
+        //
+        // A TERMINAL REPLY IS EVIDENCE, NOT ABSENCE (Aster fc8146ed, ratified
+        // Orion 3d723228). It is a live peer answering "I have nothing closer" —
+        // proof that this target was reached and had no escape, which is exactly
+        // the population a narrowing decision must weigh. The previous
+        // `rateOfAnswerable` conditioned terminal replies OUT of the
+        // denominator, which inflates the apparent hit rate by discarding the
+        // negative evidence. Removed rather than kept alongside: a
+        // more-flattering ratio sitting next to the honest ones gets quoted.
+        rateOfReplies: (s.rankSent[i] - s.rankRejected[i]) > 0
+          ? +(s.rankCloser[i] / (s.rankSent[i] - s.rankRejected[i])).toFixed(4)
           : 0,
       })).filter(b => b.sent > 0),
-      // THE TOP-K ANSWER, per CALL rather than per reply. `retained` is the
-      // fraction of answerable calls whose NEAREST closer reply falls inside K,
-      // which is what decides whether a cut-off at K keeps routing working.
-      // Counting lost replies instead overstates the damage, because a call
+      // TOP-K CANDIDATE SURVIVAL, per CALL rather than per reply. `retained` is
+      // the fraction of answerable calls whose NEAREST closer reply falls inside
+      // K. Counting lost replies instead overstates the damage, because a call
       // needs one closer reply and may receive several.
+      //
+      // IT IS AN UPPER BOUND, NOT A DELIVERY RESULT (Aster fc8146ed, ratified
+      // Orion 3d723228). These are calls observed under a FULL fan-out. A run
+      // actually truncated to K would differ in timing and straggler behaviour,
+      // and this says nothing about whether the message then arrives. Read it as
+      // "could a K-wide fan-out have had a candidate", never as "a K-wide
+      // fan-out works".
       callsWithAnyCloser: s.callsWithAnyCloser,
       topK: K_PROBES.map(k => ({
         k,
@@ -4282,8 +4309,14 @@ export class AxonaPeer extends DHT {
       // Non-zero falsifies "greedy failed, so every probe target is farther".
       targetsNearerThanSelf: s.targetsNearerThanSelf,
       // The free pass, measured independently of what the probes did.
-      incomingCouldAnswer: s.incomingCouldAnswer,
-      incomingWonFinal: s.incomingWonFinal,
+      // Units in the names. Links are summed over calls; Calls are comparable to
+      // probingCalls. Do not divide a Links count by a call count.
+      incomingCandidateLinks: s.incomingCandidateLinks,
+      incomingCouldAnswerCalls: s.incomingCouldAnswerCalls,
+      incomingWonFinalCalls: s.incomingWonFinalCalls,
+      // The free-answer fraction, now dimensionally valid: calls over calls.
+      incomingCouldAnswerRate: s.calls
+        ? +(s.incomingCouldAnswerCalls / s.calls).toFixed(4) : 0,
     };
     if (opts.reset) this._resetLookaheadStats();
     return out;
