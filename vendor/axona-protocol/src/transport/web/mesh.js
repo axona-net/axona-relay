@@ -150,6 +150,11 @@ export class MeshManager {
     /** @type {{urls: string[]|string, username: string, credential: string} | null} */
     this._turn = null;
 
+    // Inbound frame census — see _countFrame() and the note in dc.onmessage.
+    /** @type {Map<string, {n:number, bytes:number}>} */
+    this._frameCounts = new Map();
+    this._frameSince  = Date.now();
+
     // ── v0.4.0 — Transport-contract hooks ──────────────────────────────
     //
     // These let a WebRTCTransport instance (src/transport.js) ride on
@@ -189,6 +194,47 @@ export class MeshManager {
 
   setMyId(id) {
     this._myId = id;
+  }
+
+  /** Record one inbound mesh frame. O(1), allocation-free on the hot path. */
+  _countFrame(kind, bytes) {
+    let row = this._frameCounts.get(kind);
+    if (!row) { row = { n: 0, bytes: 0 }; this._frameCounts.set(kind, row); }
+    row.n++;
+    row.bytes += bytes;
+  }
+
+  /**
+   * What is arriving on the mesh, and how fast.
+   *
+   * @param {{reset?: boolean}} [opts] reset:true zeroes the counters and
+   *   restarts the window — use it to measure a specific interval rather than
+   *   everything since the tab opened, which is what makes a rate meaningful.
+   * @returns {{sinceMs:number, total:number, perSec:number, bytesPerSec:number,
+   *            byType:Object<string,{n:number,perSec:number,bytes:number}>}}
+   */
+  frameStats(opts = {}) {
+    const sinceMs = Math.max(1, Date.now() - this._frameSince);
+    const secs = sinceMs / 1000;
+    let total = 0, bytes = 0;
+    const byType = {};
+    // Sorted loudest-first: the question this answers is always "what is the
+    // biggest contributor", and an unsorted dump of 20 frame types buries it.
+    const rows = [...this._frameCounts.entries()].sort((a, b) => b[1].n - a[1].n);
+    for (const [kind, row] of rows) {
+      total += row.n;
+      bytes += row.bytes;
+      byType[kind] = { n: row.n, perSec: +(row.n / secs).toFixed(1), bytes: row.bytes };
+    }
+    const out = {
+      sinceMs,
+      total,
+      perSec: +(total / secs).toFixed(1),
+      bytesPerSec: Math.round(bytes / secs),
+      byType,
+    };
+    if (opts.reset) { this._frameCounts.clear(); this._frameSince = Date.now(); }
+    return out;
   }
 
   /** Cache the bridge-supplied TURN credential (or null to clear).
@@ -800,7 +846,30 @@ export class MeshManager {
     dc.onmessage = (ev) => {
       let msg;
       try { msg = JSON.parse(ev.data, bigintReviver); }
-      catch { this._log('dc-bad-json', { peerId: state.peerId }); return; }
+      catch { this._log('dc-bad-json', { peerId: state.peerId }); this._countFrame('bad-json', 0); return; }
+
+      // FRAME CENSUS. Every inbound mesh frame passes through exactly here, so
+      // this is the one place a count is complete by construction rather than
+      // by remembering to add it at each call site.
+      //
+      // Why it exists: a Chrome trace of an IDLE axona.chat tab (2026-09-09,
+      // 15.6s) showed this handler called 11,628 times — 745 frames/second —
+      // with the app doing nothing at all. Nothing was slow: no task exceeded
+      // 2.8ms and all JS totalled 142ms. The cost was volume, ~16% of a core
+      // to sit still. The trace records the handler firing but NOT the payload,
+      // so it could not say what those frames were, and ping/pong at 1Hz over
+      // ~80 peers explains only about a fifth of them.
+      //
+      // Counted by `k:type` for envelopes ({k:'req'|'res'|'ntf', id, type,
+      // body}) and by the bare type for ping/pong. Bytes are summed alongside,
+      // because 745 heartbeats and 745 payload frames are the same count and
+      // very different problems.
+      this._countFrame(
+        msg.type === 'ping' || msg.type === 'pong'
+          ? msg.type
+          : `${msg.k ?? '?'}:${msg.type ?? '?'}`,
+        typeof ev.data === 'string' ? ev.data.length : 0,
+      );
 
       if (msg.type === 'ping') {
         // Echo the timestamp back.

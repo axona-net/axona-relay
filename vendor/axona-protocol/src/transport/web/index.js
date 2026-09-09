@@ -1259,6 +1259,40 @@ export function webTransport({
    * key on this rather than the routing table's count. 0 ⇒ bridge-only.
    */
   composite.meshBoundCount = () => meshBoundCount();
+  /**
+   * Census of INBOUND mesh frames by kind — what the mesh is actually sending
+   * this node, and how fast. `{reset:true}` zeroes the window so a rate can be
+   * measured over a chosen interval instead of since the tab opened.
+   *
+   * Added 2026-09-09 after a Chrome trace of an IDLE axona.chat tab showed the
+   * data-channel handler firing 745 times a second with the app doing nothing.
+   * A trace records the handler, never the payload, so it could not name the
+   * traffic; per-peer ping/pong at 1Hz over ~80 peers accounts for barely a
+   * fifth of it. This names the rest.
+   */
+  composite.meshFrameStats = (opts) => {
+    try { return mesh.frameStats(opts || {}); }
+    catch { return null; }
+  };
+
+  // CONSOLE AFFORDANCE. Reaching the above needs a reference to the transport,
+  // and an app is under no obligation to publish one — axona.chat does not,
+  // which is exactly the tab this was built to measure. So the accessor is put
+  // where a devtools console can find it.
+  //
+  // It exposes COUNTS ONLY: frame kinds, rates and byte totals. No payloads, no
+  // peer ids, no addresses — nothing that could identify a peer or leak content
+  // (I-ID: transport ids are never persisted and are not surfaced here either).
+  //
+  // Never clobbers an existing global: several transports can share one page
+  // (the demo runs two), and silently replacing another's accessor would make
+  // the reading describe a different mesh than the reader thinks.
+  try {
+    const g = typeof globalThis !== 'undefined' ? globalThis : null;
+    if (g && !g.__axonaFrameStats) {
+      g.__axonaFrameStats = (opts) => composite.meshFrameStats(opts);
+    }
+  } catch { /* frozen global, sealed realm — the accessor is a convenience */ }
   /** Subscribe to bridge-state transitions.  cb(state, detail). Returns unsub. */
   composite.onBridgeState = (cb) => {
     if (typeof cb !== 'function') throw new TypeError('onBridgeState: cb must be a function');

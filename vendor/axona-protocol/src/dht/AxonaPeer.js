@@ -68,6 +68,18 @@ import { buildBoundary3Registry } from '../transport/boundary3Registry.js';
 import { buildBoundary6Registry } from './boundary6Registry.js';
 import { buildBoundary5Registry } from './boundary5Registry.js';
 
+/** The emit-side lookahead counters. One definition, used by the lazy init in
+ *  _findCloserInTwoHops and by _resetLookaheadStats, so the two cannot drift. */
+function newLookaheadStats() {
+  return {
+    since: Date.now(),
+    calls: 0, bypassedAtDestination: 0, probingCalls: 0,
+    probesEmitted: 0, probesFulfilled: 0, probesRejected: 0, probesTerminal: 0,
+    probesCloserThanMe: 0,
+    answeredByProbe: 0, answeredByIncoming: 0, answeredNull: 0,
+  };
+}
+
 // REF-1.1 E3: a transport can receive dispatch either through the legacy
 // public primitive (unsealed transport) OR through a deposited capability
 // (sealed transport, read via the module-private channel). The old install
@@ -347,6 +359,19 @@ export class AxonaPeer extends DHT {
     this._persistFlushMs = 5000;
     /** @type {Set<(event: object) => void>} */
     this._eventListeners = new Set();
+    this._resetLookaheadStats();   // emit-side lookahead census — see lookaheadStats()
+    // Console accessor. axona.chat publishes neither its peer nor its transport,
+    // and that is the tab this measures, so the reader is put where devtools can
+    // reach it. Counts only — no ids, no targets, no payloads. Never clobbers an
+    // existing global: a page can host two peers, and replacing another's
+    // accessor would make the reading describe a different node than the reader
+    // believes.
+    try {
+      const g = typeof globalThis !== 'undefined' ? globalThis : null;
+      if (g && !g.__axonaLookaheadStats) {
+        g.__axonaLookaheadStats = (o) => { try { return this.lookaheadStats(o); } catch { return null; } };
+      }
+    } catch { /* frozen global / sealed realm — the accessor is a convenience */ }
     /** @type {(event: object) => void | null} */
     this._engineListenerUnsub = null;
 
@@ -3252,6 +3277,10 @@ export class AxonaPeer extends DHT {
       hosting,
       admission,
       wireVersion:   this._transport?.wireVersion ?? null,
+      // Emit-side lookahead census (4.81.0). Cheap to read and it travels with
+      // the rest of health, so a relay's SIGUSR1 dump can carry it without a
+      // second mechanism.
+      lookahead:     (() => { try { return this.lookaheadStats(); } catch { return null; } })(),
       started:       this._started === true,
       transport,
       meshDegraded,
@@ -4023,13 +4052,19 @@ export class AxonaPeer extends DHT {
     // shorter lookahead timeout were all considered and are NOT bundled here —
     // Aster's objection stands that degree is not global completeness and a
     // timeout chosen off one RTT sample is a constant chosen off a sample.
-    if (myDist === 0n) return null;
+    // EMIT-SIDE CENSUS — see lookaheadStats(). Counting here (not at the call
+    // sites) makes it complete by construction: this is the only emitter.
+    const LS = (this._lookaheadStats ??= newLookaheadStats());
+    LS.calls++;
+    if (myDist === 0n) { LS.bypassedAtDestination++; return null; }
 
     let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
     let bestDist   = myDist;
 
     const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
     if (probeTargets.length > 0) {
+      LS.probingCalls++;
+      LS.probesEmitted += probeTargets.length;
       const settled = await Promise.allSettled(
         probeTargets.map(peerId =>
           node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
@@ -4040,21 +4075,99 @@ export class AxonaPeer extends DHT {
       // to; we score by ITS distance but forward to the FIRST HOP (probeTargets[i]).
       for (let i = 0; i < settled.length; i++) {
         const r = settled[i];
-        if (r.status !== 'fulfilled' || !r.value || r.value.terminal) continue;
+        if (r.status !== 'fulfilled') { LS.probesRejected++; continue; }
+        LS.probesFulfilled++;
+        if (!r.value || r.value.terminal) { LS.probesTerminal++; continue; }
         const d = r.value.peerId ^ target;
+        // "Useful" is measured against MY distance, not against the running
+        // bestDist: whether a given reply carried a closer node is a property of
+        // the reply, and scoring it against a value that moves as the loop runs
+        // would make the count depend on arrival order.
+        if (d < myDist) LS.probesCloserThanMe++;
         if (d < bestDist) {
           bestDist   = d;
           bestPeerId = probeTargets[i];   // adjacent next hop, not the 2-hop node
         }
       }
     }
+    // Did the FAN-OUT produce the answer, or would we have had it anyway? The
+    // incomingSynapses pass below costs no network at all, so an answer it could
+    // have supplied on its own is an answer the probes did not buy.
+    const answeredByProbe = bestPeerId !== null;
+
     // incomingSynapses are reverse channels — the peer IS directly connected,
     // so the peer id itself is a valid (adjacent) next hop.
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
       if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
     }
+
+    if (bestPeerId === null)          LS.answeredNull++;
+    else if (answeredByProbe)         LS.answeredByProbe++;
+    else                              LS.answeredByIncoming++;
     return bestPeerId;
+  }
+
+  /**
+   * Did the lookahead fan-out earn its traffic?
+   *
+   * Kernel 4.80.0 measured the RECEIVE side: `lookahead_probe` is 83% of all
+   * inbound mesh frames (three windows: 80.4%, 83.1%, 83.5%), a steady ~9.9
+   * probes/sec from every peer, against 0.4 routed messages/sec. Per-peer rate
+   * is constant as the mesh grows, so a node's probe load is O(N) and the
+   * network's is O(N-squared) — roughly 54,000 probe messages/sec across a
+   * 75-node mesh.
+   *
+   * That says what the traffic COSTS. It cannot say what it BUYS, because a
+   * receiver cannot see whether the sender's fan-out changed the sender's
+   * routing decision. This counts that, at the only site that emits probes:
+   *
+   *   probesEmitted / probingCalls   how wide each fan-out actually is
+   *   probesCloserThanMe             replies naming a node closer than me —
+   *                                  the only replies that can change anything
+   *   answeredByProbe                calls where the fan-out supplied the answer
+   *   answeredByIncoming             calls answered by incomingSynapses, which
+   *                                  costs NO network — the probes bought nothing
+   *   answeredNull                   calls that found nobody closer at all
+   *
+   * `usefulProbeRate` is answeredByProbe / probingCalls. If it is near zero at
+   * steady state on a warm mesh, the fan-out is paying O(N-squared) for an
+   * answer it rarely provides — and the design question becomes how to keep the
+   * sparse-mesh escape without paying for it continuously. If it is high, the
+   * traffic is load-bearing and the fix has to be cheaper probing, not less.
+   *
+   * Counts only: no ids, no targets, no payloads.
+   *
+   * @param {{reset?: boolean}} [opts]
+   */
+  lookaheadStats(opts = {}) {
+    const s = this._lookaheadStats;
+    const sinceMs = Math.max(1, Date.now() - s.since);
+    const probing = s.probingCalls || 0;
+    const out = {
+      sinceMs,
+      calls: s.calls,
+      bypassedAtDestination: s.bypassedAtDestination,   // the 4.78.0 fence, counted
+      probingCalls: probing,
+      probesEmitted: s.probesEmitted,
+      probesPerCall: probing ? +(s.probesEmitted / probing).toFixed(1) : 0,
+      probesEmittedPerSec: +(s.probesEmitted / (sinceMs / 1000)).toFixed(1),
+      probesFulfilled: s.probesFulfilled,
+      probesRejected: s.probesRejected,
+      probesTerminal: s.probesTerminal,
+      probesCloserThanMe: s.probesCloserThanMe,
+      answeredByProbe: s.answeredByProbe,
+      answeredByIncoming: s.answeredByIncoming,
+      answeredNull: s.answeredNull,
+      usefulProbeRate: probing ? +(s.answeredByProbe / probing).toFixed(4) : 0,
+      closerReplyRate: s.probesFulfilled ? +(s.probesCloserThanMe / s.probesFulfilled).toFixed(4) : 0,
+    };
+    if (opts.reset) this._resetLookaheadStats();
+    return out;
+  }
+
+  _resetLookaheadStats() {
+    this._lookaheadStats = newLookaheadStats();
   }
 
   onEvent(handler) {
