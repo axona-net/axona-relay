@@ -40,6 +40,7 @@ import { resolveBridgeUrl } from './network.js';
 import { renderCtx } from './logctx.js';
 import { readFile } from 'node:fs/promises';
 import { appendFileSync, mkdirSync } from 'node:fs';
+import { buildHealthDump } from './healthdump.js';
 
 const RELAY_VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -252,20 +253,7 @@ async function main() {
       // NOTE the limit: health() drops role.subscribers, so this gives CHILD
       // relay counts only. The seated-SUBSCRIBER count at the moment it matters
       // comes from the root-transition log (subs=), not from here.
-      const roles = Array.isArray(h?.axonRoles) ? h.axonRoles : [];
-      onLog('info', 'health-dump', {
-        peers: Array.isArray(h?.peers) ? h.peers.length : (h?.synaptomeSize ?? null),
-        synaptome: h?.synaptomeSize ?? null,
-        subscriptions: h?.subscriptions ?? null,   // this node's OWN subs — NOT seated downstream
-        roles: roles.length,
-        rooted: roles.filter((r) => r.isRoot).length,
-        seated: roles.map((r) => ({
-          topic: String(r.topic ?? '').slice(0, 12),
-          isRoot: !!r.isRoot,
-          kids: typeof r.children === 'number' ? r.children : null,
-          cache: r.cacheSize ?? null,
-        })),
-      });
+      onLog('info', 'health-dump', buildHealthDump(h));
     } catch (e) {
       try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ }
     }
