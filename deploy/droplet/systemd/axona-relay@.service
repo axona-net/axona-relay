@@ -1,0 +1,32 @@
+[Unit]
+Description=Axona relay (%i) — production backbone
+After=network-online.target
+Wants=network-online.target
+[Service]
+# RELAY_REGION=%i IS A TRAP AND IT IS KEPT ONLY AS A FALLBACK.
+#
+# The instance names on this fleet are GEOGRAPHY, not regions, and the kernel
+# resolves them anyway — silently, to whatever they happen to land on:
+#
+#     useast   -> 0x89 eagle        uswest   -> 0x80 grizzly
+#     uscentlw -> 0x87              grizzly1 -> does not resolve
+#
+# Nobody chose that mapping; it fell out of the naming. Every topic this project
+# uses is eagle (council 898be2a9, jokes 894226, general 89f58f), so for months
+# `useast` was the ONLY eagle relay on each droplet and it was the sick one on
+# all three hosts, every time — while its two siblings sat at roles=0 with
+# perfect channels, serving a region with no traffic.
+#
+# Region is therefore set EXPLICITLY per instance in the .d/region.conf files
+# beside this one, which are applied after this template and win. Never add a
+# new instance without one.
+Environment=RELAY_REGION=%i
+Environment=BRIDGE_URL=wss://bridge.axona.net
+Environment=RELAY_TUI=0
+WorkingDirectory=/opt/axona-relay
+ExecStart=/usr/bin/node src/index.js
+Restart=always
+RestartSec=5
+LimitNOFILE=8192
+[Install]
+WantedBy=multi-user.target
