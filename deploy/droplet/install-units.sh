@@ -83,10 +83,20 @@ for i in $INSTANCES; do
   printf "  %s %-10s region want=%-8s got=%-8s enabled=%s\n" "$ok" "$i" "$want" "${got:-<unset>}" "$en"
 done
 # Regions only take effect on restart; say so rather than implying it is live.
-echo "── running now (may lag the config until restarted) ──"
+#
+# BOUND THIS READ. It was `journalctl -u <unit> --no-pager | grep`, with no
+# --since, once per instance — the ENTIRE journal for three heavily-logging
+# relays on a 1-core box already at load 6-10. It turned a four-file copy into a
+# seven-minute operation, and it is a COURTESY LINE: the verify block above
+# already proves region and enablement from systemd, which is authoritative and
+# instant. The banner is written once at process start, so read from the unit's
+# current start time and stop at the first hit.
 for i in $INSTANCES; do
-  r=$(journalctl -u "axona-relay@$i" --no-pager 2>/dev/null | grep -a -oE 'region [a-z]+' | tail -1)
-  printf "  %-10s %s\n" "$i" "${r:-<no banner>}"
+  since=$(systemctl show "axona-relay@$i" -p ActiveEnterTimestamp --value 2>/dev/null)
+  r=$({ journalctl -u "axona-relay@$i" --no-pager \
+          ${since:+--since "$since"} 2>/dev/null \
+        | grep -a -m1 -oE 'region [a-z]+'; } || true)
+  printf "  %-10s %s\n" "$i" "${r:-<no banner since last start>}"
 done
 [ "$fail" = "0" ] || { echo "✗ verification failed" >&2; exit 1; }
 echo "✓ units installed, enabled and verified"
