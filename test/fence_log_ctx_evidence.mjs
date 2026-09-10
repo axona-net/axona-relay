@@ -10,7 +10,7 @@
 //
 // Run: node test/fence_log_ctx_evidence.mjs
 // =====================================================================
-import { renderCtx, isEvidence, CTX_CAP, EVIDENCE_CAP } from '../src/logctx.js';
+import { renderCtx, isEvidence, isFullFidelity, CTX_CAP, EVIDENCE_CAP } from '../src/logctx.js';
 
 let passed = 0, failed = 0;
 const check = (label, cond, extra = '') => {
@@ -130,6 +130,139 @@ console.log('\n— the invariant —');
     { big: Array.from({ length: 9000 }, (_, i) => i) }];
   check('EVERY branch emits parseable JSON',
     cases.every((c) => parses(renderCtx('e', c))));
+}
+
+// =====================================================================
+// 0.127.0 — largest-first reduction, and the health-dump exemption (GH #63).
+//
+// The reduction above was all-or-nothing. Reading the lookahead census off the
+// prod droplets for #62, eleven relays came back whole and the twelfth read:
+//
+//   "lookahead":"<object omitted: ctx over 4000c>",
+//   "seated":"<27 entries omitted: ctx over 4000c>"
+//
+// One oversized array cost the record every other piece of evidence in it. And
+// both values that can overflow grow with load, so the dump went blind exactly
+// on the relays worth reading.
+//
+// A CLAIM THIS FENCE FALSIFIED WHILE IT WAS BEING WRITTEN. I wrote on #63 that
+// largest-first would drop `seated` and keep the census. Built to scale, the
+// census is the BIGGER value — 2,187 bytes against 1,628 — so largest-first
+// drops the census and keeps `seated`. Both were omitted on the observed line,
+// so the output said nothing about which was larger, and I assumed. That is why
+// the sizes below are asserted rather than described: an assumption about which
+// value is bigger is the whole content of the claim.
+// =====================================================================
+console.log('\n— largest-first: one oversized value must not cost the others —');
+
+// THE #63 SHAPE, to scale, from the sfo3/useast dump of 2026-09-10 00:24 UTC.
+const RANK_LABELS = ['0', '1', '2', '3', '4', '5', '6', '7', '8-15', '16-31', '32+'];
+const seated27 = Array.from({ length: 27 }, (_, i) => ({
+  topic: `898be2a9d3${String(i).padStart(2, '0')}`, isRoot: i % 9 === 0, kids: 0, cache: i * 7,
+}));
+const census = {
+  sinceMs: 14782087, calls: 116506, bypassedAtDestination: 63900, probingCalls: 52606,
+  probesEmitted: 1485120, probesPerCall: 28.2, probesEmittedPerSec: 100.5,
+  probesFulfilled: 1248653, probesRejected: 236317, probesTerminal: 1100224,
+  probesCloserThanMe: 148429, answeredByProbe: 45691, answeredByIncoming: 0, answeredNull: 6910,
+  usefulProbeRate: 0.8686, closerReplyRate: 0.1189,
+  byRank: RANK_LABELS.map((rank) => ({ rank, sent: 52606, closer: 218, rejected: 37280,
+    terminal: 15103, nonCloser: 0, rate: 0.0041, rateOfReplies: 0.0142 })),
+  callsWithAnyCloser: 45691,
+  topK: [1, 2, 4, 8, 16, 32].map((k) => ({ k, answered: 218, retained: 0.0048 })),
+  targetsNearerThanSelf: 13054, incomingCandidateLinks: 0, incomingCouldAnswerCalls: 0,
+  incomingWonFinalCalls: 0, incomingCouldAnswerRate: 0,
+};
+const dump27 = {
+  peers: 54, synaptome: 54, subscriptions: 0, roles: 27, rooted: 1, saturated: false,
+  helloPressure: 0.412, servicePressure: 0.02, tickLagMaxMs: 2061, tickLagPeakMs: 6792,
+  tickDurMs: 94, tickStalls: 7, worstObligation: 'BACKUP', overdueFrac: 0,
+  lookahead: census, seated: seated27,
+};
+{
+  check('the shape really does exceed the cap (else the rest proves nothing)',
+    JSON.stringify(dump27).length > EVIDENCE_CAP, `len=${JSON.stringify(dump27).length}`);
+  check('…and only just: 27 roles tipped it, 17 on the sibling relay did not',
+    JSON.stringify(dump27).length - EVIDENCE_CAP < 200,
+    `over by ${JSON.stringify(dump27).length - EVIDENCE_CAP}`);
+  // The claim I got wrong, pinned as a size relation so it cannot be re-assumed.
+  check('THE CENSUS IS THE LARGER VALUE, not `seated`',
+    JSON.stringify(census).length > JSON.stringify(seated27).length,
+    `census=${JSON.stringify(census).length} seated=${JSON.stringify(seated27).length}`);
+
+  // Under a NON-exempt name, so this tests the reduction and not the exemption.
+  const out = renderCtx('some-other-event', dump27);
+  const back = JSON.parse(out);
+  check('so largest-first drops the CENSUS — the opposite of what #63 claimed',
+    typeof back.lookahead === 'string' && back.lookahead.includes('object omitted'),
+    typeof back.lookahead);
+  check('…and `seated` survives whole',
+    Array.isArray(back.seated) && back.seated.length === 27, `${back.seated?.length}`);
+  check('…exactly ONE value was dropped, which is the improvement over all-or-nothing',
+    [back.lookahead, back.seated].filter((v) => typeof v === 'string').length === 1);
+  check('…scalars are untouched', back.peers === 54 && back.worstObligation === 'BACKUP');
+  check('…and the result fits the cap', out.length <= EVIDENCE_CAP, `len=${out.length}`);
+}
+{
+  // Stop EARLY. Two oversized arrays where dropping the larger alone suffices:
+  // the smaller must stay. A reducer that keeps going drops both.
+  const ctx = { a: 1,
+    big: Array.from({ length: 900 }, (_, i) => ({ id: `${i}`, v: 'fail' })),
+    small: [{ id: 'keep-me', v: 'ok' }] };
+  const back = JSON.parse(renderCtx('replicate-all-failed', ctx));
+  check('the big array goes', typeof back.big === 'string' && back.big.includes('900 entries'));
+  check('the small array STAYS — the reducer stopped as soon as it fit',
+    Array.isArray(back.small) && back.small[0].id === 'keep-me', JSON.stringify(back.small));
+}
+{
+  // Equal-sized values must reduce identically everywhere, or two relays in one
+  // fleet report different things about the same condition.
+  const mk = () => ({ z: Array.from({ length: 400 }, (_, i) => i),
+                      a: Array.from({ length: 400 }, (_, i) => i), tail: 'x' });
+  check('ties break deterministically by key',
+    renderCtx('e', mk()) === renderCtx('e', mk()));
+}
+{
+  // A value smaller than its own placeholder must not be "dropped" — that GROWS
+  // the record. Over the cap by a little beats destroying evidence to get under.
+  const tiny = { note: 'n'.repeat(4_050), who: [1] };
+  const back = JSON.parse(renderCtx('e', tiny));
+  check('a value smaller than its own note is left alone, even while over cap',
+    Array.isArray(back.who) && back.who[0] === 1, JSON.stringify(back.who));
+  check('…and the line is still whole and parseable, which is the real invariant',
+    back.note.length === 4_050);
+}
+
+console.log('\n— health-dump is a standing full-fidelity contract —');
+{
+  // THE ACTUAL FIX for #63. Largest-first alone would have taken the census;
+  // only the exemption keeps BOTH values on the record that prompted the issue.
+  const back = JSON.parse(renderCtx('health-dump', dump27));
+  check('the 27-role dump keeps its census',
+    back.lookahead?.probesEmitted === 1485120, typeof back.lookahead);
+  check('…and its rank buckets, which are the reason to read it',
+    back.lookahead?.byRank?.length === 11, `${back.lookahead?.byRank?.length}`);
+  check('…and `seated` as well — nothing is traded away',
+    Array.isArray(back.seated) && back.seated.length === 27, `${back.seated?.length}`);
+
+  const huge = { peers: 54, roles: 300,
+    seated: Array.from({ length: 300 }, (_, i) => ({ topic: `t${i}`, isRoot: false, kids: 0, cache: 0 })),
+    lookahead: { probesEmitted: 6236579, byRank: Array.from({ length: 11 }, (_, i) => ({ rank: `${i}`, sent: 468830 })) } };
+  check('health-dump is emitted WHOLE however many roles are seated',
+    renderCtx('health-dump', huge) === JSON.stringify(huge),
+    `len=${renderCtx('health-dump', huge).length} of ${JSON.stringify(huge).length}`);
+  check('isFullFidelity says so by name', isFullFidelity('health-dump') === true);
+  check('armed-* keeps its contract too', isFullFidelity('armed-modules') === true);
+  check('the exemption is EXACT, not a suffix match — an event that merely ends '
+    + 'in the name is still reduced', isFullFidelity('pubsub:health-dump') === false);
+  check('and an ordinary event is not exempt', isFullFidelity('routed-outcomes') === false);
+  check('a non-string event name does not throw', isFullFidelity(undefined) === false);
+}
+{
+  // The sibling events are NOT exempt: they are emitted by the relay itself, on
+  // its own schedule, and the shape rule is what bounds them.
+  check('health-dump-failed is not exempt', isFullFidelity('health-dump-failed') === false);
+  check('health-dump-unavailable is not exempt', isFullFidelity('health-dump-unavailable') === false);
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);
