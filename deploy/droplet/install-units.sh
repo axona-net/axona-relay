@@ -3,7 +3,7 @@ set -euo pipefail
 # =============================================================================
 # install-units.sh — put THIS repo's systemd config on a droplet, then prove it.
 #
-# WHY THIS EXISTS. Until 2026-09-11 the droplet region topology lived nowhere
+# WHY THIS EXISTS. Until 2026-09-10 the droplet region topology lived nowhere
 # but /etc/systemd/system on three hosts. Rebuild a droplet and it came back
 # with `uswest` in grizzly, because the template derives region from the
 # INSTANCE NAME and the instance names are geography. That mapping cost a

@@ -1,6 +1,6 @@
 # Droplet systemd config
 
-The region topology of the prod backbone. Until 2026-09-11 this lived nowhere
+The region topology of the prod backbone. Until 2026-09-10 this lived nowhere
 but `/etc/systemd/system` on three hosts, so rebuilding a droplet silently
 changed which region it served.
 
@@ -37,7 +37,7 @@ instance without one.**
 
 ## Enablement
 
-`install-units.sh` enables every instance it ships. It has to: on 2026-09-11 all
+`install-units.sh` enables every instance it ships. It has to: on 2026-09-10 all
 three droplets had `useast` and `uswest` **running but disabled** — started by
 hand and never wired to boot. A reboot would have returned a single relay, in
 the region with no traffic, and nothing would have reported the loss.
