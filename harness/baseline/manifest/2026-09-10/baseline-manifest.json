@@ -1,0 +1,1452 @@
+{
+  "schema": "axona-baseline-manifest/0.1",
+  "task": "AX-T1-D1 §5 / AX-T1-D2-DISPATCH-01 T1.1",
+  "collectedAt": "2026-09-10T23:40:24.646Z",
+  "collector": {
+    "script": "harness/baseline/collect-manifest.mjs",
+    "scriptSha256": "b4b840459ed071c74bc3b0efdabb7c93ee407d487dbc06a1135b8004f8bf2b29",
+    "os": "darwin 25.6.0 arm64",
+    "node": "v24.14.1",
+    "localOnly": false,
+    "hostSha256_12": "1c8905d22eca"
+  },
+  "components": {
+    "kernel": {
+      "repo": "axona-protocol",
+      "note": "the kernel package IS the SDK (@axona/protocol); no separate SDK artifact exists",
+      "checkout": {
+        "path": "<ws>/axona-protocol",
+        "commit": "adce81c660fb00b5ba5a99967cef726f84694d83",
+        "headDate": "2026-09-09T16:06:05-04:00",
+        "branch": "testnet",
+        "remote": "https://github.com/axona-net/axona-protocol.git",
+        "aheadBehindUpstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "exactTag": "v4.84.0",
+        "dirty": {
+          "trackedModified": 0,
+          "trackedFiles": [],
+          "untracked": 1,
+          "untrackedNames": [
+            "test/fence_shadowed_branch_continuity.mjs"
+          ]
+        },
+        "packageName": "@axona/protocol",
+        "packageVersion": "4.84.0",
+        "lockfile": {
+          "name": "package-lock.json",
+          "sha256": "ddf5a08fe66e24da53b5bd82ae2c5da10055e0e5491159e19222603af9c6067a"
+        }
+      },
+      "kernelConst": "4.84.0",
+      "adce81cResolves": "adce81c660fb00b5ba5a99967cef726f84694d83"
+    },
+    "relay": {
+      "repo": "axona-relay",
+      "checkout": {
+        "path": "<ws>/axona-relay",
+        "commit": "0959a66bc8f8af31b04fe70b06bd3b8ac73f5669",
+        "headDate": "2026-09-10T15:37:03-04:00",
+        "branch": "testnet",
+        "remote": "https://github.com/axona-net/axona-relay.git",
+        "aheadBehindUpstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "exactTag": null,
+        "dirty": {
+          "trackedModified": 0,
+          "trackedFiles": [],
+          "untracked": 1,
+          "untrackedNames": [
+            "harness/baseline/"
+          ]
+        },
+        "packageName": "axona-relay",
+        "packageVersion": "0.127.0",
+        "lockfile": {
+          "name": "package-lock.json",
+          "sha256": "4f218c4cc57e796df4a2db301c856f738efb244ed9cc805e1419899216169343"
+        }
+      },
+      "builtArtifact": {
+        "vendorKernelVersion": "4.84.0",
+        "vendorKernelConst": "4.84.0",
+        "vendorSrcFilesDifferingFromKernelCheckout": 0,
+        "vendorBumpHistory": [
+          {
+            "commit": "3098e8d",
+            "date": "2026-09-09T20:11:26.000Z",
+            "kernel": "4.84.0"
+          },
+          {
+            "commit": "21f75a9",
+            "date": "2026-09-09T18:48:51.000Z",
+            "kernel": "4.83.0"
+          },
+          {
+            "commit": "03d2fab",
+            "date": "2026-09-09T17:21:17.000Z",
+            "kernel": "4.82.0"
+          },
+          {
+            "commit": "433cd14",
+            "date": "2026-09-09T15:45:57.000Z",
+            "kernel": "4.81.0"
+          },
+          {
+            "commit": "290073a",
+            "date": "2026-09-08T20:13:54.000Z",
+            "kernel": "4.79.0"
+          },
+          {
+            "commit": "78b536e",
+            "date": "2026-09-08T15:25:53.000Z",
+            "kernel": "4.78.0"
+          }
+        ]
+      }
+    },
+    "mcp": {
+      "repo": "axona-relay (src/mcp.js, src/mcp-session.js)",
+      "note": "the live MCP is the relay repo; <ws>/axona-mcp is a July checkout with no remote and is NOT what runs",
+      "staleRepoCheckout": {
+        "path": "<ws>/axona-mcp",
+        "commit": "ae3180d9dafff66ee45e63f10125a513b932ca6e",
+        "headDate": "2026-07-29T15:05:34-04:00",
+        "branch": "main",
+        "remote": {
+          "status": "missing",
+          "reason": "no origin remote"
+        },
+        "aheadBehindUpstream": {
+          "status": "not_observable",
+          "reason": "no upstream"
+        },
+        "exactTag": null,
+        "dirty": {
+          "trackedModified": 0,
+          "trackedFiles": [],
+          "untracked": 0,
+          "untrackedNames": []
+        },
+        "packageName": "@axona/mcp",
+        "packageVersion": "0.2.0",
+        "lockfile": {
+          "name": "package-lock.json",
+          "sha256": "22943bfa41964c371bd6646069fd9e33a72a401dd410c2515adb0e3c795f7a2b"
+        }
+      },
+      "servers": {
+        "axona": {
+          "entry": "<ws>/axona-relay/src/mcp.js",
+          "env": {
+            "MCP_STANDING_WATCHES": "council,axona.dev,general,jokes,axona.chat,axona.bot!owned"
+          },
+          "envKeysWithheld": []
+        },
+        "axona-testnet": {
+          "entry": "<ws>/axona-relay/src/mcp.js",
+          "env": {
+            "RELAY_NETWORK": "testnet"
+          },
+          "envKeysWithheld": [
+            "MCP_AUTHOR_PATH"
+          ]
+        },
+        "axona-cursor": {
+          "entry": "<ws>/axona-relay/src/mcp.js",
+          "env": {
+            "BRIDGE_URL": "wss://bridge.axona.net",
+            "MCP_REGION": "eagle",
+            "MCP_HANDLE": "Vega",
+            "MCP_STANDING_WATCHES": "council,axona.dev,general,jokes,axona.chat"
+          },
+          "envKeysWithheld": [
+            "MCP_AUTHOR_PATH",
+            "MCP_AUTHOR_CLASS",
+            "MCP_OPERATOR",
+            "MCP_INBOX",
+            "MCP_INBOX_TOPICS"
+          ]
+        }
+      },
+      "runningProcess": [
+        {
+          "pid": 2874,
+          "parentPid": 1,
+          "parentApp": "launchd",
+          "startedAt": "2026-09-05T15:30:50.100Z",
+          "rssKB": 213216,
+          "kernelAtStart": {
+            "status": "inferred",
+            "value": "4.75.2",
+            "reason": "vendor bump 4ce2551 at 2026-09-05T02:55:57.000Z precedes process start"
+          },
+          "note": "orphan: parent is launchd, no live app"
+        },
+        {
+          "pid": 27530,
+          "parentPid": 27420,
+          "parentApp": "claude",
+          "startedAt": "2026-09-09T19:39:24.100Z",
+          "rssKB": 35424,
+          "kernelAtStart": {
+            "status": "inferred",
+            "value": "4.83.0",
+            "reason": "vendor bump 21f75a9 at 2026-09-09T18:48:51.000Z precedes process start"
+          }
+        },
+        {
+          "pid": 27532,
+          "parentPid": 27420,
+          "parentApp": "claude",
+          "startedAt": "2026-09-09T19:39:24.100Z",
+          "rssKB": 35552,
+          "kernelAtStart": {
+            "status": "inferred",
+            "value": "4.83.0",
+            "reason": "vendor bump 21f75a9 at 2026-09-09T18:48:51.000Z precedes process start"
+          }
+        },
+        {
+          "pid": 49686,
+          "parentPid": 49766,
+          "parentApp": "codex",
+          "startedAt": "2026-09-07T20:59:10.100Z",
+          "rssKB": 207296,
+          "kernelAtStart": {
+            "status": "inferred",
+            "value": "4.76.3",
+            "reason": "vendor bump a0f9b7c at 2026-09-07T15:53:45.000Z precedes process start"
+          }
+        },
+        {
+          "pid": 51989,
+          "parentPid": 27420,
+          "parentApp": "claude",
+          "startedAt": "2026-09-10T03:30:41.100Z",
+          "rssKB": 244304,
+          "kernelAtStart": {
+            "status": "inferred",
+            "value": "4.84.0",
+            "reason": "vendor bump 3098e8d at 2026-09-09T20:11:26.000Z precedes process start"
+          }
+        },
+        {
+          "pid": 82057,
+          "parentPid": 81909,
+          "parentApp": "Cursor Helper: mcp-process",
+          "startedAt": "2026-09-07T17:38:35.100Z",
+          "rssKB": 242224,
+          "kernelAtStart": {
+            "status": "inferred",
+            "value": "4.76.3",
+            "reason": "vendor bump a0f9b7c at 2026-09-07T15:53:45.000Z precedes process start"
+          }
+        }
+      ]
+    },
+    "chat": {
+      "repo": "axona-chat",
+      "checkout": {
+        "path": "<ws>/axona-chat",
+        "commit": "d37b9a9ec0ffbf35e8298d574a69d3aa92240a77",
+        "headDate": "2026-09-09T16:29:02-04:00",
+        "branch": "main",
+        "remote": "https://github.com/axona-net/axona-chat.git",
+        "aheadBehindUpstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "exactTag": null,
+        "dirty": {
+          "trackedModified": 0,
+          "trackedFiles": [],
+          "untracked": 0,
+          "untrackedNames": []
+        },
+        "packageName": "axona-chat",
+        "packageVersion": "0.61.0",
+        "lockfile": {
+          "name": "package-lock.json",
+          "sha256": "83db934269085b70ec55b8d700e73395d810e72a2db5bdf92dc462177dcc5bbc"
+        }
+      },
+      "builtArtifact": {
+        "dependencySpec": "github:axona-net/axona-protocol#v4.84.0",
+        "installedVersion": "4.84.0",
+        "installedKernelConst": "4.84.0"
+      },
+      "remoteReport": {
+        "asset": "assets/index-CC3_Oufi.js",
+        "bundleSha256": "cd91d6bd2d20223c62db2f6645e9d25cc44761841b5e900677a1fc7e70d2e487",
+        "bundleBytes": 1274755,
+        "versionLiterals": {
+          "4.84.0": 2,
+          "4.22.1": 1,
+          "0.61.0": 2
+        },
+        "note": "literals are strings found in the minified bundle; the KERNEL_VERSION export is a getter, so the constant is attributed by literal count, not by symbol"
+      }
+    },
+    "bridge": {
+      "repo": "axona-bridge",
+      "checkout": {
+        "path": "<ws>/axona-bridge",
+        "commit": "1fee537a455b39c7555b9a2a9bec59b148408846",
+        "headDate": "2026-09-09T16:24:33-04:00",
+        "branch": "testnet",
+        "remote": "https://github.com/axona-net/axona-bridge.git",
+        "aheadBehindUpstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "exactTag": null,
+        "dirty": {
+          "trackedModified": 0,
+          "trackedFiles": [],
+          "untracked": 0,
+          "untrackedNames": []
+        },
+        "packageName": "axona-bridge",
+        "packageVersion": "2.124.0",
+        "lockfile": {
+          "name": "package-lock.json",
+          "sha256": "c4c5f1a066d8cd9f383a492a222a148f008f99693ec609ed68aca8a8a1edde7d"
+        }
+      },
+      "builtArtifact": {
+        "dependencySpec": "github:axona-net/axona-protocol#v4.84.0",
+        "installedVersion": "4.84.0",
+        "installedKernelConst": "4.84.0"
+      },
+      "remoteReport": {
+        "east": {
+          "version": "2.124.0",
+          "kernelVersion": "4.84.0",
+          "status": "ok",
+          "observedAt": "2026-09-10T23:40:25.700Z"
+        },
+        "west": {
+          "version": "2.124.0",
+          "kernelVersion": "4.84.0",
+          "status": "ok",
+          "observedAt": "2026-09-10T23:40:25.972Z"
+        }
+      },
+      "runningProcess": {
+        "east": {
+          "checkoutCommit": "1fee537a455b39c7555b9a2a9bec59b148408846",
+          "dirtyEntries": 4,
+          "containers": [
+            {
+              "name": "axona-bridge-bridge-1",
+              "image": "axona-bridge",
+              "imageId": "sha256:47c4441bc8bd134cc99193c7e4e059b1d643d699da80a2b5b19445d9a059dc2d",
+              "startedAt": "2026-09-10T21:33:35.858630121Z"
+            },
+            {
+              "name": "axona-bridge-coturn-1",
+              "image": "coturn/coturn:4.6.2",
+              "imageId": "sha256:4873c54f213ec81f6b4c4c4938b69c922f50b2293ded427f5191472b9a127227",
+              "startedAt": "2026-09-09T01:01:05.393815878Z"
+            },
+            {
+              "name": "axona-bridge-caddy-1",
+              "image": "caddy:2",
+              "imageId": "sha256:cfeb0b281bc44a5a51fecde39e9e577c60d863c0b6196e6bbdf58fd00960887f",
+              "startedAt": "2026-06-19T17:38:49.173527933Z"
+            }
+          ]
+        },
+        "west": {
+          "checkoutCommit": "1fee537a455b39c7555b9a2a9bec59b148408846",
+          "dirtyEntries": 1,
+          "containers": [
+            {
+              "name": "axona-bridge-docker-bridge-1",
+              "image": "axona-bridge",
+              "imageId": "sha256:d6c366bc3f3c852bc302ca3e670b4e1c8ead322d25529bb85f5b0b73ef0113d7",
+              "startedAt": "2026-09-10T21:42:23.614252063Z"
+            },
+            {
+              "name": "axona-bridge-docker-caddy-1",
+              "image": "caddy:2",
+              "imageId": "sha256:cfeb0b281bc44a5a51fecde39e9e577c60d863c0b6196e6bbdf58fd00960887f",
+              "startedAt": "2026-06-21T03:06:28.855142158Z"
+            },
+            {
+              "name": "axona-bridge-docker-coturn-1",
+              "image": "coturn/coturn:4.6.2",
+              "imageId": "sha256:4873c54f213ec81f6b4c4c4938b69c922f50b2293ded427f5191472b9a127227",
+              "startedAt": "2026-06-21T03:06:28.853389049Z"
+            }
+          ]
+        }
+      },
+      "configNote": "bridge .env (STRICT_MIN_KERNEL, HEALTHZ_TOKEN, TURN secret) is unversioned and not copied; STRICT_MIN_KERNEL=4.84.0 set by hand on both 2026-09-10 per ops/STATE.md"
+    },
+    "web": {
+      "repo": "axona-web",
+      "checkout": {
+        "path": "<ws>/axona-web",
+        "commit": "ef3d27fbe3c12254cf8484a6736451681967fc80",
+        "headDate": "2026-07-27T16:05:51-04:00",
+        "branch": "main",
+        "remote": "https://github.com/axona-net/axona-web.git",
+        "aheadBehindUpstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "exactTag": null,
+        "dirty": {
+          "trackedModified": 6,
+          "trackedFiles": [
+            "assets/AxonaLeft.png",
+            "assets/ant.png",
+            "assets/axonachat.png",
+            "assets/civildefense.png",
+            "assets/favicon.png",
+            "index.html"
+          ],
+          "untracked": 1,
+          "untrackedNames": [
+            "images/"
+          ]
+        },
+        "packageName": "axona-web",
+        "packageVersion": "4.9.0",
+        "lockfile": {
+          "status": "missing",
+          "reason": "no lockfile"
+        }
+      }
+    },
+    "docs": {
+      "repo": "axona-docs",
+      "checkout": {
+        "path": "<ws>/axona-docs",
+        "commit": "f238814e8225a7b4ffa6eac735e5622de7d6710f",
+        "headDate": "2026-09-10T18:50:38-04:00",
+        "branch": "main",
+        "remote": "https://github.com/axona-net/axona-docs.git",
+        "aheadBehindUpstream": {
+          "ahead": 0,
+          "behind": 0
+        },
+        "exactTag": null,
+        "dirty": {
+          "trackedModified": 3,
+          "trackedFiles": [
+            "council/COUNCIL-LOGS.md",
+            "council/COUNCIL-TRANSCRIPT-FULL.md",
+            "\"team-updates/Agent to Agent.md\""
+          ],
+          "untracked": 82,
+          "untrackedNames": [
+            "\"Agent to Agent.md\"",
+            "architecture/AX-T1-D2-Amendments-2026-09-10.md",
+            "architecture/AX-T1-D2-DISPATCH-01.md",
+            "architecture/Axona-CP-Priority-Plan-2026-09-10.md",
+            "architecture/Axona-Four-Angles-v0.1.md",
+            "architecture/Axona-Task-1-Baseline-Manifest-2026-09-10.md",
+            "architecture/Axona-Task-1-Design-2026-09-10.md",
+            "architecture/Axona_Nostr_Interoperability_v0_1.md",
+            "architecture/Axona_Topic_Derived_Encryption_v0_1.md",
+            "assets/",
+            "\"context workbench 2026-08-13 at 20.09.mov\"",
+            "council/COUNCIL-LOGS-2026-08-08.md",
+            "council/COUNCIL-LOGS-2026-08-09.md",
+            "council/COUNCIL-LOGS-2026-08-10.md",
+            "council/COUNCIL-LOGS-2026-08-11.md",
+            "council/COUNCIL-LOGS-2026-08-12.md",
+            "council/COUNCIL-LOGS-2026-08-13.md",
+            "council/COUNCIL-LOGS-2026-08-14.md",
+            "council/COUNCIL-LOGS-2026-08-15.md",
+            "council/COUNCIL-LOGS-2026-08-16.md",
+            "council/COUNCIL-LOGS-2026-08-17.md",
+            "council/COUNCIL-LOGS-2026-08-18.md",
+            "council/COUNCIL-LOGS-2026-08-19.md",
+            "council/COUNCIL-LOGS-2026-08-20.md",
+            "council/COUNCIL-LOGS-2026-08-21.md",
+            "council/COUNCIL-LOGS-2026-08-22.md",
+            "council/COUNCIL-LOGS-2026-08-23.md",
+            "council/COUNCIL-LOGS-2026-08-24.md",
+            "council/COUNCIL-LOGS-2026-08-25.md",
+            "council/COUNCIL-LOGS-2026-08-26.md",
+            "council/COUNCIL-LOGS-2026-08-27.md",
+            "council/COUNCIL-LOGS-2026-08-28.md",
+            "council/COUNCIL-LOGS-2026-08-29.md",
+            "council/COUNCIL-LOGS-2026-08-30.md",
+            "council/COUNCIL-LOGS-2026-08-31.md",
+            "council/COUNCIL-LOGS-2026-09-01.md",
+            "council/COUNCIL-LOGS-2026-09-02.md",
+            "council/COUNCIL-LOGS-2026-09-03.md",
+            "council/COUNCIL-LOGS-2026-09-04.md",
+            "council/COUNCIL-LOGS-2026-09-05.md",
+            "council/COUNCIL-LOGS-2026-09-06.md",
+            "council/COUNCIL-LOGS-2026-09-07.md",
+            "council/COUNCIL-LOGS-2026-09-08.md",
+            "council/COUNCIL-LOGS-2026-09-09.md",
+            "council/COUNCIL-LOGS-2026-09-10.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-08.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-09.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-10.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-11.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-12.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-13.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-14.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-15.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-16.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-17.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-18.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-19.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-20.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-21.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-22.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-23.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-24.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-25.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-26.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-27.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-28.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-29.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-30.md",
+            "council/COUNCIL-TRANSCRIPT-2026-08-31.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-01.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-02.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-03.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-04.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-05.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-06.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-07.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-08.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-09.md",
+            "council/COUNCIL-TRANSCRIPT-2026-09-10.md",
+            "council/DELETED-orion-relay-scripts-2026-09-08.txt",
+            "council/README.md",
+            "team-updates/TEAMUPDATEtwoweeks20260909v4.84.0.md"
+          ]
+        },
+        "packageName": null,
+        "packageVersion": null,
+        "lockfile": {
+          "status": "missing",
+          "reason": "no lockfile"
+        }
+      }
+    }
+  },
+  "localHost": {
+    "load1_5_15": [
+      6.10693359375,
+      6.94677734375,
+      6.99267578125
+    ],
+    "uptimeSec": 461489,
+    "totalMemMB": 49152,
+    "hostSha256_12": "1c8905d22eca"
+  },
+  "fleet": [
+    {
+      "host": "air",
+      "flavour": "mac",
+      "regionConfig": "eagle",
+      "sampledAt": "2026-09-10T23:40:36.913Z",
+      "targetRelays": 6,
+      "reachable": true,
+      "checkoutCommit": "b77cbe5",
+      "dirtyEntries": 1,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": "8.15 6.86 6.89",
+      "observedRelays": 6,
+      "runningKernels": [
+        "6 kernel v4.84.0"
+      ],
+      "processes": [
+        {
+          "pid": 58779,
+          "startedAt": "2026-09-10T02:03:10.913Z",
+          "rssKB": 221776
+        },
+        {
+          "pid": 58822,
+          "startedAt": "2026-09-10T02:03:16.913Z",
+          "rssKB": 222912
+        },
+        {
+          "pid": 58863,
+          "startedAt": "2026-09-10T02:03:21.913Z",
+          "rssKB": 237904
+        },
+        {
+          "pid": 58913,
+          "startedAt": "2026-09-10T02:03:29.913Z",
+          "rssKB": 222960
+        },
+        {
+          "pid": 58961,
+          "startedAt": "2026-09-10T02:03:35.913Z",
+          "rssKB": 221104
+        },
+        {
+          "pid": 59011,
+          "startedAt": "2026-09-10T02:03:43.913Z",
+          "rssKB": 229392
+        }
+      ]
+    },
+    {
+      "host": "m1",
+      "flavour": "mac",
+      "regionConfig": "eagle",
+      "sampledAt": "2026-09-10T23:40:37.491Z",
+      "targetRelays": 8,
+      "reachable": true,
+      "checkoutCommit": "b77cbe5",
+      "dirtyEntries": 8,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": "12.44 11.72 11.55",
+      "observedRelays": 8,
+      "runningKernels": [
+        "8 kernel v4.84.0"
+      ],
+      "processes": [
+        {
+          "pid": 56329,
+          "startedAt": "2026-09-10T18:44:32.491Z",
+          "rssKB": 204128
+        },
+        {
+          "pid": 56400,
+          "startedAt": "2026-09-10T18:44:44.491Z",
+          "rssKB": 205440
+        },
+        {
+          "pid": 56457,
+          "startedAt": "2026-09-10T18:44:50.491Z",
+          "rssKB": 211296
+        },
+        {
+          "pid": 56516,
+          "startedAt": "2026-09-10T18:44:56.491Z",
+          "rssKB": 229264
+        },
+        {
+          "pid": 56577,
+          "startedAt": "2026-09-10T18:45:00.491Z",
+          "rssKB": 208816
+        },
+        {
+          "pid": 56634,
+          "startedAt": "2026-09-10T18:45:03.491Z",
+          "rssKB": 852816
+        },
+        {
+          "pid": 56702,
+          "startedAt": "2026-09-10T18:45:12.491Z",
+          "rssKB": 205104
+        },
+        {
+          "pid": 56759,
+          "startedAt": "2026-09-10T18:45:18.491Z",
+          "rssKB": 210240
+        }
+      ]
+    },
+    {
+      "host": "axona-linux",
+      "flavour": "linux",
+      "regionConfig": "eagle",
+      "sampledAt": "2026-09-10T23:40:38.398Z",
+      "targetRelays": 5,
+      "reachable": true,
+      "checkoutCommit": "b77cbe5",
+      "dirtyEntries": 2,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": "0.69, 0.68, 0.55",
+      "observedRelays": 5,
+      "runningKernels": [
+        "5 kernel v4.84.0"
+      ],
+      "processes": [
+        {
+          "pid": 474688,
+          "startedAt": "2026-09-10T18:24:10.398Z",
+          "rssKB": 252280
+        },
+        {
+          "pid": 474809,
+          "startedAt": "2026-09-10T18:24:52.398Z",
+          "rssKB": 283256
+        },
+        {
+          "pid": 474936,
+          "startedAt": "2026-09-10T18:25:33.398Z",
+          "rssKB": 288240
+        },
+        {
+          "pid": 475282,
+          "startedAt": "2026-09-10T18:26:16.398Z",
+          "rssKB": 163676
+        },
+        {
+          "pid": 475632,
+          "startedAt": "2026-09-10T18:26:57.398Z",
+          "rssKB": 417068
+        }
+      ]
+    },
+    {
+      "host": "axona-win",
+      "flavour": "win",
+      "regionConfig": "eagle",
+      "sampledAt": "2026-09-10T23:40:38.923Z",
+      "targetRelays": 20,
+      "reachable": true,
+      "checkoutCommit": "b77cbe5",
+      "dirtyEntries": 4,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": {
+        "status": "not_observable",
+        "reason": "uptime not collected on this platform"
+      },
+      "observedRelays": 21,
+      "runningKernels": [
+        "20/21 started by generation 20260909-220315"
+      ],
+      "processes": [
+        {
+          "pid": 3112,
+          "startedAtHostLocal": "2026-09-10T13:48:44",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 204076,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 28680,
+          "startedAtHostLocal": "2026-09-10T13:48:47",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 200460,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 34260,
+          "startedAtHostLocal": "2026-09-10T13:48:51",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 189524,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 21464,
+          "startedAtHostLocal": "2026-09-10T13:48:54",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 207400,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 13936,
+          "startedAtHostLocal": "2026-09-10T13:48:57",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 226752,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 20408,
+          "startedAtHostLocal": "2026-09-10T13:49:00",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 193712,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 25348,
+          "startedAtHostLocal": "2026-09-10T13:49:04",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 200948,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 36716,
+          "startedAtHostLocal": "2026-09-10T13:49:07",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 200768,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 17136,
+          "startedAtHostLocal": "2026-09-10T13:49:10",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 215260,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 25628,
+          "startedAtHostLocal": "2026-09-10T13:49:13",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 198580,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 35616,
+          "startedAtHostLocal": "2026-09-10T13:49:17",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 195856,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 30780,
+          "startedAtHostLocal": "2026-09-10T13:49:20",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 195956,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 35560,
+          "startedAtHostLocal": "2026-09-10T13:49:23",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 193724,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 28872,
+          "startedAtHostLocal": "2026-09-10T13:49:26",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 207636,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 37164,
+          "startedAtHostLocal": "2026-09-10T13:49:30",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 205368,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 29060,
+          "startedAtHostLocal": "2026-09-10T13:49:36",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 136640,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 10100,
+          "startedAtHostLocal": "2026-09-10T13:49:40",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 219388,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 32248,
+          "startedAtHostLocal": "2026-09-10T13:49:43",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 124376,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 38792,
+          "startedAtHostLocal": "2026-09-10T13:49:46",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 200348,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 39796,
+          "startedAtHostLocal": "2026-09-10T16:04:07",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 218796,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        },
+        {
+          "pid": 33764,
+          "startedAtHostLocal": "2026-09-10T16:10:28",
+          "hostClock": "2026-09-10T19:40:40.9774843-04:00",
+          "rssKB": 195908,
+          "commandLine": "\"C:\\Program Files\\nodejs\\node.exe\" src/index.js",
+          "bannerKernel": {
+            "status": "not_observable",
+            "reason": "Windows: stdout fd not resolvable from git-bash; banner not read"
+          }
+        }
+      ],
+      "note": "tasklist counts EVERY node.exe; commandLine per process shows whether each is src/index.js. relay-census.sh --kernels on Windows is a PROXY that reads relay-logs/roll-*.log generations; current logs are named win-*.log, so the proxy reports a stale generation. Finding against the tool, not corrected here.",
+      "finding": "observed 21 vs target 20"
+    },
+    {
+      "host": "143.110.224.247",
+      "flavour": "droplet",
+      "regionConfig": "useast/uswest=eagle, grizzly1=grizzly",
+      "sampledAt": "2026-09-10T23:40:42.178Z",
+      "targetRelays": 3,
+      "reachable": true,
+      "checkoutCommit": "0959a66",
+      "dirtyEntries": 1,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": "1.73, 2.90, 3.59",
+      "memoryMB": {
+        "total": 961,
+        "used": 562,
+        "available": 399
+      },
+      "observedRelays": 3,
+      "runningKernels": [],
+      "processes": [
+        {
+          "unit": "axona-relay@grizzly1.service",
+          "pid": 1498154,
+          "startedAt": "2026-09-10T04:23:03.178Z",
+          "rssKB": 84564,
+          "region": "grizzly",
+          "bannerKernel": "4.84.0"
+        },
+        {
+          "unit": "axona-relay@useast.service",
+          "pid": 1498472,
+          "startedAt": "2026-09-10T04:23:15.178Z",
+          "rssKB": 183288,
+          "region": "eagle",
+          "bannerKernel": "4.84.0"
+        },
+        {
+          "unit": "axona-relay@uswest.service",
+          "pid": 1514002,
+          "startedAt": "2026-09-10T18:54:29.178Z",
+          "rssKB": 105364,
+          "region": "eagle",
+          "bannerKernel": "4.84.0"
+        }
+      ]
+    },
+    {
+      "host": "167.71.106.63",
+      "flavour": "droplet",
+      "regionConfig": "useast/uswest=eagle, grizzly1=grizzly",
+      "sampledAt": "2026-09-10T23:40:46.327Z",
+      "targetRelays": 3,
+      "reachable": true,
+      "checkoutCommit": "0959a66",
+      "dirtyEntries": 1,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": "0.67, 1.59, 2.03",
+      "memoryMB": {
+        "total": 961,
+        "used": 505,
+        "available": 456
+      },
+      "observedRelays": 3,
+      "runningKernels": [],
+      "processes": [
+        {
+          "unit": "axona-relay@grizzly1.service",
+          "pid": 1505502,
+          "startedAt": "2026-09-10T04:26:57.327Z",
+          "rssKB": 95452,
+          "region": "grizzly",
+          "bannerKernel": "4.84.0"
+        },
+        {
+          "unit": "axona-relay@useast.service",
+          "pid": 1520273,
+          "startedAt": "2026-09-10T18:30:27.327Z",
+          "rssKB": 101200,
+          "region": "eagle",
+          "bannerKernel": "4.84.0"
+        },
+        {
+          "unit": "axona-relay@uswest.service",
+          "pid": 1521520,
+          "startedAt": "2026-09-10T18:53:22.327Z",
+          "rssKB": 103052,
+          "region": "eagle",
+          "bannerKernel": "4.84.0"
+        }
+      ]
+    },
+    {
+      "host": "159.203.46.28",
+      "flavour": "droplet",
+      "regionConfig": "useast/uswest=eagle, grizzly1=grizzly",
+      "sampledAt": "2026-09-10T23:40:54.485Z",
+      "targetRelays": 3,
+      "reachable": true,
+      "checkoutCommit": "0959a66",
+      "dirtyEntries": 1,
+      "relayPackageVersion": "0.127.0",
+      "vendorKernelVersion": "4.84.0",
+      "load": "0.35, 1.13, 1.36",
+      "memoryMB": {
+        "total": 961,
+        "used": 550,
+        "available": 410
+      },
+      "observedRelays": 3,
+      "runningKernels": [],
+      "processes": [
+        {
+          "unit": "axona-relay@grizzly1.service",
+          "pid": 1476061,
+          "startedAt": "2026-09-10T04:28:58.485Z",
+          "rssKB": 93308,
+          "region": "grizzly",
+          "bannerKernel": "4.84.0"
+        },
+        {
+          "unit": "axona-relay@useast.service",
+          "pid": 1493578,
+          "startedAt": "2026-09-10T17:33:10.485Z",
+          "rssKB": 146652,
+          "region": "eagle",
+          "bannerKernel": "4.84.0"
+        },
+        {
+          "unit": "axona-relay@uswest.service",
+          "pid": 1497197,
+          "startedAt": "2026-09-10T18:55:15.485Z",
+          "rssKB": 102636,
+          "region": "eagle",
+          "bannerKernel": "4.84.0"
+        }
+      ]
+    }
+  ],
+  "unknowns": [
+    "running-artifact identity: a start banner proves what a process LOADED at start, not that its files are unchanged since; no in-process attestation exists",
+    "Windows relays: per-process kernel banner not readable from git-bash; SIGUSR1 health-dump has no Windows path; count is every node.exe",
+    "droplet relays: kernel read from journald since unit ActiveEnterTimestamp; if the journal rotated, banner is not_observable",
+    "MCP peers: kernel-at-start is INFERRED from vendor bump dates, not read from the process",
+    "storm-window comparability: no retained per-host time series before 2026-09-09; Task 8a owns this",
+    "soak contamination: axona-stress/soak-v3.sh was running on axona-linux against prod during collection (~1.8 fresh nodes/min)",
+    "bridge .env and droplet region drop-ins are host-local configuration; drop-ins are versioned at axona-relay/deploy/droplet, .env is not"
+  ],
+  "collectionCommands": [
+    {
+      "at": "2026-09-10T23:40:24.647Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git log --format=%h %cI %s -- vendor/axona-protocol/package.json"
+    },
+    {
+      "at": "2026-09-10T23:40:24.728Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:24.740Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:24.755Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:24.768Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:24.827Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:24.838Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:24.850Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:24.862Z",
+      "cwd": "<ws>/axona-protocol",
+      "cmd": "git rev-parse --verify -q adce81c^{commit}"
+    },
+    {
+      "at": "2026-09-10T23:40:24.874Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:24.887Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:24.903Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:24.916Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:24.930Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:24.941Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:24.953Z",
+      "cwd": "<ws>/axona-relay",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:24.965Z",
+      "cmd": "diff -rq <ws>/axona-protocol/src <ws>/axona-relay/vendor/axona-protocol/src"
+    },
+    {
+      "at": "2026-09-10T23:40:24.996Z",
+      "cwd": "<ws>/axona-mcp",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:25.010Z",
+      "cwd": "<ws>/axona-mcp",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:25.023Z",
+      "cwd": "<ws>/axona-mcp",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:25.034Z",
+      "cwd": "<ws>/axona-mcp",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:25.046Z",
+      "cwd": "<ws>/axona-mcp",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:25.058Z",
+      "cwd": "<ws>/axona-mcp",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:25.069Z",
+      "cmd": "ps -axo pid=,ppid=,etime=,rss=,args="
+    },
+    {
+      "at": "2026-09-10T23:40:25.100Z",
+      "cmd": "ps -o comm= -p 1"
+    },
+    {
+      "at": "2026-09-10T23:40:25.102Z",
+      "cmd": "ps -o comm= -p 27420"
+    },
+    {
+      "at": "2026-09-10T23:40:25.104Z",
+      "cmd": "ps -o comm= -p 27420"
+    },
+    {
+      "at": "2026-09-10T23:40:25.106Z",
+      "cmd": "ps -o comm= -p 49766"
+    },
+    {
+      "at": "2026-09-10T23:40:25.108Z",
+      "cmd": "ps -o comm= -p 27420"
+    },
+    {
+      "at": "2026-09-10T23:40:25.110Z",
+      "cmd": "ps -o comm= -p 81909"
+    },
+    {
+      "at": "2026-09-10T23:40:25.112Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:25.126Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:25.139Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:25.156Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:25.169Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:25.180Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:25.192Z",
+      "cwd": "<ws>/axona-chat",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:25.205Z",
+      "cmd": "curl -sS -m 10 https://axona.chat/"
+    },
+    {
+      "at": "2026-09-10T23:40:25.301Z",
+      "cmd": "curl -sS -m 30 https://axona.chat/assets/index-CC3_Oufi.js"
+    },
+    {
+      "at": "2026-09-10T23:40:25.461Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:25.476Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:25.491Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:25.504Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:25.519Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:25.532Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:25.544Z",
+      "cwd": "<ws>/axona-bridge",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:25.558Z",
+      "cmd": "curl -sS -m 10 https://bridge.axona.net/healthz"
+    },
+    {
+      "at": "2026-09-10T23:40:25.700Z",
+      "cmd": "curl -sS -m 10 https://bridge-west.axona.net/healthz"
+    },
+    {
+      "at": "2026-09-10T23:40:25.972Z",
+      "cmd": "ssh -o ConnectTimeout=20 axona-bridge cd /opt/axona-bridge 2>/dev/null || { echo NODIR; exit 0; }; echo HEAD=$(git rev-parse HEAD); echo DIRTY=$(git status --porcelain | wc -l); for c in $(docker ps -q); do docker inspect -f '{{.Name}} {{.Config.Image}} {{.Image}} {{.State.StartedAt}}' $c; done"
+    },
+    {
+      "at": "2026-09-10T23:40:32.340Z",
+      "cmd": "ssh -o ConnectTimeout=20 -i <home>/.ssh/id_ed25519_axona root@24.199.98.119 cd /opt/axona-bridge-docker 2>/dev/null || { echo NODIR; exit 0; }; echo HEAD=$(git rev-parse HEAD); echo DIRTY=$(git status --porcelain | wc -l); for c in $(docker ps -q); do docker inspect -f '{{.Name}} {{.Config.Image}} {{.Image}} {{.State.StartedAt}}' $c; done"
+    },
+    {
+      "at": "2026-09-10T23:40:36.718Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:36.739Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:36.754Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:36.767Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:36.786Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:36.801Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:36.812Z",
+      "cwd": "<ws>/axona-web",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:36.823Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git log -1 --format=%H%n%cI"
+    },
+    {
+      "at": "2026-09-10T23:40:36.836Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git status --porcelain"
+    },
+    {
+      "at": "2026-09-10T23:40:36.852Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git rev-list --left-right --count HEAD...@{u}"
+    },
+    {
+      "at": "2026-09-10T23:40:36.864Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git describe --tags --exact-match HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:36.877Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git rev-parse --abbrev-ref HEAD"
+    },
+    {
+      "at": "2026-09-10T23:40:36.889Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:36.900Z",
+      "cwd": "<ws>/axona-docs",
+      "cmd": "git remote get-url origin"
+    },
+    {
+      "at": "2026-09-10T23:40:36.913Z",
+      "cmd": "ssh -o ConnectTimeout=20 air bash -l -s"
+    },
+    {
+      "at": "2026-09-10T23:40:37.491Z",
+      "cmd": "ssh -o ConnectTimeout=20 m1 bash -l -s"
+    },
+    {
+      "at": "2026-09-10T23:40:38.398Z",
+      "cmd": "ssh -o ConnectTimeout=20 axona-linux bash -l -s"
+    },
+    {
+      "at": "2026-09-10T23:40:38.923Z",
+      "cmd": "ssh -o ConnectTimeout=20 axona-win \"C:\\Program Files\\Git\\bin\\bash.exe\" -l -s"
+    },
+    {
+      "at": "2026-09-10T23:40:42.178Z",
+      "cmd": "ssh -o ConnectTimeout=25 -i <home>/.ssh/id_ed25519_axona root@143.110.224.247 cd /opt/axona-relay || { echo NODIR; exit 0; }\necho HEAD=$(git rev-parse --short HEAD); echo DIRTY=$(git status --porcelain | wc -l | tr -d ' ')\necho RELAY=$(grep -m1 '\"version\"' package.json | tr -dc '0-9.'); echo VENDOR=$(grep -m1 '\"version\"' vendor/axona-protocol/package.json | tr -dc '0-9.')\necho LOAD=$(up"
+    },
+    {
+      "at": "2026-09-10T23:40:46.327Z",
+      "cmd": "ssh -o ConnectTimeout=25 -i <home>/.ssh/id_ed25519_axona root@167.71.106.63 cd /opt/axona-relay || { echo NODIR; exit 0; }\necho HEAD=$(git rev-parse --short HEAD); echo DIRTY=$(git status --porcelain | wc -l | tr -d ' ')\necho RELAY=$(grep -m1 '\"version\"' package.json | tr -dc '0-9.'); echo VENDOR=$(grep -m1 '\"version\"' vendor/axona-protocol/package.json | tr -dc '0-9.')\necho LOAD=$(upti"
+    },
+    {
+      "at": "2026-09-10T23:40:54.485Z",
+      "cmd": "ssh -o ConnectTimeout=25 -i <home>/.ssh/id_ed25519_axona root@159.203.46.28 cd /opt/axona-relay || { echo NODIR; exit 0; }\necho HEAD=$(git rev-parse --short HEAD); echo DIRTY=$(git status --porcelain | wc -l | tr -d ' ')\necho RELAY=$(grep -m1 '\"version\"' package.json | tr -dc '0-9.'); echo VENDOR=$(grep -m1 '\"version\"' vendor/axona-protocol/package.json | tr -dc '0-9.')\necho LOAD=$(upti"
+    }
+  ],
+  "finishedAt": "2026-09-10T23:41:01.170Z",
+  "durationSec": 37,
+  "redaction": {
+    "appliedAt": "2026-09-11T01:20:40.280Z",
+    "rule": "same redact() as collect-manifest.mjs b3ffcc50…: <ws>, <home>, hostname→sha256[0:12]; applied post hoc to this 23:40Z collection because the fleet changed before the rule existed",
+    "fieldsChanged": 7
+  }
+}
