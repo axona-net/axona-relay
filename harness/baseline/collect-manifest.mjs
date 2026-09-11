@@ -28,6 +28,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { hostname, loadavg, platform, release, arch, totalmem, uptime } from 'node:os';
+import { makeRedactor, hostTag } from './redact.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const RELAY = resolve(HERE, '../..');            // axona-relay
@@ -38,13 +39,25 @@ const DAY = T0.toISOString().slice(0, 10);
 const OUT = process.env.OUT || join(HERE, 'manifest', DAY);
 const SCHEMA = 'axona-baseline-manifest/0.1';
 
+// NEVER OVERWRITE A REVIEWED ARTIFACT — and refuse BEFORE collecting, not after
+// two minutes of ssh. The default OUT is manifest/<UTC day>, so a second run on
+// the same day — even a --local smoke test — landed on the committed 01:15Z
+// snapshot on 2026-09-11 and rewrote it in place. A manifest that exists is
+// somebody's evidence; a new collection gets its own directory or an explicit
+// FORCE=1.
+if (existsSync(join(OUT, 'baseline-manifest.json')) && process.env.FORCE !== '1') {
+  console.error(`✗ refusing to overwrite ${join(OUT, 'baseline-manifest.json').replace(WS, '<ws>')} — set OUT=<new dir> for a new collection, or FORCE=1 to replace it`);
+  process.exit(2);
+}
+
 const NOT = (reason, status = 'not_observable') => ({ status, reason });
 const commands = [];                             // every external command, for the note
 // Both repos are PUBLIC. Nothing that names a person or a machine leaves this
 // script: workspace paths become <ws>, any other home directory becomes <home>,
 // and the collector's hostname is reported as a hash. Remote hosts are named by
-// their ssh alias only.
-const redact = (s) => s.replace(new RegExp(WS.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), '<ws>').replace(/(\/Users|\/home|\/c\/Users)\/[^/\s'"]+/g, '<home>');
+// their ssh alias only. The rule lives in redact.mjs so test/redact.test.mjs
+// can prove it without running a collection.
+const redact = makeRedactor(WS);
 function sh(file, args, { cwd, timeout = 60_000, input } = {}) {
   const line = [file, ...args].join(' ');
   commands.push({ at: new Date().toISOString(), cwd: cwd ? redact(cwd) : undefined, cmd: redact(line).slice(0, 400) });
@@ -269,7 +282,7 @@ const mcpServers = mcpJson ? Object.fromEntries(Object.entries(mcpJson.mcpServer
 
 const manifest = {
   schema: SCHEMA, task: 'AX-T1-D1 §5 / AX-T1-D2-DISPATCH-01 T1.1', collectedAt: T0.toISOString(),
-  collector: { script: 'harness/baseline/collect-manifest.mjs', scriptSha256: sha256(readFileSync(fileURLToPath(import.meta.url))), hostSha256_12: sha256(hostname()).slice(0, 12), os: `${platform()} ${release()} ${arch()}`, node: process.version, localOnly: LOCAL_ONLY },
+  collector: { script: 'harness/baseline/collect-manifest.mjs', scriptSha256: sha256(readFileSync(fileURLToPath(import.meta.url))), hostSha256_12: hostTag(hostname()), os: `${platform()} ${release()} ${arch()}`, node: process.version, localOnly: LOCAL_ONLY },
   components: {
     kernel: { repo: 'axona-protocol', note: 'the kernel package IS the SDK (@axona/protocol); no separate SDK artifact exists',
       checkout: checkout(K), kernelConst: kernelConst(K),
@@ -288,7 +301,7 @@ const manifest = {
     web: { repo: 'axona-web', checkout: checkout(WEB) },
     docs: { repo: 'axona-docs', checkout: checkout(D) },
   },
-  localHost: { hostSha256_12: sha256(hostname()).slice(0, 12), load1_5_15: loadavg(), uptimeSec: Math.round(uptime()), totalMemMB: Math.round(totalmem() / 1048576) },
+  localHost: { hostSha256_12: hostTag(hostname()), load1_5_15: loadavg(), uptimeSec: Math.round(uptime()), totalMemMB: Math.round(totalmem() / 1048576) },
   fleet: LOCAL_ONLY ? NOT('--local') : HOSTS.map(censusHost),
   unknowns: [
     'running-artifact identity: a start banner proves what a process LOADED at start, not that its files are unchanged since; no in-process attestation exists',
