@@ -39,8 +39,8 @@ import { autoDetectRegion } from './geolocate.js';
 import { resolveBridgeUrl } from './network.js';
 import { renderCtx } from './logctx.js';
 import { readFile } from 'node:fs/promises';
-import { appendFileSync, mkdirSync } from 'node:fs';
 import { buildHealthDump } from './healthdump.js';
+import { recorderFromEnv, withTrace } from './trace-recorder.js';
 
 const RELAY_VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -157,16 +157,15 @@ async function main() {
   // waiting for pubsub-driven disc emission on an idle cold-started relay. Closes
   // both the quiet-relay false-refusal and the Windows structural-assumption
   // loophole that made the 2026-09-01 arm coverage-provisional.
-  if (process.env.LAT_TRACE === '1') {
-    try {
-      mkdirSync('relay-logs', { recursive: true });
-      appendFileSync(`relay-logs/disc-relay-${process.pid}.jsonl`, JSON.stringify({
-        ev: 'armed', wall: Date.now(), pid: process.pid,
-        startNonce: `${process.pid}-${Date.now()}`, kv: KERNEL_VERSION, latTrace: 1,
-        self: (identity?.id || '').slice(0, 12),
-      }) + '\n');
-    } catch { /* attestation is best-effort; a write failure surfaces as an unarmed pid at the gate */ }
-  }
+  // BOUNDED RECORDER (AX-PILOT-P1 offline contract, 2026-09-13): the attestation row
+  // and every later disc/lat-stage row go through src/trace-recorder.js — exclusive
+  // random capture identity (never pid + wall clock), byte cap with a terminal
+  // reserve, queue ceiling with counted drops, one terminal row. recorderFromEnv
+  // returns null unless LAT_TRACE === '1', so the default path is unchanged.
+  const recorder = recorderFromEnv(process.env, {
+    dir: 'relay-logs', pid: process.pid, kv: KERNEL_VERSION, self: (identity?.id || '').slice(0, 12),
+    log: (lvl, ev, ctx) => { try { onLog?.(lvl, ev, ctx); } catch { /* */ } },
+  });
 
   const present = (USE_TUI ? makeDashboard : makePlainLog)({
     version: RELAY_VERSION, kernelVersion: KERNEL_VERSION,
@@ -217,6 +216,10 @@ async function main() {
     present.destroy();
     console.log(`\naxona-relay shutting down (${why})…`);
     try { await stopRelay({ peer, transport }); } catch { /* */ }
+    // Orderly end: drain the queue, write the terminal row, close. Bounded by the
+    // recorder itself; an abrupt death skips this and leaves a file without a
+    // terminal row, which readers must treat as ended-without-record.
+    try { if (recorder && recorder.end('closed')) await Promise.race([recorder.whenEnded(), new Promise((r) => setTimeout(r, 2000))]); } catch { /* */ }
     cleanupWebRTC();
     try { await releaseLock?.(); } catch { /* */ }
     process.exit(0);
@@ -253,7 +256,9 @@ async function main() {
       // NOTE the limit: health() drops role.subscribers, so this gives CHILD
       // relay counts only. The seated-SUBSCRIBER count at the moment it matters
       // comes from the root-transition log (subs=), not from here.
-      onLog('info', 'health-dump', buildHealthDump(h));
+      // Recorder counters ride the dump so they can be read without the trace file's
+      // disk. In-memory only: they say what this process has counted, nothing durable.
+      onLog('info', 'health-dump', withTrace(buildHealthDump(h), recorder));
     } catch (e) {
       try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ }
     }
@@ -287,12 +292,13 @@ async function main() {
     // to its outcome. DEFAULT OFF (LAT_TRACE unset ⇒ byte-identical to before), and
     // the fresh peer per connect attempt gets one handler (the prior peer is torn
     // down), so a reconnect does not double-log.
-    if (process.env.LAT_TRACE === '1') {
-      try { mkdirSync('relay-logs', { recursive: true }); } catch { /* */ }
-      const discFile = `relay-logs/disc-relay-${process.pid}.jsonl`;
+    if (recorder) {
+      // Attached after createRelay and before startRelay: nothing the kernel emits
+      // during start is missed. One recorder per process; kernel incarnations
+      // (a reconnect builds a fresh peer) are told apart by each row's `proc`.
       peer.onLog?.('info', (msg, ctx) => {
         if (!ctx || (msg !== 'pubsub:disc' && msg !== 'pubsub:lat-stage')) return;
-        try { appendFileSync(discFile, JSON.stringify({ wall: Date.now(), pid: process.pid, self: (identity?.id || '').slice(0, 12), stream: msg === 'pubsub:disc' ? 'disc' : 'lat', ...ctx }) + '\n'); } catch { /* */ }
+        try { recorder.record({ stream: msg === 'pubsub:disc' ? 'disc' : 'lat', ...ctx }); } catch { /* recorder faults never reach the relay */ }
       });
     }
     try {
