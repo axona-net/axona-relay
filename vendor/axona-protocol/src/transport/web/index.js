@@ -37,6 +37,7 @@ import { WebRTCTransport }   from './webrtc.js';
 import { BridgeTransport, BRIDGE_CONN_ID_EXPORT as BRIDGE_CONN_ID } from './bridge.js';
 import { CompositeTransport } from './composite.js';
 import { isHexId, toHex, fromHex } from '../../utils/hexid.js';
+import { bigintReplacer, bigintReviver } from '../wire.js';
 import { TransportError, ErrorCodes, UpgradeRequiredError } from '../../errors.js';
 import { KERNEL_VERSION, WIRE_VERSION } from '../handshake.js';
 // REF-1.1 S4a: Boundary-2 (transport hello/auth/session + CAP_ATTEST) frame-contract
@@ -351,7 +352,14 @@ export function webTransport({
     });
     socket.addEventListener('message', (ev) => {
       let frame;
-      try { frame = JSON.parse(ev.data); }
+      // The bridge socket carries the same Axona wire codec as the WebRTC data
+      // channels (mesh.js) and the bridge itself (server.js): BigInt as "<digits>n",
+      // Set as array. Until 4.87.0 this path used vanilla JSON, so every BigInt the
+      // bridge sent (route_msg, find_closest_set, lookahead_probe ids and distances)
+      // reached its handler as a string and was rejected, and no BigInt body could be
+      // sent to a bridge at all. Invisible while no client routed to or through a
+      // bridge; 4.86.0 made the bridge a routing peer (GH #69 follow-up).
+      try { frame = JSON.parse(ev.data, bigintReviver); }
       catch (err) {
         log('bridge-frame-parse-failed', { err: err.message });
         return;
@@ -374,7 +382,7 @@ export function webTransport({
       throw new TransportError(ErrorCodes.TRANSPORT_CHANNEL_CLOSED,
         'webTransport: bridge socket not open');
     }
-    socket.send(JSON.stringify(msg));
+    socket.send(JSON.stringify(msg, bigintReplacer));
     return true;
   }
 
