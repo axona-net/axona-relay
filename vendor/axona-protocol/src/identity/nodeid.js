@@ -9,7 +9,7 @@
 // pubkey + region and recompute the id.
 // =====================================================================
 
-import { geoCellId }        from '../utils/s2.js';
+import { geoCellId, isValidCellId, isSystemRegion } from '../utils/s2.js';
 import { canonicalRegion }  from '../utils/region-names.js';
 import { assembleId, toHex, HASH_MASK } from '../utils/hexid.js';
 
@@ -21,13 +21,24 @@ import { assembleId, toHex, HASH_MASK } from '../utils/hexid.js';
  * @param {number}     lng          longitude in degrees, [-180, 180].
  * @returns {Promise<bigint>}       264-bit nodeId.
  */
-export async function computeNodeIdBigInt(pubkeyBytes, lat, lng) {
+export async function computeNodeIdBigInt(pubkeyBytes, lat, lng, { regionCode } = {}) {
   if (!(pubkeyBytes instanceof Uint8Array) || pubkeyBytes.length !== 32) {
     throw new TypeError('computeNodeIdBigInt: pubkeyBytes must be 32-byte Uint8Array');
   }
   // Fold the raw cell to its canonical major so a node in open ocean / a sparse
   // cell claims a real, populated region — never a hotspot-prone empty cell.
-  const s2Prefix = canonicalRegion(geoCellId(lat, lng, 8));
+  // An explicit regionCode (kernel 4.88.0) replaces the geo derivation: a geo code
+  // is still canonicalised, a SYSTEM code (0xFF 'bridge') is taken as is. This is
+  // the only way a node id can carry a reserved-band byte.
+  let s2Prefix;
+  if (regionCode !== undefined && regionCode !== null) {
+    if (!Number.isInteger(regionCode) || !(isValidCellId(regionCode) || isSystemRegion(regionCode))) {
+      throw new RangeError(`computeNodeIdBigInt: regionCode ${regionCode} is neither a geo cell nor a system region`);
+    }
+    s2Prefix = canonicalRegion(regionCode);
+  } else {
+    s2Prefix = canonicalRegion(geoCellId(lat, lng, 8));
+  }
   const buf      = await crypto.subtle.digest('SHA-256', pubkeyBytes);
   const hashHex  = bytesToHex(new Uint8Array(buf));
   // Mask to the active hash width: full 256 bits in production, truncated in a
@@ -45,8 +56,8 @@ export async function computeNodeIdBigInt(pubkeyBytes, lat, lng) {
  * @param {number}     lng
  * @returns {Promise<string>}  66-char lowercase hex.
  */
-export async function computeNodeId(pubkeyBytes, lat, lng) {
-  const big = await computeNodeIdBigInt(pubkeyBytes, lat, lng);
+export async function computeNodeId(pubkeyBytes, lat, lng, opts = {}) {
+  const big = await computeNodeIdBigInt(pubkeyBytes, lat, lng, opts);
   return toHex(big);
 }
 

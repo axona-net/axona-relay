@@ -42,6 +42,8 @@
 // =====================================================================
 
 import { resolveRegion } from '../utils/region-names.js';
+import { isSystemRegion } from '../utils/s2.js';
+import { BRIDGE_DIRECTORY_TOPIC } from '../bridgeDirectory.js';
 import { HEX_CHARS, AUTHOR_HEX_CHARS } from '../utils/hexid.js';
 
 /**
@@ -208,6 +210,14 @@ export async function resolveTopic({ region = null, owner = null, name, write } 
       'name a region or publish from a peer that supplies its node region');
   }
 
+  // A SYSTEM region (0xFF 'bridge', kernel 4.88.0) holds exactly ONE topic: the open
+  // bridge directory. Any other descriptor naming it — including a bridge's own
+  // region-omitted publish (selfRegion 0xFF) — is refused here at the mint, and the
+  // same call refuses it at every ingest re-derivation (wireHandlers drop-bad-descriptor).
+  if (isSystemRegion(code) && (name !== BRIDGE_DIRECTORY_TOPIC || ownerLc != null)) {
+    throw new RangeError(
+      `resolveTopic: region 0x${code.toString(16)} is a system region that holds only the open '${BRIDGE_DIRECTORY_TOPIC}' topic`);
+  }
   const prefix  = code.toString(16).padStart(2, '0');
   // owner + write are folded into the hash so a root can recompute the id from the
   // SIGNED descriptor and enforce write authorization statelessly. region is the

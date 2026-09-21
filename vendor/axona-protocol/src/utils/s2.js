@@ -52,6 +52,23 @@ export const S2_CELL_COUNT = S2_FACES * CELLS_PER_FACE;   // 192
 export const S2_RESERVED_FROM = S2_CELL_COUNT;            // 192
 
 /**
+ * SYSTEM regions live in the reserved band [192, 256). Exactly one is defined
+ * (kernel 4.88.0): 0xFF `bridge` — the region of bridge node ids, which holds
+ * exactly one topic, the bridge directory (NARROW invariant, PLAN-v0.4 §2.1).
+ * No coordinate maps to it: geoCellId() never returns a reserved id, so a
+ * 0xFF node id can only be minted through an explicit region override
+ * (createNodeIdentity({ region: 'bridge' })). It folds to nothing and nothing
+ * folds to it.
+ */
+export const SYSTEM_REGION_BRIDGE = 0xff;
+export const SYSTEM_REGION_NAMES = Object.freeze({ [SYSTEM_REGION_BRIDGE]: 'bridge' });
+
+/** True for a defined SYSTEM region code (today only 0xFF). */
+export function isSystemRegion(code) {
+  return Number.isInteger(code) && Object.prototype.hasOwnProperty.call(SYSTEM_REGION_NAMES, code);
+}
+
+/**
  * Face metadata.  For each face k, defines the three sphere-axis
  * roles: which axis is the face normal, which is the u-axis, which
  * is the v-axis, each with a sign.  Matches Google S2 conventions.

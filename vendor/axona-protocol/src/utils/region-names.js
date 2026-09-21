@@ -19,7 +19,7 @@
  *     then returns the canonical (lowest) code for that name.
  */
 
-import { geoCellId, geoCellCenter, isValidCellId, S2_CELL_COUNT } from './s2.js';
+import { geoCellId, geoCellCenter, isValidCellId, S2_CELL_COUNT, isSystemRegion, SYSTEM_REGION_NAMES } from './s2.js';
 
 /**
  * Raw per-cell legacy names, indexed by code [0,192). These are NO LONGER the
@@ -323,7 +323,9 @@ const CANONICAL_CODE = Object.freeze((() => {
  */
 export function canonicalRegion(nameOrCode) {
   const code = _rawResolve(nameOrCode);
-  return code === null ? null : CANONICAL_CODE[code];
+  if (code === null) return null;
+  if (isSystemRegion(code)) return code;          // a system region is its own canonical: no fold basin
+  return CANONICAL_CODE[code];
 }
 
 /**
@@ -346,15 +348,17 @@ const NAME_TO_CODE = (() => {
 
 /** Raw resolve: name/hex/decimal → code, WITHOUT folding. Internal. */
 function _rawResolve(token) {
-  if (typeof token === 'number') return isValidCellId(token) ? token : null;
+  const ok = (n) => isValidCellId(n) || isSystemRegion(n);
+  if (typeof token === 'number') return ok(token) ? token : null;
   if (typeof token !== 'string') return null;
   const t = token.trim();
+  for (const [code, name] of Object.entries(SYSTEM_REGION_NAMES)) if (t.toLowerCase() === name) return Number(code);
   const byName = NAME_TO_CODE.get(t.toLowerCase());
   if (byName !== undefined) return byName;
   const n = /^0x[0-9a-f]+$/i.test(t) ? parseInt(t, 16)
           : /^\d+$/.test(t)          ? parseInt(t, 10)
           : NaN;
-  return isValidCellId(n) ? n : null;
+  return ok(n) ? n : null;
 }
 
 /**
@@ -363,6 +367,7 @@ function _rawResolve(token) {
  * @returns {string|null}
  */
 export function regionName(code) {
+  if (isSystemRegion(code)) return SYSTEM_REGION_NAMES[code];
   return isValidCellId(code) ? REGION_NAMES[code] : null;
 }
 
@@ -373,7 +378,8 @@ export function regionName(code) {
  * @returns {[string]|null}
  */
 export function regionNames(code) {
-  return isValidCellId(code) ? [REGION_NAMES[code]] : null;
+  const n = regionName(code);
+  return n === null ? null : [n];
 }
 
 /**
@@ -419,7 +425,8 @@ export function regionNameForLatLng(lat, lng) {
  */
 export function regionCenter(nameOrCode) {
   const code = resolveRegion(nameOrCode);
-  return code === null ? null : geoCellCenter(code);
+  if (code === null || isSystemRegion(code)) return null;   // a system region has no place on the globe
+  return geoCellCenter(code);
 }
 
 /**

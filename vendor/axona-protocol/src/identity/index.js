@@ -27,6 +27,7 @@ import {
   verify,
 }                                       from '../pubsub/ed25519.js';
 import { computeNodeId }                from './nodeid.js';
+import { resolveRegion, regionName }    from '../utils/region-names.js';
 import { AUTHOR_ID_BITS, AUTHOR_HEX_CHARS, getKeyspace } from '../utils/hexid.js';
 import { IdentityError, ErrorCodes }    from '../errors.js';
 import { powMint, powVerify }           from '../pow/pow.js';
@@ -42,7 +43,9 @@ const ALGORITHM = { name: 'Ed25519' };
  * @property {Uint8Array} pubkey      32 raw bytes (Ed25519 public key).
  * @property {string}     pubkeyHex   64-char hex of pubkey (convenience).
  * @property {CryptoKey}  privateKey  Web Crypto signing key.
- * @property {{lat: number, lng: number}} region
+ * @property {{lat: number, lng: number, code?: number, name?: string}} region
+ *           lat/lng always; code/name only when the id was minted with an
+ *           explicit region override (kernel 4.88.0).
  * @property {number}     createdAt   ms since epoch.
  * @property {(message: Uint8Array) => Promise<Uint8Array>} sign
  *           Sign with this identity's private key.
@@ -58,7 +61,9 @@ const ALGORITHM = { name: 'Ed25519' };
  * @property {string} id          66-char hex nodeId.
  * @property {string} pubkey      64-char hex (32 raw bytes).
  * @property {string} privkey     base64 PKCS#8 encoding of the private key.
- * @property {{lat: number, lng: number}} region
+ * @property {{lat: number, lng: number, code?: number, name?: string}} region
+ *           code/name present iff the id was minted with a region override;
+ *           loadIdentity validates them and derives the id from the code.
  * @property {number} createdAt
  */
 
@@ -75,11 +80,24 @@ const ALGORITHM = { name: 'Ed25519' };
  *        should pass `false` so XSS can't exfiltrate the signing key (H4).
  * @returns {Promise<Identity>}
  */
-export async function createNodeIdentity({ lat, lng, extractable = true, fast = false }) {
+export async function createNodeIdentity({ lat, lng, extractable = true, fast = false, region } = {}) {
   if (typeof lat !== 'number' || typeof lng !== 'number') {
     throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
       'createNodeIdentity: region must be { lat: number, lng: number }');
   }
+  // Explicit region override (kernel 4.88.0): a region NAME or CODE that sets the id's
+  // top byte instead of the geo derivation. The only way to mint an id in the SYSTEM
+  // region 0xFF 'bridge'; lat/lng remain the node's location for placement of the
+  // directory entry. Unresolvable → refused, never silently geo.
+  let regionCode;
+  if (region !== undefined && region !== null) {
+    regionCode = resolveRegion(region);
+    if (regionCode === null) {
+      throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
+        `createNodeIdentity: region override '${region}' does not resolve to a region code`);
+    }
+  }
+  const regionInfo = regionCode === undefined ? { lat, lng } : { lat, lng, code: regionCode, name: regionName(regionCode) };
 
   // ── Fast (SIM-ONLY) path: skip the Ed25519 keygen ──────────────────────────
   // A node identity is never signature-verified by the protocol (the sim
@@ -98,9 +116,9 @@ export async function createNodeIdentity({ lat, lng, extractable = true, fast = 
     }
     const rand = new Uint8Array(32);
     crypto.getRandomValues(rand);
-    const id = await computeNodeId(rand, lat, lng);   // region byte ‖ truncated SHA-256(rand)
+    const id = await computeNodeId(rand, lat, lng, { regionCode });   // region byte ‖ truncated SHA-256(rand)
     const identity = buildIdentity({
-      id, pubkey: rand, privateKey: null, region: { lat, lng }, createdAt: Date.now(),
+      id, pubkey: rand, privateKey: null, region: regionInfo, createdAt: Date.now(),
     });
     identity.fast = true;   // marker: no real keypair; never persist or sign with this
     return identity;
@@ -116,13 +134,13 @@ export async function createNodeIdentity({ lat, lng, extractable = true, fast = 
   }
 
   const pubkey  = await exportPublicKey(pair.publicKey);
-  const id      = await computeNodeId(pubkey, lat, lng);
+  const id      = await computeNodeId(pubkey, lat, lng, { regionCode });
 
   const identity = buildIdentity({
     id,
     pubkey,
     privateKey: pair.privateKey,
-    region:     { lat, lng },
+    region:     regionInfo,
     createdAt:  Date.now(),
   });
   // Stage 2: mint the transport PoW (inert at difficulty 0 ⇒ ''). Presented in
@@ -300,6 +318,26 @@ export async function loadIdentity(envelope) {
     throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
       'loadIdentity: region must be { lat, lng }');
   }
+  // Kernel 4.88.0: an identity minted with an explicit region override
+  // (createNodeIdentity({ region })) persists { code, name } beside lat/lng.
+  // The id was derived from THAT code, so the consistency check below must
+  // derive from it too; a legacy geo-only envelope (no code, no name) keeps
+  // the lat/lng derivation exactly as before. The persisted metadata is
+  // validated, never trusted: the code must be a canonical geo code or a
+  // system region (what createNodeIdentity can mint), and a name, if present,
+  // must be that code's name. A tampered code still fails the id check.
+  let regionCode;
+  if (region.code !== undefined || region.name !== undefined) {
+    if (!Number.isInteger(region.code) || resolveRegion(region.code) !== region.code) {
+      throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
+        `loadIdentity: region.code must be a canonical or system region code, got ${JSON.stringify(region.code)}`);
+    }
+    if (region.name !== undefined && region.name !== regionName(region.code)) {
+      throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
+        `loadIdentity: region.name '${region.name}' is not the name of region code ${region.code}`);
+    }
+    regionCode = region.code;
+  }
 
   const pubkeyBytes = hexToBytes(pubkey);
   let privateKey;
@@ -312,7 +350,7 @@ export async function loadIdentity(envelope) {
   }
 
   // Verify the stored id is internally consistent.
-  const expected = await computeNodeId(pubkeyBytes, region.lat, region.lng);
+  const expected = await computeNodeId(pubkeyBytes, region.lat, region.lng, { regionCode });
   if (expected !== id) {
     throw new IdentityError(ErrorCodes.IDENTITY_INVALID_FORMAT,
       `loadIdentity: stored id ${id} does not match derived id ${expected}`);
@@ -342,7 +380,9 @@ export async function loadIdentity(envelope) {
     id,
     pubkey: pubkeyBytes,
     privateKey,
-    region: { lat: region.lat, lng: region.lng },
+    region: regionCode === undefined
+      ? { lat: region.lat, lng: region.lng }
+      : { lat: region.lat, lng: region.lng, code: regionCode, name: regionName(regionCode) },
     createdAt: typeof createdAt === 'number' ? createdAt : Date.now(),
   });
   // Stage 2: reuse the PERSISTED transport PoW nonce if it still satisfies the
