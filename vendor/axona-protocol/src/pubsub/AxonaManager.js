@@ -724,6 +724,17 @@ export class AxonaManager {
       neverRoot: this._neverRoot,
       graceRemainingMs: Math.max(0, this._roleGraceMs - (this._now() - this._joinedAt)),
       refusals: { ...this._admitRefusals },
+      // Reap accounting (4.93.0). An operator looking at a climbing role count
+      // needs to know whether the reaper is FIRING, and there was no way to see
+      // it: the counters lived on the manager and nothing surfaced them, so a
+      // bridge holding 84 empty roles was indistinguishable from a bridge whose
+      // reaper had stopped. `dead` = no subscribers and no cache, taken on
+      // sight; `idle` = empty cache whose last message is older than the idle
+      // TTL. Monotonic since process start, so read them as rates, not levels.
+      reaped: {
+        dead: this._rolesReapedDead || 0,
+        idle: this._rolesReapedIdle || 0,
+      },
       capacity: this.inspectCapacity(),
     };
   }

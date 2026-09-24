@@ -163,6 +163,13 @@ export function webTransport({
   // re-dials the bridge if its bound-peer count later falls below this floor.
   graduationMeshFloor = 3,
   graduationRecheckMs = 5000,
+  // BOUNDED MESH DEGREE (4.95.0). Null/absent ⇒ the mesh keeps a channel to
+  // every peer it hears about, which is what every browser and relay wants and
+  // what this transport has always done. A BRIDGE passes { maxPeers: N } to be
+  // a mediocre node on its WebRTC side too: measured 2026-09-24, the west
+  // production bridge held ONE inbound WebSocket and SEVEN WebRTC peers, and
+  // BRIDGE_MAX_PEERS governed only the first number. See mesh_degree.js.
+  meshDegree = null,
   // Peer-relayed signaling (bridgeless connect).  When true (the default as of
   // kernel v2.19.0, after the end-to-end verification in Peer-Relayed-Signaling
   // §8d), sendSignal prefers routing SDP/ICE through the mesh (via an AxonaPeer
@@ -409,6 +416,15 @@ export function webTransport({
   // joiners + NAT/ICE failures). Pure measurement — no behaviour change.
   const signalStats = { meshMsgs: 0, bridgeMsgs: 0, dropMsgs: 0, meshPeers: new Set(), bridgePeers: new Set() };
   const mesh = new MeshManager({
+    // Peer ids on this path ARE 66-char hex nodeIds (the bridge's v1.1 cutover
+    // put the same 264-bit space on peer-list/hello), so the keyspace region a
+    // balanced retirement needs is just the top byte — the same notion the
+    // bridge's WebSocket graduation reads from connRegion(). A caller may still
+    // override regionOf/isProtected; isProtected is the hook for "this channel
+    // carries an obligation", which the mesh layer cannot know by itself.
+    degree: meshDegree
+      ? { regionOf: (id) => (isHexId(id) ? String(id).slice(0, 2).toLowerCase() : null), ...meshDegree }
+      : null,
     sendSignal: (toPeerId, payload) => {
       if (meshRelay && typeof signalRelay === 'function' && isHexId(toPeerId)) {
         let took = false;

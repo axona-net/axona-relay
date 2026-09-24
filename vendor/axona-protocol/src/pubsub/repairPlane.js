@@ -269,7 +269,14 @@ export const repairPlaneMethods = {
       // Deliberately NOT overridden: mySubscriptions and _hostedTopics — this
       // node's own explicit intent through peer.sub() / peer.host(). Reaping
       // those would break a local API contract rather than reclaim junk.
+      // A BACKUP SEAT is exempt from BOTH reapers — see the long note at
+      // `deadNow` below for why, and for where the discharge actually lives.
+      // The 24 h rule is not an exception to that: Aster's correction is
+      // precisely that a generic idle reaper defeats the election obligation on
+      // the same seat the dead reaper would have taken, just later.
+      const backupSeat = role.backupOf !== null || this._backupTopics.has(t);
       const idleReap = this._roleIdleTtlMs > 0 && role.cache.length === 0
+        && !backupSeat
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
       const keyspacePinned = this._hostKeyspace && role.isRoot;
@@ -300,7 +307,50 @@ export const repairPlaneMethods = {
       // 4.91.0 blocked the reap on precisely the roles it was written for: west
       // ran 4.91.0 for two minutes and logged ZERO reaps while holding 144 roles
       // with zero children and zero cache. Measured, not reasoned.
+      //
+      // 4.94.0 — THE STANDBY SUCCESSOR EXEMPTION, and why the paragraph above is
+      // only half right. An empty backup seat is not dead weight: while it
+      // exists it renews a subscribe toward the topic every tick (loop 1b-bak),
+      // and that renewal IS the root election. The comment there says so
+      // outright — "a backup whose root vanished and hasn't re-homed stays
+      // subscribed so it can win the election (that path must never be pruned,
+      // or a split-brain topic gets NO root)" — and 4.92.0 pruned it. Measured:
+      // an empty backup on 4.92.0/4.93.0 emits ONE subscribe and is reaped on
+      // that same tick; the existing suite runs a single tick and cannot see it.
+      // What production showed instead was a create-and-destroy cycle, 2.8 per
+      // second on the west bridge for 2.4 hours, re-seating on every keepalive.
+      //
+      // Orion's reading (a backup is the designated standby successor, and an
+      // empty cache is normal for a quiet, new or signalling topic) and Aster's
+      // correction compose into one rule. Aster's correction is the load-bearing
+      // half: sparing a seat only while its root is still KEEPALIVING protects
+      // exactly the case that does not need protecting, because the obligation
+      // is about the root being GONE — once freshness lapses, this reaper or the
+      // 24 h one takes the same seat and defeats the same contract.
+      //
+      // SO: a BACKUP SEAT IS EXEMPT FROM BOTH REAPERS. Not "while fresh", not
+      // "while un-rehomed" — both, which is all of them, because the design
+      // ALREADY has the discharge and 4.92.0 simply bypassed it: loop 1b-bak
+      // retires a backup that has re-homed under a live upstream AND has heard
+      // nothing for BACKUP_EVICT_MS, and it runs EARLIER IN THIS SAME TICK. A
+      // retired backup has `backupOf` cleared and leaves `_backupTopics`, so it
+      // arrives here as an ordinary role and both reapers apply to it normally.
+      // One discharge, in one place, already reviewed.
+      //
+      // WHAT THIS COSTS, stated plainly because it is the reason 4.92.0 existed:
+      // the resident role count goes back up. West ran 144 seats under the
+      // equivalent 4.91.0 exemption. Those seats are the cohort this node is
+      // XOR-closest to, so the count is MEMBERSHIP and the lever on it is
+      // bounding cohort size, not reaping standbys — a separate change with its
+      // own falsifiers, deliberately not made here.
+      //
+      // OPEN, and Aster's condition for the disposition: a backup whose root
+      // vanished and which never re-homes is retained for ever, because nothing
+      // yet DISCHARGES a standby obligation in that state. That termination
+      // condition has to be agreed on its own terms; until it is, retention is
+      // the contract and this code honours it rather than guessing.
       const deadNow = role.subscribers.size === 0 && role.cache.length === 0
+        && !backupSeat
         && !keyspacePinned && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
       if (idleReap || deadNow) {
