@@ -58,7 +58,9 @@ import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          METRICS_COALESCE_MS,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
-         TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX } from './constants.js';
+         TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX,
+         ROLE_IDLE_TTL_MS,
+} from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -298,6 +300,10 @@ export class AxonaManager {
     this._appDelivered    = new Map();  // "topicHex:msgId" -> true (exactly-once LRU)
     this._deliveryCallback = null;
     this._hostKeyspace    = false;
+    // Idle-role reap (David 2026-09-23). 0 disables. See ROLE_IDLE_TTL_MS.
+    this._roleIdleTtlMs   = envNum('ROLE_IDLE_TTL_MS', ROLE_IDLE_TTL_MS);
+    this._rolesReapedIdle = 0;
+    this._rolesReapedDead = 0;   // subscriber-less AND message-less: reaped on sight
     this._pending         = new Map();  // pull corrId -> { resolve, timer }
     this._pullSeq         = 0;
     this._timer           = null;

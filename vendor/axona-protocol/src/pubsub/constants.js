@@ -30,6 +30,16 @@ export const RENEW_MS        = 60_000;          // re-subscribe cadence CEILING 
 export const RENEW_FAST_MS   = 5_000;           // adaptive floor: initial + post-re-home interval
 export const RENEW_BACKOFF   = 1.5;             // multiply the interval each stable renewal, up to RENEW_MS
 export const DROP_MS         = 180_000;         // evict a subscriber after missed renewals (≥ 3× ceiling)
+// IDLE-ROLE REAP (David 2026-09-23). A role whose cache is EMPTY and whose last
+// message is older than this is torn down, whatever else would retain it — root
+// or child, with subscribers or without. Without it a node that wins ROOT for a
+// topic keeps the seat for ever: prod west held 141 roles over 141 distinct
+// topics, 45 of them rooted, with ZERO children and ZERO cached messages, and
+// re-accrued 193 within three minutes of a restart, which is what drove its
+// saturation flag and ~39% of one core on a single connection.
+// A subscriber that still wants the topic re-subscribes on its own renewal
+// cadence and the role is rebuilt, so this is recoverable by construction.
+export const ROLE_IDLE_TTL_MS = 24 * 60 * 60 * 1000;   // 24 h
 
 // ── Root election / convergence ─────────────────────────────────────────
 // Reachable-root fallback (cold-convergence fix). An unpinned subscriber whose
