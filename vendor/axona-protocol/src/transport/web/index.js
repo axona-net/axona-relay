@@ -31,6 +31,7 @@
 // at the dispatcher boundary inside this factory.
 // =====================================================================
 
+import { makeProtectionResolver } from './mesh_degree.js';
 import { MeshManager }       from './mesh.js';
 import { MeshAuth }          from './mesh-auth.js';
 import { WebRTCTransport }   from './webrtc.js';
@@ -415,15 +416,74 @@ export function webTransport({
   // post-bootstrap edge peer-to-peer, leaving the bridge only genuinely new
   // joiners + NAT/ICE failures). Pure measurement — no behaviour change.
   const signalStats = { meshMsgs: 0, bridgeMsgs: 0, dropMsgs: 0, meshPeers: new Set(), bridgePeers: new Set() };
+  // The obligation reader AxonaPeer installs through setObligedPeers(). Null
+  // until then, and null is "cannot say" — never "no obligations". See the
+  // isProtected resolver below for why that distinction decides a live channel.
+  let obligedPeersFn = null;
+
+  // Filled in right after the WebRTCTransport is constructed; the mesh degree
+  // resolver closes over it. See the note on `degree` below.
+  let webrtcRef = null;
   const mesh = new MeshManager({
-    // Peer ids on this path ARE 66-char hex nodeIds (the bridge's v1.1 cutover
-    // put the same 264-bit space on peer-list/hello), so the keyspace region a
-    // balanced retirement needs is just the top byte — the same notion the
-    // bridge's WebSocket graduation reads from connRegion(). A caller may still
-    // override regionOf/isProtected; isProtected is the hook for "this channel
-    // carries an obligation", which the mesh layer cannot know by itself.
+    // THE KEYSPACE REGION COMES FROM THE AUTHENTICATED nodeId, NOT THE
+    // SIGNALLING ID (4.96.0 — this was wrong in 4.95.0 and the cap could never
+    // fire because of it).
+    //
+    // A mesh peerId is the BRIDGE'S CONNECTION HANDLE: server.js mints it as
+    // `c${(++connSeq).toString(36)}` and puts those handles in peer-list. So
+    // `c17` is a peerId, and 4.95.0 read its region as
+    // `isHexId(id) ? id.slice(0,2) : null` — null for every peer, for ever.
+    // selectMeshRetire filters on a non-null region, so the eligible set was
+    // always empty, it always returned null, and nothing was ever retired. The
+    // west production bridge sat at 40 open channels against a trigger of 18.
+    // I had generalised the bridge's note that the v1.1 cutover carries 66-char
+    // hex nodeIds "in every hello/hello-ack/peer-list envelope" to the IDS
+    // INSIDE peer-list, which are connection handles, and wrote the claim into
+    // a comment instead of reading the line that builds the array.
+    //
+    // The binding we actually want already exists: bindPeer(nodeId, meshId)
+    // records it at authentication and `nodeIdFor(meshId)` reads it back. That
+    // also makes "never retire an unauthenticated peer" REAL rather than
+    // accidental — before this, every peer looked unauthenticated.
+    //
+    // Late-bound on purpose: the WebRTCTransport is constructed AFTER this
+    // manager (it takes the manager as an argument), so the resolver closes
+    // over a reference filled in below.
     degree: meshDegree
-      ? { regionOf: (id) => (isHexId(id) ? String(id).slice(0, 2).toLowerCase() : null), ...meshDegree }
+      ? {
+          regionOf: (meshId) => {
+            try {
+              const n = webrtcRef?.nodeIdFor?.(meshId);
+              return (typeof n === 'bigint') ? toHex(n).slice(0, 2).toLowerCase() : null;
+            } catch { return null; }
+          },
+          // WHICH CHANNELS CARRY A DUTY (4.97.0). Both council reviewers
+          // required this before the cap runs again: a `protected` set that
+          // nothing populates is not protection, and retirement was choosing
+          // blind to topic roots, upstream links and standby election peers.
+          //
+          // The chain is channel → authenticated node → obligation:
+          //   meshId --nodeIdFor--> nodeId --obligedPeers--> duty?
+          // Both halves matter. The first is the binding that 4.95.0 got wrong
+          // by reading the signalling id; the second is the kernel's answer.
+          //
+          // FAIL CLOSED, DELIBERATELY. If the provider is absent, throws, or
+          // returns a non-Set, this reports PROTECTED — "cannot say" is not
+          // "no duty", and the cost of the safe answer is a channel we keep.
+          // The cost of the unsafe one is a dropped obligation on a live
+          // bridge. Same for a peer whose binding is missing: an unresolvable
+          // channel cannot be shown to be spare.
+          //
+          // REBINDING IS HANDLED BY CONSTRUCTION: protection follows the
+          // nodeId, not the channel, so a peer that re-opens under a new
+          // meshId is protected on its next enforcement pass without any
+          // bookkeeping here.
+          isProtected: makeProtectionResolver({
+            transport: () => webrtcRef,
+            provider:  () => obligedPeersFn,
+          }),
+          ...meshDegree,
+        }
       : null,
     sendSignal: (toPeerId, payload) => {
       if (meshRelay && typeof signalRelay === 'function' && isHexId(toPeerId)) {
@@ -598,6 +658,7 @@ export function webTransport({
     localNodeId: localNodeIdBig,
     log,
   });
+  webrtcRef = webrtc;   // completes the late binding the degree resolver closes over
 
   // ── 4. BridgeTransport over the WebSocket ────────────────────────
 
@@ -1344,6 +1405,32 @@ export function webTransport({
       setBridgeState('connecting');
       openSocket();
     }
+  };
+
+  /**
+   * Bounded-mesh-degree accounting, or null when no cap is configured (4.96.0).
+   *
+   * THE REASON THIS EXISTS: degreeStats() was written in 4.95.0 and surfaced
+   * NOWHERE, so when the west production bridge sat at 40 open channels against
+   * a trigger of 18 there was no way to tell a cap that was working-but-outpaced
+   * from a cap that could not fire at all. It was the second — the region
+   * resolver read the signalling id instead of the authenticated nodeId — and
+   * answering that took a source reading rather than a curl. An operator must
+   * be able to ask.
+   */
+  /**
+   * Install the reader that says which peers this node owes something to
+   * (4.97.0). AxonaPeer calls this at start with a closure over its manager.
+   * Until it does, the degree cap treats EVERY channel as protected, so a
+   * transport whose peer has not started cannot retire anything.
+   */
+  composite.setObligedPeers = (fn) => {
+    obligedPeersFn = (typeof fn === 'function') ? fn : null;
+  };
+
+  composite.meshDegreeStats = () => {
+    try { return mesh.degreeStats ? mesh.degreeStats() : null; }
+    catch { return null; }
   };
 
   return composite;

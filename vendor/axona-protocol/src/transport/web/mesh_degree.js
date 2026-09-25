@@ -94,3 +94,68 @@ export function selectMeshRetire(candidates, { now, minUptimeMs }) {
   }
   return null;
 }
+
+/**
+ * Build the "does this channel carry a duty?" resolver the bounded degree uses.
+ *
+ * EXPORTED, AND THAT IS THE POINT. This logic decides whether a live channel on
+ * a production bridge may be torn down. It lived as a closure inside
+ * webTransport, which meant a fence could only test a COPY of it — and a fence
+ * that certifies its own re-implementation is the exact failure Aster has named
+ * repeatedly: an author's account of a mechanism is not evidence the mechanism
+ * fires. Now there is one implementation and the fence drives it.
+ *
+ * THE CHAIN: meshId --nodeIdFor--> nodeId --obligedPeers--> duty?
+ * The first link is the binding recorded at authentication. 4.95.0 skipped it,
+ * read the bridge's own connection handle as a nodeId, and produced a cap that
+ * could never select a candidate.
+ *
+ * FAIL CLOSED at every step. No provider, a throwing provider, a non-Set
+ * return, or an unresolvable binding all report PROTECTED. "Cannot say" is not
+ * "no duty": keeping a channel costs a slot, dropping a duty costs delivery.
+ *
+ * @param {object} opts
+ * @param {() => ({nodeIdFor?: (meshId: string) => bigint|null}|null)} opts.transport
+ *        Reader for the authenticated binding — a reader, not the object,
+ *        because the transport is constructed after the mesh it serves.
+ * @param {() => (() => Set<string>|null)|null} opts.provider
+ *        Reader for the obligation reader. Two levels for the same reason: the
+ *        kernel installs its half later still.
+ * @returns {(meshId: string) => boolean}
+ */
+export function makeProtectionResolver({ transport, provider }) {
+  // ONE OBLIGATION READ PER PASS (4.98.0). The caller passes a monotonic pass
+  // id and the set is rebuilt only when it changes.
+  //
+  // WHY THIS IS NOT AN OPTIMISATION DETAIL. 4.97.0 claimed "read once per
+  // enforcement pass" in this file, in AxonaPeer and in the release note, and
+  // did nothing of the kind: the enforcement loop asks per candidate, so every
+  // resolved channel triggered a full walk of every upstream and every role.
+  // Aster found it by reading the source. The claim was the defect — the cost
+  // followed from it.
+  //
+  // CACHED ON THE PASS ID, NEVER ON A CLOCK. A time-based cache would let a
+  // duty acquired seconds ago go unseen, which is precisely the stale-snapshot
+  // failure this protection exists to prevent. A pass boundary is the only
+  // point where refreshing is both cheap and correct. With no pass id the
+  // resolver does not cache at all, so any other caller keeps 4.97.0 semantics.
+  let cachedPass = null;
+  let cachedSet  = null;
+  return (meshId, passId) => {
+    let fn;
+    try { fn = provider(); } catch { return true; }
+    if (typeof fn !== 'function') return true;
+    let nid;
+    try { nid = transport()?.nodeIdFor?.(meshId); } catch { return true; }
+    if (typeof nid !== 'bigint') return true;
+    let set;
+    if (passId != null && passId === cachedPass) {
+      set = cachedSet;
+    } else {
+      try { set = fn(); } catch { return true; }
+      if (passId != null) { cachedPass = passId; cachedSet = (set instanceof Set) ? set : null; }
+    }
+    if (!(set instanceof Set)) return true;
+    return set.has(nid.toString(16).padStart(66, '0').toLowerCase());
+  };
+}

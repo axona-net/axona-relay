@@ -180,6 +180,8 @@ export class MeshManager {
     this._lastRetireAt    = 0;
     this._degreeRetired   = 0;
     this._degreeRefused   = 0;
+    /** Monotonic enforcement-pass counter; the obligation reader caches on it. */
+    this._degreePass      = 0;
     /** @type {Map<string, PeerState>} */
     this._peers = new Map();
     /** Absolute negotiation deadline (ms) per peerId, set on the FIRST
@@ -603,13 +605,27 @@ export class MeshManager {
     for (const st of this._peers.values()) if (st.openedAt > 0) open.push(st);
     if (open.length <= this._degreeMax + this._degreeSlack) return;   // hysteresis
 
+    // ONE OBLIGATION READ PER PASS, and the pass id is how that is enforced
+    // (4.98.0). Aster's source read of 4.97.0: this map calls _degreeProtected
+    // for EVERY open candidate, the resolver calls its provider each time, and
+    // AxonaManager.obligedPeers() rebuilds its Set by walking every upstream
+    // and every role on each call. So a single above-band pass repeated the
+    // whole obligation walk once per resolved channel — 40 channels meant 40
+    // walks, every 3 seconds. The code said "read once per enforcement pass"
+    // in three separate comments and did not do it.
+    //
+    // The pass id lets the resolver cache within a pass and refresh on the
+    // next, which is the contract that was claimed. It is deliberately NOT a
+    // time-based cache: a stale duty set is the failure this protection exists
+    // to prevent, and a pass boundary is the only honest place to refresh.
+    const passId = ++this._degreePass;
     const pick = selectMeshRetire(open.map((st) => ({
       id:          st.peerId,
       region:      this._degreeRegionOf(st.peerId),
       openedAt:    st.openedAt,
       rttMs:       this.getLatency(st.peerId),
       inCooldown:  this._retiredRecently.has(st.peerId),
-      isProtected: !!this._degreeProtected(st.peerId),
+      isProtected: !!this._degreeProtected(st.peerId, passId),
     })), { now, minUptimeMs: this._degreeMinUptime });
     if (!pick) return;
 
