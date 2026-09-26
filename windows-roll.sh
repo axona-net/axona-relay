@@ -88,8 +88,15 @@ done
 sleep 3
 AFTER="$(census)"
 [ "$AFTER" -eq "$N" ] || fail "post-roll census $AFTER != $N — read the logs, do not assume"
-# OPEN backstop — every new-gen relay must reach full state=open or the roll HALTS.
+# OPEN backstop — every new-gen relay must settle in a terminal healthy state
+# (open, OR graduated: released by the bridge's degree cap while meshed) or the
+# roll HALTS. See fleet-cadence.sh for why graduated is the stronger evidence.
 for i in $(seq 1 "$N"); do
-  await_open read_state "relay-logs/$GEN-$i.log" || fail "slot $i (relay-logs/$GEN-$i.log) never reached state=open — HALT"
+  await_open read_state "relay-logs/$GEN-$i.log" \
+    || fail "slot $i (relay-logs/$GEN-$i.log) settled in neither state=open nor state=graduated — HALT"
 done
-echo "✓ WINDOWS ROLL COMPLETE: $N/$N on kernel v$EXPECT_KERNEL, all state=open (new gen $GEN); node-datachannel $ndc"
+# Say what was VERIFIED, not what is usually true. This line read "all
+# state=open" while slot 1 sat graduated — the same stale-wording defect as the
+# backstop it reports on, and the sort of sentence that gets quoted back later
+# as evidence of something nobody checked.
+echo "✓ WINDOWS ROLL COMPLETE: $N/$N on kernel v$EXPECT_KERNEL, every slot open or graduated (new gen $GEN); node-datachannel $ndc"
