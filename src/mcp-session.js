@@ -32,7 +32,7 @@ import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
 import { createAuthorIdentity } from '../vendor/axona-protocol/src/identity/index.js';
 import { authorClassTopic } from '../vendor/axona-protocol/src/index.js';   // kernel author-class helper
 export { authorClassTopic };                                               // re-export for callers/smoke
-import { readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -91,6 +91,63 @@ function fileStore(path) {
 }
 const STORE = fileStore(STORE_PATH);
 
+// ── ONE LIVE PROCESS PER AUTHOR KEY (2026-09-29, David council seq 550) ──
+//
+// The previous guard for this printed the identity to stderr at startup and
+// trusted an operator to compare two logs. That is observability, not
+// enforcement, and it did not hold: council seq 537 went out signed by this
+// key from a server nobody meant to be driving it. The cause was not a
+// decision to share — it was a DEFAULT. A project-scoped .mcp.json entry left
+// MCP_AUTHOR_PATH unset, the fallback resolved to a real person's key, and any
+// editor opening that project signed as them.
+//
+// So the fallback is the defect. A missing identity must not quietly become
+// somebody's identity. Two enforcement points, both failing CLOSED:
+//   - a second live process on the same author file is refused outright;
+//   - MCP_STRICT_IDENTITY=1 refuses to start on the default path at all, for
+//     installs that want no fallback under any circumstances.
+// Only the broken case fails. A seat with its own MCP_AUTHOR_PATH is untouched.
+const LOCK_PATH = STORE_PATH + '.lock';
+
+/** Is a pid live? EPERM means alive and not ours, which still counts. */
+function pidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (e) { return e.code === 'EPERM'; }
+}
+
+export function claimAuthorIdentity({ storePath = STORE_PATH, lockPath = LOCK_PATH, handle = HANDLE,
+                                      strict = process.env.MCP_STRICT_IDENTITY === '1',
+                                      usingDefault = !process.env.MCP_AUTHOR_PATH } = {}) {
+  if (strict && usingDefault) {
+    throw new Error(
+      `[axona-mcp] MCP_STRICT_IDENTITY=1 and MCP_AUTHOR_PATH is unset. Refusing to fall back to ${storePath}. `
+      + `Set MCP_AUTHOR_PATH to this seat's own identity file.`);
+  }
+  let held = null;
+  try { held = JSON.parse(readFileSync(lockPath, 'utf8')); } catch { held = null; }
+  if (held && held.pid !== process.pid && pidAlive(held.pid)) {
+    throw new Error(
+      `[axona-mcp] REFUSING TO START: author key ${storePath} is already held by pid ${held.pid}`
+      + `${held.handle ? ` (handle=${held.handle})` : ''}. Two servers on one key sign identically and `
+      + `nothing downstream can tell them apart. Give this seat its own identity: `
+      + `set MCP_AUTHOR_PATH=~/.axona/<seat>-mcp-identity.json`);
+  }
+  mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, handle, startedAt: Date.now() }), { mode: 0o600 });
+  const release = () => { try { const c = JSON.parse(readFileSync(lockPath, 'utf8')); if (c.pid === process.pid) unlinkSync(lockPath); } catch { /* */ } };
+  return release;
+}
+
+let _warnedHandle = false;
+function warnHandleOverridden(supplied) {
+  if (_warnedHandle) return;
+  _warnedHandle = true;
+  process.stderr.write(
+    `[axona-mcp] ignoring caller handle "${supplied}" — this install publishes as "${HANDLE}". `
+    + `The handle belongs to the author key, not to the call (council seq 537).\n`);
+}
+
 // REMOVED 2026-07-25 — loadOrCreateNodeIdentity(). This function loaded, and on
 // first run minted-and-persisted, a durable transport keypair, giving this peer a
 // stable nodeId across every restart. That is the anti-pattern I-ID forbids: the
@@ -102,6 +159,10 @@ const STORE = fileStore(STORE_PATH);
 // ── module state ────────────────────────────────────────────────────────
 let _session = null;          // { peer, regionName, center, nodeId, author, close }
 let _connecting = null;
+let _releaseIdentity = null;  // frees the author-key lock; see claimAuthorIdentity
+for (const sig of ['exit', 'SIGINT', 'SIGTERM']) {
+  process.once(sig, () => { try { _releaseIdentity?.(); } catch { /* */ } });
+}
 const WATCHES = new Map();    // "region|topic" → { topic, region, descriptor, buffer[], total, dropped, since, startedAt, waiters[] }
 const HOSTED  = new Map();    // "region|topic" → { topic, region, descriptor, since }
 const ARRIVAL_LISTENERS = new Set();   // fn({topic,region,message,signer,msgId})
@@ -136,6 +197,11 @@ export async function ensureSession() {
   if (_session) return _session;
   if (_connecting) return _connecting;
   _connecting = (async () => {
+    // Claim the key BEFORE loading it. A refusal here is the whole point: a
+    // second server on one author file would sign indistinguishably, and after
+    // the fact nothing can separate the two — not the envelope, not the UI, not
+    // an audit. Failing at startup is the last moment this is still cheap.
+    if (!_releaseIdentity) _releaseIdentity = claimAuthorIdentity();
     const author = await createAuthorIdentity({ persistAs: AUTHOR_KEY, store: STORE });   // durable WHO
     const h = await connectPeer({ region: REGION, author });   // transport identity: fresh, ephemeral, per connection
     _session = h;
@@ -210,7 +276,17 @@ export async function publish({ topic, message, region, handle, authorClass, raw
   // this peer's declared class; raw:true opts out for machine topics.
   const body = raw
     ? message
-    : { v: 1, text: message, handle: handle || HANDLE, authorClass: authorClass || AUTHOR_CLASS };
+    // THE HANDLE BELONGS TO THE KEY, NOT TO THE CALL. A caller-supplied handle
+    // was how council seq 537 went out signed by axona.bot's author key while
+    // displaying "Orion": the signature said one thing and the rendered name
+    // said another, and every app renders the name. A display name is not an
+    // identity — the same rule axona.chat already enforces for authorClass —
+    // so the install's handle is authoritative and `handle` is ignored.
+    // Authorized by David, council seq 550, under axona.bot's ownership of this
+    // tree. Kept as an accepted parameter so existing callers do not error;
+    // passing a different one is reported once per session on stderr.
+    : { v: 1, text: message, handle: HANDLE, authorClass: authorClass || AUTHOR_CLASS };
+  if (!raw && handle && handle !== HANDLE) warnHandleOverridden(handle);
   const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
   return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
 }
