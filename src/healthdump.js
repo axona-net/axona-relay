@@ -58,6 +58,9 @@ export function buildHealthDump(h) {
     synaptome: h?.synaptomeSize ?? null,
     subscriptions: h?.subscriptions ?? null,   // this node's OWN subs — NOT seated downstream
     roles: roles.length,
+    // false = the kernel could not READ its roles, which is not the same fact
+    // as holding none. null = a kernel too old to say (Aster, 655).
+    rolesComplete: typeof h?.axonRolesComplete === 'boolean' ? h.axonRolesComplete : null,
     rooted: roles.filter((r) => r.isRoot).length,
     // Admission verdict, then the two pressures that decide it.
     saturated:       h?.admission?.saturated ?? null,
@@ -96,7 +99,13 @@ export function buildHealthDump(h) {
     // NOTHING HERE ESTABLISHES GLOBAL ABSENCE. Several nodes each reporting
     // "nothing here" is several local facts, never one mesh-wide fact.
     seated: roles.map((r) => ({
-      topic: String(r.topic ?? '').slice(0, 12),
+      // FULL ID, NOT A 12-HEX PREFIX (Aster, council 655). This used to
+      // slice(0,12) for readability, and that was fine while the dump was read
+      // by a human looking at one node. It is not fine as inventory: a union of
+      // prefixes across nodes is a distinct-PREFIX count, and anyone computing
+      // a topic census from it is counting something subtly different from
+      // topics. I did exactly that and reported 250 before Aster caught it.
+      topic: String(r.topic ?? ''),
       isRoot: !!r.isRoot,
       nature: r.nature ?? null,
       subs: typeof r.subscribers === 'number' ? r.subscribers : null,

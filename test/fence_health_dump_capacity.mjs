@@ -58,8 +58,19 @@ console.log('A. a healthy, complete shape');
   ok(d.peers === 61, 'peers from the array length');
   ok(d.roles === 2, 'roles from axonRoles, not h.roles');
   ok(d.rooted === 1, 'rooted counts isRoot');
-  // 'jokes-abcdef0123'.slice(0,12) === 'jokes-abcdef' — 12 chars, not 11.
-  ok(d.seated[0].topic === 'jokes-abcdef', 'topic truncated to 12 and read from r.topic', d.seated[0].topic);
+  // THE TOPIC IS THE WHOLE ID AND IT COMES FROM r.topic.
+  //
+  // This fence used to assert slice(0,12), and the truncation was deliberate
+  // while the dump was something a human read on one node. It became wrong the
+  // moment the dump was used as INVENTORY: a union of 12-hex prefixes across
+  // nodes counts distinct prefixes, which is not the same object as distinct
+  // topics. I published a 250-topic union built from prefixes before Aster
+  // caught it at council 655.
+  //
+  // The OTHER half of the original assertion is the one that must never relax:
+  // the field is r.topic, not r.topicId. Reading r.topicId is the mistake that
+  // shipped once and emitted seated:[] unconditionally.
+  ok(d.seated[0].topic === 'jokes-abcdef0123', 'topic is the FULL id, read from r.topic', d.seated[0].topic);
   ok(d.seated[0].kids === 3, 'kids read from r.children');
   ok(d.helloPressure === 0.84, 'helloPressure surfaced', d.helloPressure);
   ok(d.servicePressure === 0.007, 'servicePressure surfaced', d.servicePressure);
@@ -183,6 +194,19 @@ console.log('G. an old kernel degrades to null, never to zero');
   ok(r.replicaAgeMs === null, 'absent replica age is null', r.replicaAgeMs);
   ok(r.cache === 7 && r.kids === 1, 'the fields an old kernel DOES send still arrive');
   ok(Object.keys(r).length === 7, 'the row shape is identical on both kernels', Object.keys(r));
+}
+
+// An empty inventory and an unreadable one must never print the same.
+console.log('H. empty is not the same fact as unreadable');
+{
+  const none    = buildHealthDump({ synaptomeSize: 2, axonRoles: [],  axonRolesComplete: true  });
+  const broken  = buildHealthDump({ synaptomeSize: 2, axonRoles: [],  axonRolesComplete: false });
+  const ancient = buildHealthDump({ synaptomeSize: 2, axonRoles: [] });   // kernel too old to say
+  ok(none.roles === 0 && none.rolesComplete === true,   'genuinely zero roles reads complete=true');
+  ok(broken.roles === 0 && broken.rolesComplete === false, 'unreadable roles reads complete=false');
+  ok(ancient.rolesComplete === null, 'a kernel that cannot say reads null, not false', ancient.rolesComplete);
+  ok(none.roles === broken.roles && none.rolesComplete !== broken.rolesComplete,
+     'the two are distinguishable ONLY by the flag — which is why it exists');
 }
 
 console.log(`\n${fail === 0 ? '✓' : '✗'} ${pass}/${pass + fail}`);
