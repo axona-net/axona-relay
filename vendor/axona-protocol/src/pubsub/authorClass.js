@@ -30,14 +30,27 @@ export const AUTHOR_CLASS_OPERATOR_DOMAIN = 'axona:author-class-operator:v1';   
 
 const _enc = new TextEncoder();
 // Self-asserted publisher kind. Two conceptual axes share one flat set:
-//   principal — who/what is behind the message:  'human' | 'agent' | 'service'
-//               ('service' = an automated app/feed, not an AI agent or a person)
+//   principal — who/what is behind the message:
+//               'human' | 'agent' | 'service' | 'instrument'
+//               ('service'    = an automated app/feed, not an AI agent or a person)
+//               ('instrument' = an automatic data source: it reports READINGS
+//                rather than making claims. Distinct from 'service', which is an
+//                app acting on someone's behalf — an instrument acts on nobody's.
+//                A reader should bring calibration-and-failure-mode scepticism to
+//                one and ordinary scepticism to the other.)
 //   infra     — a node self-identifying its role: 'bridge' | 'relay'
 // Finer detail (app name, sensor id) goes in the free-text `label`, NOT here —
 // the set stays coarse and stable. Adding a value is backward-TOLERANT: an older
 // verifier that doesn't know it returns bad_class → the caller treats it as
 // UNSTATED (never a wrong default), so no flag day. Absence is always UNSTATED.
-const CLASSES = new Set(['agent', 'human', 'service', 'bridge', 'relay']);
+//
+// 'instrument' added on David's decision (council seq 449, 481): the field names
+// the NATURE OF THE SOURCE of the data, and this is a general publisher kind
+// rather than a special case for any one app. NOTHING HERE MAKES THE
+// DECLARATION TRUE — a verified attestation authenticates WHICH AUTHOR made the
+// self-declaration, never that the declared nature is accurate or the readings
+// right (Aster, council seq 458/474).
+const CLASSES = new Set(['agent', 'human', 'service', 'instrument', 'bridge', 'relay']);
 
 function bytesToHex(bytes) {
   let s = ''; for (const b of bytes) s += b.toString(16).padStart(2, '0'); return s;
@@ -77,7 +90,7 @@ function operatorSignedBytes(author, operator) {
 /**
  * Build + sign an author-class attestation.
  * @param {object} o
- * @param {'agent'|'human'|'service'|'bridge'|'relay'} o.class
+ * @param {'agent'|'human'|'service'|'instrument'|'bridge'|'relay'} o.class
  * @param {string}  [o.operator]  who runs this author (pubkey/handle); self-asserted in v1
  * @param {string}  [o.label]     short opaque human-readable label
  * @param {number}  [o.ts]        ms timestamp (defaults to now); latest-valid wins
