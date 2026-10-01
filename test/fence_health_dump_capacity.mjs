@@ -133,5 +133,57 @@ console.log('E. nothing at all');
   ok(d.roles === 0 && d.peers === null, 'degrades to nulls/zeros');
 }
 
+// =====================================================================
+// F. THE PER-ROLE ROW IS CARRIED WHOLE, NOT RE-NARROWED.
+//
+// AxonaManager.inspectRoles() always computed nature, holder, subscribers and
+// the replica stamps. AxonaPeer.health() copied four fields and dropped the
+// rest one line later, and this dump could only pass on what it was given. The
+// consequence was not abstract: a relay serves no /diag, so "do I hold a role
+// with no subscribers and no messages" — the question David asked at council
+// 648 — was answerable on the two bridges and on none of the other 52 nodes.
+//
+// These fences fail if anyone re-narrows that row again.
+// =====================================================================
+console.log('F. the per-role row survives the trip');
+{
+  const h = { synaptomeSize: 3, axonRoles: [
+    { topic: 'aabbccddeeff00', isRoot: false, nature: 'backup', holder: false,
+      subscribers: 0, children: 0, cacheSize: 0, lastReplicaAgeMs: 3794 },
+    { topic: '112233445566', isRoot: true, nature: 'root', holder: true,
+      subscribers: 4, children: 2, cacheSize: 61, lastReplicaAgeMs: null },
+  ] };
+  const d = buildHealthDump(h);
+  const [backup, root] = d.seated;
+  ok(backup.subs === 0, 'subscribers=0 is carried as subs, not dropped', backup.subs);
+  ok(root.subs === 4, 'a non-zero subscriber count is carried', root.subs);
+  ok(backup.nature === 'backup' && root.nature === 'root', 'nature is carried');
+  ok(backup.replicaAgeMs === 3794, 'lastReplicaAgeMs is carried', backup.replicaAgeMs);
+  ok(root.replicaAgeMs === null, 'a never-stamped replica stays null, not 0', root.replicaAgeMs);
+
+  // The exact shape the question turns on, representable end to end.
+  const quiet = d.seated.filter((r) => r.subs === 0 && r.cache === 0);
+  ok(quiet.length === 1 && quiet[0].nature === 'backup',
+     'a zero-subscriber zero-cache role is identifiable AND its nature is visible');
+}
+
+// ZERO AND ABSENT MUST NOT COLLAPSE. subs=0 is a measurement; subs=null is "this
+// kernel did not tell me". A reader that cannot tell them apart would count an
+// old kernel's silence as an empty role — the false zero this project keeps
+// paying for.
+console.log('G. an old kernel degrades to null, never to zero');
+{
+  const old = { synaptomeSize: 3, axonRoles: [
+    { topic: 'deadbeef0000', isRoot: true, children: 1, cacheSize: 7 },   // pre-4.100.0 shape
+  ] };
+  const d = buildHealthDump(old);
+  const r = d.seated[0];
+  ok(r.subs === null, 'absent subscribers is null, NOT 0', r.subs);
+  ok(r.nature === null, 'absent nature is null', r.nature);
+  ok(r.replicaAgeMs === null, 'absent replica age is null', r.replicaAgeMs);
+  ok(r.cache === 7 && r.kids === 1, 'the fields an old kernel DOES send still arrive');
+  ok(Object.keys(r).length === 7, 'the row shape is identical on both kernels', Object.keys(r));
+}
+
 console.log(`\n${fail === 0 ? '✓' : '✗'} ${pass}/${pass + fail}`);
 process.exit(fail === 0 ? 0 : 1);

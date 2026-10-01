@@ -250,9 +250,15 @@ async function main() {
       // empty output as "the relay just restarted". Vega caught it. Read the
       // shape, do not assume it.
       //
-      // NOTE the limit: health() drops role.subscribers, so this gives CHILD
-      // relay counts only. The seated-SUBSCRIBER count at the moment it matters
-      // comes from the root-transition log (subs=), not from here.
+      // THAT LIMIT IS GONE as of kernel 4.100.0: health() used to drop
+      // role.subscribers, so this dump gave CHILD relay counts only and the
+      // seated-SUBSCRIBER count had to come from the root-transition log.
+      // inspectRoles() had always computed it; health() re-narrowed the row and
+      // threw it away. The dump now carries subs, nature and replicaAgeMs per
+      // role, which is what makes a relay able to answer "do I hold a role with
+      // no subscribers and no messages" at all — relays serve no /diag, so
+      // before this the answer existed on the two bridges and nowhere else.
+      // On an older kernel those three print null and nothing else changes.
       onLog('info', 'health-dump', buildHealthDump(h));
     } catch (e) {
       try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ }

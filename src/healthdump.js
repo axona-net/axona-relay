@@ -13,7 +13,10 @@
 //
 // THE CONTRACT, verified at AxonaPeer.js:3246-3258 and AxonaManager.js:712-723:
 //   health() -> { synaptomeSize, peers[], subscriptions, axonRoles[], admission, … }
-//   axonRoles[i] -> { topic, isRoot, children:<count>, cacheSize }
+//   axonRoles[i] -> { topic, isRoot, nature, holder, subscribers,
+//                     children:<count>, cacheSize, lastReplicaAt,
+//                     lastReplicaAgeMs }   <- widened in kernel 4.100.0; the
+//   four-field shape is what older kernels return and still reads fine.
 //   admission    -> { roles, maxRoles, seated, saturated, …, capacity }
 //   capacity     -> { servicePressure, helloPressure, tickLagMaxMs, … }
 // Nothing here assumes any of it is present. Absence prints null; it never
@@ -76,11 +79,30 @@ export function buildHealthDump(h) {
     // meaningful together (a rate without its denominator is not a rate), and
     // logctx.js renders a structured ctx whole.
     lookahead:       h?.lookahead ?? null,
+    // PER-ROLE ROW. subs/nature/replicaAgeMs arrived with kernel 4.100.0, which
+    // stopped health() re-narrowing inspectRoles() to four fields. On an older
+    // kernel they are absent and print null — the shape does not change, so a
+    // reader never has to branch on kernel version.
+    //
+    // subs is why this matters: without it a relay could not answer "do I hold
+    // a role with no subscribers and no messages", and relays serve no /diag,
+    // so that question was answerable on the two bridges and nowhere else.
+    //
+    // READ THESE THREE TOGETHER OR NOT AT ALL. subs=0 and cache=0 on a BACKUP
+    // is the ordinary shape of a healthy standby — the subscribers and the
+    // messages live at the principal. replicaAgeMs says when this observer last
+    // recorded a replica; it is activity evidence and NOT proof the principal
+    // still exists, nor that the topic is non-empty anywhere (Aster, 650).
+    // NOTHING HERE ESTABLISHES GLOBAL ABSENCE. Several nodes each reporting
+    // "nothing here" is several local facts, never one mesh-wide fact.
     seated: roles.map((r) => ({
       topic: String(r.topic ?? '').slice(0, 12),
       isRoot: !!r.isRoot,
+      nature: r.nature ?? null,
+      subs: typeof r.subscribers === 'number' ? r.subscribers : null,
       kids: typeof r.children === 'number' ? r.children : null,
       cache: r.cacheSize ?? null,
+      replicaAgeMs: r.lastReplicaAgeMs ?? null,
     })),
   };
 }
