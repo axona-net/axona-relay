@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 set -euo pipefail
 # =============================================================================
 # windows-roll.sh — the Windows (git-bash) analog of roll-fleet.sh.

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 # =============================================================================
 # win-fleet-logged.sh — COLD START the Windows fleet with its output VISIBLE.
 #

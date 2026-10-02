@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 set -euo pipefail
 # =============================================================================
 # stop-fleet.sh — standardized GRACEFUL shutdown (Fleet Cadence Standard v1,

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 # =============================================================================
 # roll-fleet-windows.sh — THE sanctioned way to update a RUNNING Windows
 # (git-bash) relay fleet. The Windows analog of roll-fleet.sh, written and

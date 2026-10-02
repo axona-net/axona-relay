@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 # =============================================================================
 # windows-fleet.sh — the Windows (git-bash) analog of start-fleet.sh.
 #

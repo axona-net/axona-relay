@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 # =============================================================================
 # add-relays.sh — GROW a live fleet to a target count.
 #

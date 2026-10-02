@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+. "$(dirname "$0")/windows/scm-guard.sh"   # SCM hosts: relayctl.ps1 only
 # =============================================================================
 # win-roll-logged.sh — run windows-roll.sh with its output VISIBLE.
 #
