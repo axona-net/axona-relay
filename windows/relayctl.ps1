@@ -109,7 +109,7 @@ function Prep([string]$k, [switch]$Pull) {
   if ($v -ne $k) { Fail "vendored kernel $v != -Kernel $k" }
   Push-Location $RelayDir
   try {
-    & node windows\loadtest.js
+    & node windows\loadtest.cjs
     if ($LASTEXITCODE) { Fail 'node-datachannel failed to load' }
   } finally { Pop-Location }
   Write-Output ("  checkout head {0}, vendored kernel {1}, node-datachannel loads" -f (& git -C $RelayDir rev-parse --short HEAD), $v)
