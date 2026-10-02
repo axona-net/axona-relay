@@ -109,7 +109,7 @@ function Prep([string]$k, [switch]$Pull) {
   if ($v -ne $k) { Fail "vendored kernel $v != -Kernel $k" }
   Push-Location $RelayDir
   try {
-    & node -e 'const n=require("node-datachannel");const p=new n.PeerConnection("t",{iceServers:[]});p.createDataChannel("x");p.close();setTimeout(()=>process.exit(0),300);'
+    & node windows\loadtest.js
     if ($LASTEXITCODE) { Fail 'node-datachannel failed to load' }
   } finally { Pop-Location }
   Write-Output ("  checkout head {0}, vendored kernel {1}, node-datachannel loads" -f (& git -C $RelayDir rev-parse --short HEAD), $v)
