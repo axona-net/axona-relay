@@ -1,0 +1,41 @@
+{
+  "host": "axona-win",
+  "supervisor": "scm",
+  "facts": {
+    "os": "Windows 11 Home, build 26200",
+    "hostname": "massive-attack",
+    "account": "massive-attack\\david (local administrator)",
+    "ssh_shell": "cmd.exe: it consumes | & > and $( ) before any other shell sees them. Ship a .ps1 with scp and run it with powershell -File.",
+    "git_bash": "C:\\Program Files\\Git\\bin\\bash.exe",
+    "node": "C:\\Program Files\\nodejs\\node.exe",
+    "compiler": "C:\\Windows\\Microsoft.NET\\Framework64\\v4.0.30319\\csc.exe",
+    "powershell": "5.1",
+    "wmic": "removed; use Get-CimInstance Win32_Process",
+    "clock": "local time is UTC-4",
+    "reboots": "about 11 in 60 days, mostly Windows Update. Services restart at boot; bare node.exe relays did not."
+  },
+  "relay": {
+    "repo": "C:\\Users\\david\\github\\axona-relay",
+    "branch": "testnet",
+    "region": "eagle",
+    "bridge": "wss://bridge.axona.net",
+    "env": {
+      "RELAY_REGION": "eagle",
+      "BRIDGE_URL": "wss://bridge.axona.net",
+      "RELAY_TUI": "0",
+      "SUB_TERMINAL_VERIFY": "1"
+    }
+  },
+  "services": {
+    "count": 20,
+    "name_prefix": "axona-relay-",
+    "wrapper_dir": "C:\\axona",
+    "wrapper": "C:\\axona\\relaysvc.exe",
+    "log_dir": "C:\\Users\\david\\github\\axona-relay\\relay-logs",
+    "log_pattern": "svc-NN.log (previous run kept as svc-NN.log.1)",
+    "account": "LocalSystem",
+    "start": "delayed-auto",
+    "failure_actions": "restart 10s, 30s, 60s; counter resets daily"
+  },
+  "controller": "windows\\relayctl.ps1 — install | status | start | stop | roll | cutover | uninstall"
+}
