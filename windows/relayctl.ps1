@@ -97,6 +97,9 @@ function VendoredKernel { (Get-Content (Join-Path $RelayDir 'vendor\axona-protoc
 function Prep([string]$k, [switch]$Pull) {
   if (-not $k) { Fail '-Kernel <x.y.z> is required' }
   if ($Pull) {
+    # npm install on Windows rewrites package-lock.json (drops an optional
+    # android entry), and that drift blocks the next ff-only pull. Discard it.
+    & git -C $RelayDir checkout -- package-lock.json
     & git -C $RelayDir fetch origin $Manifest.relay.branch -q; if ($LASTEXITCODE) { Fail 'git fetch failed' }
     & git -C $RelayDir pull --ff-only origin $Manifest.relay.branch -q; if ($LASTEXITCODE) { Fail 'git pull --ff-only failed (diverged); resolve by hand' }
     Push-Location $RelayDir
