@@ -32,7 +32,7 @@ $Manifest = Get-Content (Join-Path $Repo "hosts\$HostName.json") -Raw | ConvertF
 $Count    = [int]$Manifest.services.count
 $Prefix   = $Manifest.services.name_prefix
 $WrapDir  = $Manifest.services.wrapper_dir
-$Wrapper  = $Manifest.services.wrapper
+$Wrapper  = $null   # set by BuildWrapper
 $LogDir   = $Manifest.services.log_dir
 $RelayDir = $Manifest.relay.repo
 $Csc      = $Manifest.facts.compiler
@@ -52,7 +52,7 @@ function Inventory {
     if ($p.Name -ne 'node.exe' -or $p.CommandLine -notmatch 'src[\\/]index\.js') { continue }
     $parent = $byPid[[int]$p.ParentProcessId]
     $grand  = if ($parent) { $byPid[[int]$parent.ParentProcessId] } else { $null }
-    if ($grand -and $grand.Name -eq 'relaysvc.exe' -and $grand.CommandLine -match 'svc-(\d\d)\.log') {
+    if ($grand -and $grand.Name -like 'relaysvc*.exe' -and $grand.CommandLine -match 'svc-(\d\d)\.log') {
       $svcNodes[[int]$Matches[1]] = $p
     } else { $bare += $p }
   }
@@ -117,19 +117,21 @@ function Prep([string]$k, [switch]$Pull) {
 
 # ---- wrapper build + service definitions ------------------------------------
 function BuildWrapper {
+  # The wrapper is VERSIONED by a hash of its source with line endings removed
+  # (a git checkout on Windows writes CRLF). A changed source builds a new exe
+  # next to the old one; a running service keeps its exe until its next restart,
+  # when DefineService has already pointed it at the new one. Nothing is stopped
+  # to rebuild.
   New-Item -ItemType Directory -Force -Path $WrapDir | Out-Null
   $src = Join-Path $PSScriptRoot 'relaysvc.cs'
-  $want = (Get-FileHash $src -Algorithm SHA256).Hash
-  $stamp = Join-Path $WrapDir 'relaysvc.cs.sha256'
-  $have = if (Test-Path $stamp) { (Get-Content $stamp -Raw).Trim() } else { '' }
-  if ((Test-Path $Wrapper) -and $have -eq $want) { Write-Output '  wrapper current'; return }
-  $running = @(Get-Service "$Prefix*" -ErrorAction SilentlyContinue | Where-Object Status -eq 'Running')
-  if ($running.Count -gt 0) { Fail "wrapper source changed but $($running.Count) service(s) are running; stop them first" }
-  $refs = '/r:System.ServiceProcess.dll'
-  & $Csc /nologo /optimize+ $refs "/out:$Wrapper" $src
-  if ($LASTEXITCODE) { Fail 'csc failed to build relaysvc.exe' }
-  Set-Content -Path $stamp -Value $want
-  Write-Output "  wrapper built: $Wrapper"
+  $text = (Get-Content $src -Raw) -replace "`r", ''
+  $sha = [System.Security.Cryptography.SHA256]::Create()
+  $hash = -join ($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') })
+  $script:Wrapper = Join-Path $WrapDir ('relaysvc-{0}.exe' -f $hash.Substring(0, 12))
+  if (Test-Path $script:Wrapper) { Write-Output "  wrapper current: $script:Wrapper"; return }
+  & $Csc /nologo /optimize+ /r:System.ServiceProcess.dll "/out:$script:Wrapper" $src
+  if ($LASTEXITCODE) { Fail 'csc failed to build the relay service wrapper' }
+  Write-Output "  wrapper built: $script:Wrapper"
 }
 
 function EnvBlock {

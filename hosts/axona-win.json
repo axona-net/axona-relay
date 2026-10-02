@@ -30,7 +30,7 @@
     "count": 20,
     "name_prefix": "axona-relay-",
     "wrapper_dir": "C:\\axona",
-    "wrapper": "C:\\axona\\relaysvc.exe",
+    "wrapper": "C:\\axona\\relaysvc-<sha12>.exe (versioned by the hash of windows/relaysvc.cs, line endings removed)",
     "log_dir": "C:\\Users\\david\\github\\axona-relay\\relay-logs",
     "log_pattern": "svc-NN.log (previous run kept as svc-NN.log.1)",
     "account": "LocalSystem",
