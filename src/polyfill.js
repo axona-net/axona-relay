@@ -31,6 +31,9 @@ function def(name, value) {
 // Lines match the relay log format so they interleave with kernel events:
 //   [YYYY-MM-DD HH:MM:SS] ice-pair {"pc":N,"ev":"connected","local":"host",...}
 let pcSeq = 0;
+// Run = this process's start (epoch s) and pid: keys a record by run + pc so
+// two relay runs can never be confused. Never persisted, never a node id.
+const RUN = `${Math.floor(Date.now() / 1000)}-${process.pid}`;
 const ts = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
 const pairOf = (pc) => {
   try {
@@ -49,10 +52,10 @@ class ObservedRTCPeerConnection extends ndc.RTCPeerConnection {
       const st = this.connectionState;
       if (st === 'connected') {
         pair = pairOf(this);
-        console.log(`[${ts()}] ice-pair ${JSON.stringify({ pc: id, ev: 'connected', ms: Date.now() - born, ...(pair || { pair: null }) })}`);
+        console.log(`[${ts()}] ice-pair ${JSON.stringify({ run: RUN, pc: id, ev: 'connected', ms: Date.now() - born, ...(pair || { pair: null }) })}`);
       } else if ((st === 'failed' || st === 'closed' || st === 'disconnected') && !ended) {
         if (st !== 'disconnected') ended = true;
-        console.log(`[${ts()}] ice-pair ${JSON.stringify({ pc: id, ev: st, ageS: Math.round((Date.now() - born) / 1000), ...(pair || { pair: null }) })}`);
+        console.log(`[${ts()}] ice-pair ${JSON.stringify({ run: RUN, pc: id, ev: st, ageS: Math.round((Date.now() - born) / 1000), ...(pair || { pair: null }) })}`);
       }
     });
   }

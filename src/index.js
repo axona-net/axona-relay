@@ -73,6 +73,13 @@ const USE_TUI = process.env.RELAY_TUI != null
 
 // Transport 'debug' events worth surfacing (skips ping/pong chatter).
 const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|error|signal/i;
+// Debug events passed through with an explicit field allowlist (see onLog).
+const LIFECYCLE = {
+  'teardown': ['peerId', 'reason', 'role', 'state', 'pings', 'pongs'],
+  'pc-state': ['peerId', 'pc'],
+  'dc-open':  ['peerId', 'role'],
+  'retry':    ['peerId'],
+};
 
 // How a ctx is rendered — and what may be cut — lives in logctx.js, because
 // the rule is now on the content's SHAPE and needs a fence around it.
@@ -195,6 +202,20 @@ async function main() {
   // neither of which exists any more, guarded by a mode that is never 'primary'.
 
   const onLog = (level, event, ctx) => {
+    // CHANNEL LIFECYCLE ALLOWLIST (2026-10-03, council 4891db2f / beb22ebd).
+    // The kernel's mesh logs every channel's opening, state changes and the
+    // reason it was torn down (MeshManager._retire → `teardown`), but these
+    // arrive at 'debug' and none matches INTERESTING, so the relay discarded
+    // the one record that says why a channel closed. They pass now, with ONLY
+    // the named fields: peerId is the bridge's connection handle (the meshId
+    // dc-close already logs), never a nodeId or an address. `stats` stays out
+    // because it carries IP:port; ice-pair (polyfill.js) records the path.
+    if (level === 'debug' && LIFECYCLE[event]) {
+      const keep = {};
+      for (const k of LIFECYCLE[event]) if (ctx && ctx[k] !== undefined) keep[k] = ctx[k];
+      present.logLine(`${event} ${JSON.stringify(keep)}`);
+      return;
+    }
     if (level === 'debug' && !INTERESTING.test(event)) return;
     const tag = level === 'error' ? '{red-fg}ERR{/}'
               : level === 'warn'  ? '{yellow-fg}WRN{/}' : '';
