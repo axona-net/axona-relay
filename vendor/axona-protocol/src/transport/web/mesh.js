@@ -166,6 +166,19 @@ export class MeshManager {
   constructor({ sendSignal, log, degree = null }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
+    // CONNECTION INCARNATION (4.101.0, council 6a46f038). A peerId is the
+    // bridge's connection handle and a same-process retry reuses it, so it
+    // cannot tell one RTCPeerConnection from the next. Every PC gets `inc`:
+    // a random per-instance run tag plus a counter. Carried on every
+    // per-connection log event and set on the PC as `axonaInc` so a host's
+    // own observer (the relay's ice-pair line) can join on it. Never
+    // persisted, never sent to a peer, never a node identity.
+    this._incRun = (() => {
+      try { const b = new Uint8Array(4); globalThis.crypto.getRandomValues(b);
+            return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join(''); }
+      catch { return Math.floor(Math.random() * 0xffffffff).toString(16).padStart(8, '0'); }
+    })();
+    this._incSeq = 0;
     // ── Bounded degree (off unless a cap is configured) ────────────────
     const d = degree || {};
     this._degreeMax       = Number.isFinite(d.maxPeers) ? Math.max(0, d.maxPeers) : 0;
@@ -749,6 +762,7 @@ export class MeshManager {
       localCand:  null,
       remoteCand: null,
       pathPollTimer: null,
+      inc: null,              // set per RTCPeerConnection in _attachPc
     };
   }
 
@@ -756,6 +770,8 @@ export class MeshManager {
   _attachPc(state) {
     const pc = new RTCPeerConnection(this._iceConfig());
     state.pc = pc;
+    state.inc = `${this._incRun}.${++this._incSeq}`;
+    try { pc.axonaInc = state.inc; } catch { /* non-extensible PC: log-only */ }
     state.state = 'signaling';
 
     pc.onicecandidate = (ev) => {
@@ -784,7 +800,7 @@ export class MeshManager {
     // fail but the PC hasn't given up yet.
     pc.oniceconnectionstatechange = () => {
       this._log('ice-state', {
-        peerId: state.peerId,
+        peerId: state.peerId, inc: state.inc,
         ice:    pc.iceConnectionState,
       });
       if (pc.iceConnectionState === 'disconnected' ||
@@ -842,7 +858,7 @@ export class MeshManager {
 
     if (!silent || changed) {
       this._log('stats', {
-        peerId: state.peerId,
+        peerId: state.peerId, inc: state.inc,
         when,
         pairState:    pair?.state,
         bytesSent:    pair?.bytesSent,
@@ -960,7 +976,7 @@ export class MeshManager {
       // the open-channel (pong/send-fail/stale) branch now that openedAt is set.
       this._negotiationDeadline.delete(state.peerId);
       state.retryUsed = false;
-      this._log('dc-open', { peerId: state.peerId, role: state.role });
+      this._log('dc-open', { peerId: state.peerId, inc: state.inc, role: state.role });
       this._enforceDegree();   // bounded degree (4.95.0); inert unless a cap is configured
       // Dump the nominated candidate pair so we can see what
       // address family / protocol the data path is actually using —
@@ -972,7 +988,7 @@ export class MeshManager {
     };
 
     dc.onclose = () => {
-      this._log('dc-close', { peerId: state.peerId });
+      this._log('dc-close', { peerId: state.peerId, inc: state.inc });
       // Don't tear down here — onconnectionstatechange / peer-left will
       // arrive shortly with the canonical cleanup signal.  If we tore
       // down here too we'd risk double-cleanup races.
@@ -1169,7 +1185,7 @@ export class MeshManager {
   //            permanently — a peer discovered after such a drop could never
   //            reconnect bridgeless.
   _onConnState(state, connectionState) {
-    this._log('pc-state', { peerId: state.peerId, pc: connectionState });
+    this._log('pc-state', { peerId: state.peerId, inc: state.inc, pc: connectionState });
     if (connectionState === 'failed') {
       state.state = 'failed';
       this._refreshPath(state, 'on-failed');
@@ -1199,7 +1215,7 @@ export class MeshManager {
       state.retryTimer = null;
       // Has peer-left arrived in the meantime?  If so, _retire removed us.
       if (!this._peers.has(state.peerId)) return;
-      this._log('retry', { peerId: state.peerId });
+      this._log('retry', { peerId: state.peerId, inc: state.inc });
       // Retire the failed PC but KEEP the absolute deadline (so the fresh
       // negotiation honours the original window) and DON'T fire onPeerLost
       // (we're immediately re-initiating), then re-offer.
@@ -1240,7 +1256,7 @@ export class MeshManager {
     // children in AxonaManager roles across the network.
     const wasOpen = state.openedAt > 0;
     this._log('teardown', {
-      peerId, reason,
+      peerId, inc: state.inc ?? null, reason,
       role:    state.role,
       state:   state.state,
       hadDc:   !!state.dc,

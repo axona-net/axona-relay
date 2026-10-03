@@ -75,10 +75,10 @@ const USE_TUI = process.env.RELAY_TUI != null
 const INTERESTING = /bridge|welcome|mesh|peer|relay|reconnect|close|degraded|error|signal/i;
 // Debug events passed through with an explicit field allowlist (see onLog).
 const LIFECYCLE = {
-  'teardown': ['peerId', 'reason', 'role', 'state', 'pings', 'pongs'],
-  'pc-state': ['peerId', 'pc'],
-  'dc-open':  ['peerId', 'role'],
-  'retry':    ['peerId'],
+  'teardown': ['peerId', 'inc', 'reason', 'role', 'state', 'pings', 'pongs'],
+  'pc-state': ['peerId', 'inc', 'pc'],
+  'dc-open':  ['peerId', 'inc', 'role'],
+  'retry':    ['peerId', 'inc'],
 };
 
 // How a ctx is rendered — and what may be cut — lives in logctx.js, because
