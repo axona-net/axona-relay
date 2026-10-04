@@ -19,6 +19,14 @@ import {
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
+// Step-down hold re-entry guard (see _holdIntercept, 4.102.0): how long a
+// forward's return nonce is remembered, and how many may be outstanding.
+const HOLD_REENTRY_MS = 10_000;
+const HOLD_FWD_MAX    = 256;
+const randomNonce = () => {
+  const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+};
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
@@ -167,12 +175,87 @@ export const wireHandlersMethods = {
   },
 
   // ── SUBSCRIBE ────────────────────────────────────────────────────────
+  // STEP-DOWN HOLD INTERCEPT (4.102.0). Runs FIRST in the SUB/PUB/KILL
+  // handlers, before any closer-root correction, so the hold cannot be
+  // bypassed (Aster dced6098). Applies to a BARE message (no via: this node is
+  // its terminus) on a held topic this node is not root of:
+  //   · PUB and KILL — whether or not a role exists. A held node does not ingest
+  //     a bare publish or apply a bare kill as if it owned the topic.
+  //   · SUB — only with no role. With a role the node seats the subscriber as an
+  //     ordinary non-root relay, which claims nothing; promote() is held anyway.
+  // Target: the held root on the same evidence the existing gate for that verb
+  // accepts (holdTarget). Otherwise nothing is sent; the message is logged
+  // undeliverable and the sender's retry/renewal carries it.
+  //
+  // RE-ENTRY BOUND (Aster 5d38ca23, b7b4bbc3). A send pinned to a held root
+  // that is in fact unreachable falls back to topic-id routing and lands HERE
+  // again; _reroute pops the via and the copy re-enters bare. A failed-verdict
+  // deletion does not bound that (a delivery back to self is 'consumed').
+  //   · Return IDENTITY, not similarity: each forward carries a random
+  //     `holdFwd` nonce recorded with its topic, verb, and the hold and beacon
+  //     generation it relied on. Only a copy carrying OUR nonce for the SAME
+  //     topic and verb is a return; a sender's retry carries none and is an
+  //     ordinary new message.
+  //   · A bare copy carrying ANY holdFwd token is never forwarded again by this
+  //     intercept (see below), so the bound is unconditional, not a time window.
+  //   · Unreachability is inferred, and the beacon record dropped, ONLY if the
+  //     hold and the record are still the generation the forward relied on; a
+  //     refreshed record or a new hold is kept.
+  //   · Bounded: at most HOLD_FWD_MAX outstanding nonces, each HOLD_REENTRY_MS.
+  //     Saturated → fail CLOSED (do not forward, do not evict a live guard).
+  _holdIntercept(topicBig, type, payload) {
+    if (Array.isArray(payload.via) && payload.via.length) return false;
+    const h = this._rootClaim.holdFor(topicBig);
+    if (!h) return false;
+    const role = this.axonRoles.get(topicBig);
+    if (role?.isRoot) return false;
+    if (type === T.SUB && role) return false;
+    const fwd = (this._holdFwd ??= new Map());
+    const now = this._now();
+    // ANY bare copy carrying a holdFwd token is a held-node forward that came
+    // back (or a replay of one). It is NEVER forwarded again by this intercept,
+    // whatever the state of the token (Aster 7be0b352): that, not the 10 s
+    // window, is the finiteness bound. Only a live token bound to THIS topic and
+    // verb is "ours"; it alone may be consumed and may drop a same-generation
+    // record. Unknown, retired, pruned or foreign tokens fail closed.
+    // Scope: a held node that receives ANOTHER node's held-forward copy as a
+    // bare terminus drops it rather than relaying it; the sender's next retry
+    // (no token) is handled normally.
+    if (typeof payload.holdFwd === 'string') {
+      const back = fwd.get(payload.holdFwd);
+      const ours = !!back && back.topic === topicBig && back.type === type;
+      let dropped = false;
+      if (ours) {
+        fwd.delete(payload.holdFwd);
+        const b = this._rootBeacons.get(topicBig);
+        if (h.at === back.holdAt && h.to === back.root && b && lc(b.root) === back.root && b.at === back.beaconAt) {
+          this._rootBeacons.delete(topicBig); dropped = true;
+        }
+      }
+      this._log('info', 'hold-reentry', { topic: idHex(topicBig).slice(0, 12), type, to: h.to.slice(0, 10), ours, recordDropped: dropped });
+      this._undeliverable(type, topicBig, ours ? 'step-down-hold' : 'step-down-hold-return-unknown');
+      return true;
+    }
+    const to = this._rootClaim.holdTarget(topicBig, { requireReachable: type === T.SUB });
+    if (!to) { this._undeliverable(type, topicBig, 'step-down-hold'); return true; }
+    for (const [k, e] of fwd) { if (now - e.at >= HOLD_REENTRY_MS) fwd.delete(k); }   // ≤ HOLD_FWD_MAX entries
+    if (fwd.size >= HOLD_FWD_MAX) { this._undeliverable(type, topicBig, 'step-down-hold-saturated'); return true; }
+    const nonce = randomNonce();
+    const b = this._rootBeacons.get(topicBig);
+    fwd.set(nonce, { at: now, topic: topicBig, type, holdAt: h.at, root: h.to, beaconAt: (b && lc(b.root) === h.to) ? b.at : null });
+    const out = { ...payload, holdFwd: nonce };
+    if (type === T.SUB) this._send(T.SUB, { ...out, via: [to] });
+    else this._forwardToRoot(topicBig, type, out, to);
+    return true;
+  },
+
   async _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
+    if (this._holdIntercept(topicBig, T.SUB, payload)) return 'consumed';   // step-down hold (4.102.0)
     // Root-beacon last-mile correction (SUB). A stranded subscribe must not
     // (re)root a near-miss node while a strictly-closer live NEIGHBOUR root is
     // beaconing — defer the seat to that root. Without this only PUB carried the
@@ -364,6 +447,7 @@ export const wireHandlersMethods = {
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
+    if (this._holdIntercept(topicBig, T.PUB, payload)) return 'consumed';   // step-down hold (4.102.0)
     // Root-beacon last-mile correction. At this point I'm the acting target for
     // the publish (bare-topic terminus, or via-pinned to me). If a fresh beacon
     // names a different root genuinely CLOSER to the topic than me, forward to it
@@ -1045,6 +1129,7 @@ export const wireHandlersMethods = {
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
+    if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
     // a kill landing on a near-miss node must reach the true root, not mint a
     // competing root that the rest of the tree never consults.
@@ -1225,6 +1310,7 @@ export const wireHandlersMethods = {
         const closer = this._liveCloserRoot(topicBig);
         if (closer) { this._deferToRoot(topicBig, T.METRICSON, payload, closer); return 'consumed'; }
       }
+      if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) return 'consumed';   // step-down hold (4.102.0): metrics are cosmetic
       const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'metricson-terminal');
       if (!role) return 'consumed';   // refused: metrics are cosmetic, drop quietly
       this._maybePromoteRoot(role, payload, meta);

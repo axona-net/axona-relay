@@ -26,6 +26,9 @@
 //   adoptChild(t, parentHex)  — ADOPT: become a non-root child relay
 //   handoffArrived(t, leaver) — departing root handed us its history: purge the
 //                               leaver's ghost beacon, never defer back to it
+//   holdFor(t)                — the step-down hold (4.102.0): after demote(), the
+//                               node will not retake the root by promote() or
+//                               claimReachable() until STEPDOWN_HOLD_MS passes
 // =====================================================================
 
 import { asId } from '../utils/hexid.js';
@@ -215,6 +218,7 @@ export class RootClaim {
     // next epoch for this seat. Minted BEFORE the flip so the announce that
     // follows any promotion carries the new incarnation, never a stale one.
     if (isRoot) role.epoch = (this.m._knownEpoch?.(role.topicId) ?? 0) + 1;
+    if (isRoot) this.m._stepDownHold?.delete(role.topicId);   // a root holds no step-down
     // Nature hygiene (v4.26.0, Phase 7): a role flipping to ROOT sheds any
     // BACKUP residue in the same transition. Before this, promote() left
     // backupOf + the _backupTopics membership in place forever — a ROOT
@@ -351,6 +355,7 @@ export class RootClaim {
     const viaEmpty = !(Array.isArray(payload.via) && payload.via.length);
     if (!(viaEmpty && meta.isTerminal && !role.isRoot)) return;
     if (this.liveCloserRoot(role.topicId)) return;   // a closer live root is beaconing — don't contest it
+    if (this._holdBlocks(role.topicId, 'terminal-promote')) return;   // stepped down: hold the seat (4.102.0)
     this._set(role, true, 'terminal-promote');
     m._upstream.delete(role.topicId);
     m._announceRoot(role.topicId);
@@ -372,7 +377,68 @@ export class RootClaim {
     if (to === m.nodeId) return false;               // never "demote toward self"
     this._set(role, false, why, { to: toHex.slice(0, 10) });
     m._upstream.set(topicBig, [lc(toHex)]);
+    // Step-down hold (4.102.0): having yielded to a STRICTLY CLOSER named root,
+    // do not retake the seat by self-promotion until the hold expires. Only a
+    // closer target arms it: an epoch-superseded demotion can yield to a FARTHER
+    // node, and holding there let the true root and a spurious one each defer
+    // to the other with neither allowed back — zero roots for the whole hold
+    // (smoke_root_reconcile phase 5). The keyspace-closest node may always
+    // reclaim; the hold binds only the node that the keyspace says should not
+    // own the topic.
+    if ((to ^ topicBig) < (m.nodeId ^ topicBig)) {
+      m._stepDownHold?.set(topicBig, { to: lc(toHex), at: m._now(), lastLog: 0 });
+    }
     m._sendSubscribe(topicBig);
+    return true;
+  }
+
+  // The step-down hold for a topic, or null. Expiry is lazy: the first read
+  // after STEPDOWN_HOLD_MS deletes the hold and logs that the node may now
+  // retake the root (its next claim mints an epoch above any it has heard).
+  holdFor(topicBig) {
+    const m = this.m;
+    const h = m._stepDownHold?.get(topicBig);
+    if (!h) return null;
+    if (!(m._stepDownHoldMs > 0) || m._now() - h.at >= m._stepDownHoldMs) {
+      m._stepDownHold.delete(topicBig);
+      m._log('info', 'root-hold-expired', {
+        topic: idHex(topicBig).slice(0, 12), to: h.to.slice(0, 10), heldS: Math.round((m._now() - h.at) / 1000),
+      });
+      return null;
+    }
+    return h;
+  }
+
+  // Where a held node may send a message it will not root: the held root, on
+  // EXACTLY the evidence the existing closer-root gates accept — nothing looser,
+  // nothing stricter (Aster dced6098: gate the hold consistently).
+  //   requireReachable=true  (SUB): a live channel, or a FRESH VERIFIED record
+  //   requireReachable=false (PUB/KILL): also a fresh beacon (< 1.5×BEACON_MS)
+  // The loose window is the corpse window council 146/147 already accepted; a
+  // failed forward deletes the record (_forwardToRoot), which bounds it. Null =
+  // hold, send nothing: a send pinned to a root with no such evidence falls
+  // back to topic-id routing and returns to this terminus (4.102.0).
+  holdTarget(topicBig, { requireReachable = true } = {}) {
+    const m = this.m;
+    const h = this.holdFor(topicBig);
+    if (!h) return null;
+    if (m._isReachableId(h.to)) return h.to;
+    const c = this.liveCloserRoot(topicBig, { requireReachable });
+    return (c && lc(c) === h.to) ? h.to : null;
+  }
+
+  // True (and a rate-limited log) when the hold blocks a claim by `via`.
+  _holdBlocks(topicBig, via) {
+    const m = this.m;
+    const h = this.holdFor(topicBig);
+    if (!h) return false;
+    if (m._now() - h.lastLog >= 60_000) {
+      h.lastLog = m._now();
+      m._log('info', 'root-hold', {
+        topic: idHex(topicBig).slice(0, 12), to: h.to.slice(0, 10), via,
+        remainingS: Math.round((m._stepDownHoldMs - (m._now() - h.at)) / 1000),
+      });
+    }
     return true;
   }
 
@@ -393,6 +459,9 @@ export class RootClaim {
   // directory topics subscribed in every bridge region). See F1 / N2.
   claimReachable(topicBig) {
     const m = this.m;
+    // Step-down hold (4.102.0): null = refused, which leaves this node an
+    // ordinary unattached subscriber renewing toward its upstream (see below).
+    if (this._holdBlocks(topicBig, 'reachable-fallback')) return null;
     const role = m.axonRoles.get(topicBig) || this.become(topicBig, 'reachable-fallback');
     // Refused (today: only the bridge fence). Change NOTHING: leaving _upstream,
     // _rootHint and _unattachedSince intact keeps this node an ordinary

@@ -302,6 +302,16 @@ export class AxonaManager {
     this._hostKeyspace    = false;
     // Idle-role reap (David 2026-09-23). 0 disables. See ROLE_IDLE_TTL_MS.
     this._roleIdleTtlMs   = envNum('ROLE_IDLE_TTL_MS', ROLE_IDLE_TTL_MS);
+    // STEP-DOWN HOLD (4.102.0, council 9dc90970 option A with a clock, David
+    // 2026-10-04). A node that yields a root claim to a named closer root does
+    // not take the root back for this long, even when it cannot reach that
+    // root. Before this, the only hold was the ~1.5-beacon freshness of the
+    // yielded-to record, and a node that could not reach the real root retook
+    // the seat 45-89 s later, every time: two live roots for council on
+    // 2026-10-02/03 (GH #58). A dead root still gets replaced, after the hold.
+    // 0 disables. Topic -> { to, at, lastLog }.
+    this._stepDownHoldMs  = envNum('STEPDOWN_HOLD_MS', 300_000);
+    this._stepDownHold    = new Map();
     this._rolesReapedIdle = 0;
     this._rolesReapedDead = 0;   // subscriber-less AND message-less: reaped on sight
     this._pending         = new Map();  // pull corrId -> { resolve, timer }
