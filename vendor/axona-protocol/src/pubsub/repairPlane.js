@@ -421,8 +421,37 @@ export const repairPlaneMethods = {
   // once this macrotask's inline budget (INGEST_SLICE_MS) is spent, or a
   // backlog exists, work spills to the queue. Either way, ingest CPU per
   // macrotask turn is bounded.
-  async _ingestEnqueue(fn) {
+  // DEPENDENCY (Hold-and-Fill v0.7 row 4, axona-docs 95c2ff4 "The duty gate").
+  // A queued payload may install a role toward a peer when it is processed
+  // (REPLICATE → becomeBackup(principal)); between arrival and processing
+  // that peer is a duty this node has accepted and its role state does not
+  // yet show. Every caller DECLARES the peer its payload will name (`dep`,
+  // lowercase hex) or null, and the declaration rides the queue entry. The
+  // duty gate (AxonaManager.obligationsOf / obligedPeers) reads the queued
+  // and the in-flight dependencies, so a voluntary close cannot land in the
+  // interval. The pin is held from enqueue through the end of fn(): that
+  // covers the install, which happens before fn's first await, with margin.
+  // An overflow drop pins nothing: nothing was accepted.
+  //
+  // IN-FLIGHT IS A COUNT PER DEPENDENCY, not one slot (Aster 01bb6555 R4-A):
+  // an inline fn can be awaiting while the pump runs a queued one, two
+  // entries can name the same principal, and the pin must hold until the
+  // LAST active use of that principal completes.
+  _pinInFlight(dep) {
+    if (!dep) return;
+    const m = (this._ingestInFlight ??= new Map());
+    m.set(dep, (m.get(dep) || 0) + 1);
+  },
+  _unpinInFlight(dep) {
+    if (!dep) return;
+    const m = this._ingestInFlight;
+    if (!m) return;
+    const n = (m.get(dep) || 0) - 1;
+    if (n <= 0) m.delete(dep); else m.set(dep, n);
+  },
+  async _ingestEnqueue(fn, dep = null) {
     const q = (this._ingestQueue ??= []);
+    const dependency = (typeof dep === 'string' && dep) ? dep.toLowerCase() : null;
     // Inline is single-flight: a burst's SECOND arrival — landing while the
     // first is still verifying — goes to the queue, which is exactly what
     // distinguishes a storm from ordinary sequential traffic.
@@ -435,8 +464,9 @@ export const repairPlaneMethods = {
       }
       if (nowMs - this._inlineSliceStart < INGEST_SLICE_MS) {
         this._ingestInlineActive = true;
+        this._pinInFlight(dependency);
         try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
-        finally { this._ingestInlineActive = false; }
+        finally { this._ingestInlineActive = false; this._unpinInFlight(dependency); }
         return;
       }
     }
@@ -445,7 +475,7 @@ export const repairPlaneMethods = {
       if ((this._ingestDropped & 255) === 1) this._log('warn', 'ingest-overflow', { dropped: this._ingestDropped, queued: q.length });
       return;
     }
-    q.push(fn);
+    q.push({ fn, dep: dependency });
     if (!this._ingestPumping) { this._ingestPumping = true; this._ingestPump(); }
   },
 
@@ -455,14 +485,28 @@ export const repairPlaneMethods = {
       while (q.length) {
         const t0 = Date.now();                       // wall clock: CPU slicing, not sim time
         while (q.length && (Date.now() - t0) < INGEST_SLICE_MS) {
-          const fn = q.shift();
-          try { await fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
+          const entry = q.shift();
+          // The pin moves from the queue entry to the in-flight count in this
+          // same synchronous step; no await between the shift and the start
+          // of fn(), so the dependency is never unpinned before its install.
+          this._pinInFlight(entry.dep);
+          try { await entry.fn(); } catch { /* ingest is best-effort; anti-entropy re-heals */ }
+          finally { this._unpinInFlight(entry.dep); }
         }
         if (q.length) await new Promise(r => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
       }
     } finally {
       this._ingestPumping = false;
     }
+  },
+
+  /** Row 4: peers that queued or in-flight ingest work will name when it is
+   *  processed (lowercase hex). Read by the duty gate. */
+  queuedDependencies() {
+    const out = new Set();
+    if (this._ingestInFlight) for (const [dep, n] of this._ingestInFlight) if (n > 0) out.add(dep);
+    for (const e of (this._ingestQueue ?? [])) if (e && e.dep) out.add(e.dep);
+    return out;
   },
 
   // Resolves once every queued ingest has been processed — for tests and for
@@ -1128,6 +1172,21 @@ export const repairPlaneMethods = {
     // Within a tier, larger caches first (more messages at stake per send).
     const tier = (j) => j.role.isRoot ? ((j.role.replicas?.size ?? 0) === 0 ? 0 : 1) : 2;
     jobs.sort((a, b) => (tier(a) - tier(b)) || (b.role.cache.length - a.role.cache.length));
+    // Row 4: every party to a handoff in flight is a duty while this runs
+    // (AxonaManager._walkObligations reads heir/alt from here).
+    // LIFETIME, exactly (Aster 01bb6555): the marker is set here, at job
+    // construction, and cleared when this function RETURNS, after Phase C
+    // has ISSUED its fire-and-forget pushes. It represents the ORCHESTRATION
+    // of the handoff, not the completion of any send, and it is not custody
+    // discharge: an acked handoff is discharged by its ack (handoffArrived),
+    // never by this marker clearing. After the return the node is departing;
+    // the gate has no further voluntary close to guard, and leave() may
+    // abandon this promise at its time bound, which leaves the marker set on
+    // a node that is leaving anyway. Retry selection may overwrite heir/alt
+    // while an earlier send is unresolved; the marker then names the current
+    // targets, and the earlier target is protected by nothing but the
+    // departure itself.
+    this._handoffInFlight = jobs;
     let i = 0;
     const resolver = async () => {
       while (i < jobs.length) {
@@ -1309,6 +1368,7 @@ export const repairPlaneMethods = {
         Promise.resolve(this._syncPush(target, j.t, j.role, policy)).catch(() => {});
       } catch { /* best-effort */ }
     }
+    this._handoffInFlight = null;
   },
 
   // ── lifecycle: renewal + eviction + TTL sweep ────────────────────────

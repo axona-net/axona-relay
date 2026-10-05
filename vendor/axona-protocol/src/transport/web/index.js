@@ -171,6 +171,15 @@ export function webTransport({
   // production bridge held ONE inbound WebSocket and SEVEN WebRTC peers, and
   // BRIDGE_MAX_PEERS governed only the first number. See mesh_degree.js.
   meshDegree = null,
+  // CHANNEL LEDGER (Hold-and-Fill v0.5 row 3, axona-docs 4334504). One record
+  // per RTCPeerConnection and one per bound identity, with the counts the
+  // design bounds (C_phys, C_inbound, P_pending). Bookkeeping and a predicate:
+  // it dials nothing, closes nothing, and with the default `enforce: false`
+  // refuses nothing — a would-be refusal is counted so the fleet can be
+  // measured before any bound is believed. `null` (default) = on with the
+  // design's first values; an object overrides them (`enforce: true` turns
+  // the predicate into a refusal); `false` = off. See channel_ledger.js.
+  meshLedger = null,
   // Peer-relayed signaling (bridgeless connect).  When true (the default as of
   // kernel v2.19.0, after the end-to-end verification in Peer-Relayed-Signaling
   // §8d), sendSignal prefers routing SDP/ICE through the mesh (via an AxonaPeer
@@ -310,6 +319,16 @@ export function webTransport({
                                            // enforce a MIN_KERNEL_VERSION floor
                                            // (STRICT_VERSION island) independent
                                            // of the app's own `version`
+            // Row 2b (Hold-and-Fill v0.5, axona-docs 4334504): the hex nodeId
+            // this peer will AUTHENTICATE AS on hello-ack. The bridge sends
+            // its peer-list on admission, before hello-ack binds the nodeId,
+            // so its same-region anchor affinity can only see the region
+            // through this field. It is a CLAIM, unauthenticated: the bridge
+            // (2.145.0+row 2) reads it as an anchor-selection / list-order
+            // hint and for nothing else; binding, graduation region and
+            // custody read the bound identity. A bridge without row 2
+            // ignores an unknown field.
+            nodeId:        localNodeIdHex,
             ...(meshRelay ? { capabilities: ['mesh-relay'] } : {}),
           }));
         } catch (err) {
@@ -449,6 +468,7 @@ export function webTransport({
     // Late-bound on purpose: the WebRTCTransport is constructed AFTER this
     // manager (it takes the manager as an argument), so the resolver closes
     // over a reference filled in below.
+    ledger: meshLedger,
     degree: meshDegree
       ? {
           regionOf: (meshId) => {
@@ -1430,6 +1450,18 @@ export function webTransport({
 
   composite.meshDegreeStats = () => {
     try { return mesh.degreeStats ? mesh.degreeStats() : null; }
+    catch { return null; }
+  };
+
+  /**
+   * Channel-ledger snapshot (Hold-and-Fill row 3), or null when the ledger is
+   * off. This is the step-2 measurement of the design: channels by state,
+   * inbound-unbound and outbound-pending counts, open channels with no
+   * binding, bound peers, and the would-refuse counters the bounds would have
+   * produced had they been enforced.
+   */
+  composite.channelLedgerStats = () => {
+    try { return mesh.ledgerStats ? mesh.ledgerStats() : null; }
     catch { return null; }
   };
 

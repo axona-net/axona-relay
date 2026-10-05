@@ -1021,16 +1021,53 @@ export class AxonaManager {
    */
   obligedPeers() {
     const out = new Set();
-    const add = (h) => { if (typeof h === 'string' && h) out.add(h.toLowerCase()); };
+    this._walkObligations((kind, h) => out.add(h));
+    return out;
+  }
+
+  /**
+   * Row 4 (Hold-and-Fill v0.7, axona-docs 95c2ff4 "The duty gate"): the
+   * SAME walk as obligedPeers(), but naming the duty, so a refused retirement
+   * can say which one. Two sources, both the kernel's existing state:
+   *   INSTALLED ROLES — upstream, principal (role.backupOf), replica,
+   *     seated subscriber, as above, plus every party to a handoff in
+   *     flight (heir and alternate of a leave-handoff job).
+   *   QUEUED ROLE WORK — the dependency a queued or in-flight ingest entry
+   *     declared (repairPlane._ingestEnqueue), because a REPLICATE installs
+   *     backupOf only when the queue drains and the gate must see the
+   *     interval (Aster c34f3c85 P1-B).
+   * @param {string} hex lowercase nodeId hex
+   * @returns {string[]} duty kinds, empty when none
+   */
+  obligationsOf(hex) {
+    const want = (typeof hex === 'string') ? hex.toLowerCase() : '';
+    if (!want) return [];
+    const kinds = [];
+    this._walkObligations((kind, h) => { if (h === want && !kinds.includes(kind)) kinds.push(kind); });
+    return kinds;
+  }
+
+  /** The one walk both readers use. `visit(kind, lowercaseHex)`. */
+  _walkObligations(visit) {
+    const add = (kind, h) => { if (typeof h === 'string' && h) visit(kind, h.toLowerCase()); };
     for (const via of this._upstream.values()) {
-      if (Array.isArray(via)) { for (const h of via) add(h); }
+      if (Array.isArray(via)) { for (const h of via) add('upstream', h); }
     }
     for (const role of this.axonRoles.values()) {
-      add(role.backupOf);
-      if (role.replicas) { for (const h of role.replicas.keys()) add(h); }
-      if (role.subscribers) { for (const h of role.subscribers.keys()) add(h); }
+      add('principal', role.backupOf);
+      if (role.replicas) { for (const h of role.replicas.keys()) add('replica', h); }
+      if (role.subscribers) { for (const h of role.subscribers.keys()) add('subscriber', h); }
     }
-    return out;
+    // Handoff parties in flight (pubsubLeaveHandoff sets _handoffInFlight for
+    // the duration of the leave): an heir we are pushing history to.
+    if (Array.isArray(this._handoffInFlight)) {
+      const hx = (v) => { try { return (typeof v === 'bigint') ? idHex(v) : v; } catch { return null; } };
+      for (const j of this._handoffInFlight) { add('handoff', hx(j?.heir)); add('handoff', hx(j?.alt)); }
+    }
+    // Queued role work (repairPlane.queuedDependencies).
+    if (typeof this.queuedDependencies === 'function') {
+      for (const h of this.queuedDependencies()) add('queued-ingest', h);
+    }
   }
 
   inspectHosting() {

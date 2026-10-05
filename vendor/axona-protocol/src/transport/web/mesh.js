@@ -64,6 +64,9 @@ const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // discovery can re-drive, and bounds the offerer retry loop. Generous so it is
 // a safety net, not a primary mechanism: healthy channels open in well under it.
 const NEGOTIATION_DEADLINE_MS = 30000;
+/** Row 13: _retire reasons on a never-opened channel that mean the attempt
+ *  FAILED (as opposed to being retried or the mesh going away). */
+const NEGOTIATION_FAILED_REASONS = new Set(['negotiation-timeout', 'pc-closed', 'peer-left', 'disconnect']);
 // One reaper interval drives EVERY per-peer liveness decision (see _reapTick):
 // while never-opened it enforces NEGOTIATION_DEADLINE_MS; once open it folds the
 // pong-timeout (DEAD_PONG_MS), send-fail (SEND_FAIL_LIMIT) and stale-display
@@ -94,6 +97,7 @@ function extractFingerprint(sdp) {
 import { bigintReplacer, bigintReviver } from '../wire.js';
 // Bounded mesh degree (4.95.0) — the pure choice of which channel to release.
 import { selectMeshRetire } from './mesh_degree.js';
+import { ChannelLedger } from './channel_ledger.js';
 
 // ── ICE configuration ───────────────────────────────────────────────
 //
@@ -163,9 +167,29 @@ export class MeshManager {
    * @param {(peerId:string)=>string|null} [opts.degree.regionOf]     peerId → keyspace region
    * @param {(peerId:string)=>boolean}     [opts.degree.isProtected]  peerId carries an obligation
    */
-  constructor({ sendSignal, log, degree = null }) {
+  constructor({ sendSignal, log, degree = null, ledger = null }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
+    // CHANNEL LEDGER (Hold-and-Fill row 3): one record per RTCPeerConnection
+    // keyed by its incarnation tag, one per bound identity; counts and a
+    // predicate, no dial, no close, and with the default `enforce: false` no
+    // refusal either — a would-be refusal is counted. `ledger: false` turns
+    // it off; an object sets bounds. See channel_ledger.js.
+    /** PCs whose close was issued and not yet confirmed, by incarnation tag,
+     *  so an escalation can force a second close on the same object. */
+    this._closingPcs = new Map();
+    this._ledger = (ledger === false) ? null
+      : new ChannelLedger({
+          ...(ledger && typeof ledger === 'object' ? ledger : {}),
+          log: (ev, data) => this._log(ev, data),
+          // ESCALATE: a second pc.close() on the unconfirmed PC. The ledger
+          // keeps the record CLOSING and charged until 'closed' arrives.
+          onEscalate: (t, meshId) => {
+            const pc = this._closingPcs.get(t);
+            this._log('close-escalate', { peerId: meshId, inc: t, hadPc: !!pc });
+            if (pc) { try { pc.close(); } catch (err) { this._log('close-escalate-threw', { inc: t, err: err?.message }); } }
+          },
+        });
     // CONNECTION INCARNATION (4.101.0, council 6a46f038). A peerId is the
     // bridge's connection handle and a same-process retry reuses it, so it
     // cannot tell one RTCPeerConnection from the next. Every PC gets `inc`:
@@ -237,6 +261,8 @@ export class MeshManager {
     this._messageListeners = new Set();
     /** @type {Set<(peerId: string) => void>} */
     this._peerLostListeners = new Set();
+    /** Row 13: never-opened negotiations that failed. @type {Set<(peerId: string, reason: string) => void>} */
+    this._negotiationFailedListeners = new Set();
     // v2.0.2 — per-frame ping/pong traffic notifications.  Without
     // this, application UIs that want a "channel is actually moving
     // bytes" indicator have to roll their own (see axona-peer's
@@ -366,6 +392,24 @@ export class MeshManager {
   onPeerLost(callback) {
     this._peerLostListeners.add(callback);
     return () => this._peerLostListeners.delete(callback);
+  }
+
+  /**
+   * Row 13 (Hold-and-Fill v0.5/v0.7, axona-docs 4334504, 95c2ff4): a
+   * negotiation that NEVER OPENED ended. onPeerLost fires only for a channel
+   * that had opened (see _retire), so class A — pc-failed / negotiation
+   * timeout before dc-open — had no signal and the kernel could not write a
+   * loss mark for it (Vega b8bd9ec3). Fires `callback(peerId, reason)` from
+   * _retire when the channel never opened, for the reasons that mean the
+   * attempt FAILED: 'negotiation-timeout', 'pc-closed', 'peer-left',
+   * 'disconnect' (a cancelled attempt). Not for 'retry' (the same attempt
+   * continues), 'dispose' or 'reset' (the mesh is going away). Returns an
+   * unsubscribe fn.
+   * @param {(peerId: string, reason: string) => void} callback
+   */
+  onNegotiationFailed(callback) {
+    this._negotiationFailedListeners.add(callback);
+    return () => this._negotiationFailedListeners.delete(callback);
   }
 
   /**
@@ -517,6 +561,11 @@ export class MeshManager {
     }
     this._negotiationDeadline.clear();
     this._listeners.clear();
+    // Row 3: a disposed mesh has no transport left to confirm a close, so
+    // the ledger's escalation timers are cleared with everything else. The
+    // records are not released; nothing will read them again.
+    this._ledger?.dispose();
+    this._closingPcs.clear();
   }
 
   /**
@@ -661,6 +710,15 @@ export class MeshManager {
   }
 
   /** Degree accounting for /diag and the tests. Zeroes when no cap is set. */
+  /** Row 3: the channel ledger's snapshot, or null when the ledger is off. */
+  ledgerStats() {
+    return this._ledger ? this._ledger.stats() : null;
+  }
+  /** Row 3: the handshake bound `nodeIdHex` on the channel serving `meshId`. */
+  ledgerBind(meshId, nodeIdHex) { this._ledger?.bind(meshId, nodeIdHex); }
+  /** Row 3: the binding for `meshId` was dropped. */
+  ledgerUnbind(meshId) { this._ledger?.unbind(meshId); }
+
   degreeStats() {
     let open = 0;
     for (const st of this._peers.values()) if (st.openedAt > 0) open++;
@@ -708,7 +766,15 @@ export class MeshManager {
     try {
       if (payload.kind === 'sdp-offer') {
         // We're the responder.  Build (or reuse) the PC and answer.
-        const state = this._peers.get(from) ?? this._initResponderState(from);
+        // Row 3: an inbound offer that would need a NEW PC asks the ledger
+        // first; counted with enforce off, refused (offer ignored, nothing
+        // built, nothing sent) with enforce on.
+        const existing = this._peers.get(from);
+        if (!existing?.pc && this._ledger && !this._ledger.mayAllocate('in').ok) {
+          this._log('offer-refused', { from, ledger: this._ledger.stats() });
+          return;
+        }
+        const state = existing ?? this._initResponderState(from);
         await this._handleOffer(state, payload.sdp);
       } else if (payload.kind === 'sdp-answer') {
         const peer = this._peers.get(from);
@@ -773,6 +839,9 @@ export class MeshManager {
     state.inc = `${this._incRun}.${++this._incSeq}`;
     try { pc.axonaInc = state.inc; } catch { /* non-extensible PC: log-only */ }
     state.state = 'signaling';
+    // Row 3: the channel record is ALLOCATED the moment the PC exists, keyed
+    // by the same incarnation tag the log lines carry.
+    this._ledger?.allocate(state.inc, state.peerId, state.role === 'offerer' ? 'out' : 'in');
 
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
@@ -890,6 +959,12 @@ export class MeshManager {
   }
 
   async _initiateTo(peerId) {
+    // Row 3: ask the ledger BEFORE the PC exists. With enforce off (the
+    // default) this only counts; with enforce on a refusal builds nothing.
+    if (this._ledger && !this._ledger.mayAllocate('out').ok) {
+      this._log('initiate-refused', { peerId, ledger: this._ledger.stats() });
+      return;
+    }
     this._log('initiate', { peerId });
     const state = this._newPeerState(peerId, 'offerer');
     this._peers.set(peerId, state);
@@ -905,6 +980,7 @@ export class MeshManager {
       const offer = await state.pc.createOffer();
       await state.pc.setLocalDescription(offer);
       this._sendSignal(peerId, { kind: 'sdp-offer', sdp: offer.sdp });
+      this._ledger?.negotiating(state.inc);   // row 3: first frame out
     } catch (err) {
       this._log('offer-create-failed', { peerId, err: err.message });
       state.state = 'failed';
@@ -939,6 +1015,7 @@ export class MeshManager {
       };
     }
     await state.pc.setRemoteDescription({ type: 'offer', sdp });
+    this._ledger?.negotiating(state.inc);   // row 3: first frame in
     await this._flushPendingCandidates(state);
     const answer = await state.pc.createAnswer();
     await state.pc.setLocalDescription(answer);
@@ -976,6 +1053,7 @@ export class MeshManager {
       // the open-channel (pong/send-fail/stale) branch now that openedAt is set.
       this._negotiationDeadline.delete(state.peerId);
       state.retryUsed = false;
+      this._ledger?.open(state.inc);   // row 3: OPEN
       this._log('dc-open', { peerId: state.peerId, inc: state.inc, role: state.role });
       this._enforceDegree();   // bounded degree (4.95.0); inert unless a cap is configured
       // Dump the nominated candidate pair so we can see what
@@ -1196,6 +1274,11 @@ export class MeshManager {
       if (this._peers.get(state.peerId) === state) {
         this._retire(state.peerId, 'pc-closed');
       }
+      // Row 3: the transport confirmed the close. Prompted (after our own
+      // _retire) or unprompted (the involuntary row), the record goes GONE
+      // and its capacity is released here and only here. Escalation forces a
+      // second close and releases nothing.
+      if (state.inc) { this._ledger?.gone(state.inc); this._closingPcs.delete(state.inc); }
       this._notify();
     }
   }
@@ -1267,6 +1350,11 @@ export class MeshManager {
     if (state.reaperTimer)   clearInterval(state.reaperTimer);
     if (state.retryTimer)    clearTimeout (state.retryTimer);
     if (state.pathPollTimer) clearInterval(state.pathPollTimer);
+    // Row 3: CLOSING before the close is issued; the peer pointer clears in
+    // the same step. Capacity waits for the transport's 'closed' (gone) or
+    // the ledger's escalation. A state that never got a PC has no record.
+    if (state.inc) this._ledger?.closing(state.inc, reason);
+    if (state.inc && state.pc && this._ledger) this._closingPcs.set(state.inc, state.pc);
     if (state.dc) try { state.dc.close(); } catch {}
     if (state.pc) try { state.pc.close(); } catch {}
     this._peers.delete(peerId);
@@ -1286,6 +1374,16 @@ export class MeshManager {
           this._log('peer-lost-listener-threw', {
             peerId, err: err.message,
           });
+        }
+      }
+    } else if (notifyLost && !wasOpen && NEGOTIATION_FAILED_REASONS.has(reason)) {
+      // Row 13: the channel never opened and the attempt is over. Class A's
+      // signal. 'retry' keeps the attempt alive and is excluded above by
+      // notifyLost=false; dispose/reset are not failures.
+      for (const cb of this._negotiationFailedListeners) {
+        try { cb(peerId, reason); }
+        catch (err) {
+          this._log('negotiation-failed-listener-threw', { peerId, err: err.message });
         }
       }
     }

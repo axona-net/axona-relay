@@ -39,6 +39,7 @@
 // =====================================================================
 
 import { Transport }    from '../../contracts/Transport.js';
+import { isHexId, fromHex } from '../../utils/hexid.js';   // row 13: a failed attempt names its identity only through a hex meshId
 import {
   TransportError,
   ErrorCodes,
@@ -159,6 +160,10 @@ export class WebRTCTransport extends Transport {
     }
     this._unsubMessage  = this._mesh.onMessage((peerId, msg) => this._onMessage(peerId, msg));
     this._unsubPeerLost = this._mesh.onPeerLost((peerId, reason) => this._onPeerLost(peerId, reason));
+    // Row 13: class A's signal, when the mesh provides it.
+    this._unsubNegotiationFailed = (typeof this._mesh.onNegotiationFailed === 'function')
+      ? this._mesh.onNegotiationFailed((peerId, reason) => this._onNegotiationFailed(peerId, reason))
+      : null;
     this._started = true;
     this._log('transport-started', { localNodeId: String(this._localNodeId) });
   }
@@ -167,8 +172,10 @@ export class WebRTCTransport extends Transport {
     if (!this._started) return;
     if (this._unsubMessage)  this._unsubMessage();
     if (this._unsubPeerLost) this._unsubPeerLost();
+    if (this._unsubNegotiationFailed) { try { this._unsubNegotiationFailed(); } catch { /* idempotent */ } }   // row 13 (Aster 1816f5e6 R10/13-A)
     this._unsubMessage  = null;
     this._unsubPeerLost = null;
+    this._unsubNegotiationFailed = null;
     // Reject every outstanding request.
     for (const [, p] of this._pending) {
       clearTimeout(p.timer);
@@ -243,6 +250,10 @@ export class WebRTCTransport extends Transport {
       this._nodeIdByMeshId.set(winnerMeshId, nodeId);
       this._nodeIdByMeshId.delete(loserMeshId);
       this._channelKeyByMeshId.delete(loserMeshId);
+      // Row 3 (R3-B): the ledger's peer record moves to the winner IN THIS
+      // transaction, before the loser's teardown, so a surviving bound route
+      // is never an unbound open channel in the ledger.
+      try { this._mesh?.ledgerBind?.(winnerMeshId, nodeId.toString(16).padStart(66, '0')); } catch { /* bookkeeping only */ }
       try { this._mesh?.disconnect?.(loserMeshId, 'duplicate-nodeId'); }
       catch (err) { this._log('mesh-dedup-disconnect-threw', { loserMeshId, err: err.message }); }
       return;   // identity was already bound — not a new peer, no onPeerBound
@@ -252,6 +263,8 @@ export class WebRTCTransport extends Transport {
     this._meshIdByNodeId.set(nodeId, meshId);
     this._nodeIdByMeshId.set(meshId, nodeId);
     this._log('bindPeer', { nodeId: String(nodeId), meshId });
+    // Row 3: the channel ledger's peer record points at this channel now.
+    try { this._mesh?.ledgerBind?.(meshId, nodeId.toString(16).padStart(66, '0')); } catch { /* bookkeeping only */ }
     if (isNew && this._peerBoundHandlers) {
       for (const h of this._peerBoundHandlers) {
         try { h(nodeId); }
@@ -264,6 +277,8 @@ export class WebRTCTransport extends Transport {
     const nodeId = this._nodeIdByMeshId.get(meshId);
     this._nodeIdByMeshId.delete(meshId);
     this._channelKeyByMeshId.delete(meshId);
+    // Row 3: the ledger's peer record stops pointing at this channel.
+    try { this._mesh?.ledgerUnbind?.(meshId); } catch { /* bookkeeping only */ }
     // Only clear the forward mapping if THIS meshId is still the active
     // route for the nodeId.  A deduped-duplicate loser must not unbind the
     // surviving winner (which now owns the nodeId under a different meshId).
@@ -342,9 +357,31 @@ export class WebRTCTransport extends Transport {
     });
   }
 
+  /**
+   * CLOSE the channel to `nodeId` (Hold-and-Fill v0.5 row 5, axona-docs
+   * 4334504). Until this change closeConnection only UNBOUND: the identity
+   * lost its route while the RTCPeerConnection stayed open, pinging, counted
+   * by nothing and owned by no one (v0.1, "a physical-channel reservation
+   * with no owner"). Now it unbinds and then tears the channel down through
+   * the mesh's single teardown (_retire → CLOSING → the transport's
+   * 'closed').
+   *
+   * ORDER MATTERS. unbind FIRST, then disconnect: the mesh's onPeerLost
+   * reaches _onPeerLost with the identity already unbound, so it is NOT an
+   * active-route death, no peer-died fires, and the kernel writes no loss
+   * mark. A voluntary close is not a death (v0.7, Rule 1's reason table:
+   * `loss` is involuntary only). The redundant-channel log line names the
+   * reason so a voluntary close is distinguishable from a dedup loser.
+   *
+   * Idempotent: no binding → nothing to close; a channel already retired →
+   * mesh.disconnect no-ops.
+   */
   async closeConnection(nodeId) {
     const meshId = this._meshIdByNodeId.get(nodeId);
-    if (meshId) this.unbindPeer(meshId);
+    if (!meshId) return;
+    this.unbindPeer(meshId);
+    try { this._mesh?.disconnect?.(meshId, 'closeConnection'); }
+    catch (err) { this._log('close-connection-threw', { meshId, err: err?.message }); }
   }
 
   isConnected(nodeId) {
@@ -427,6 +464,42 @@ export class WebRTCTransport extends Transport {
       const i = this._peerDiedHandlers.indexOf(handler);
       if (i >= 0) this._peerDiedHandlers.splice(i, 1);
     };
+  }
+
+  /**
+   * Row 13: a negotiation to an IDENTITY failed before it ever opened.
+   * Fires `handler(nodeIdBig, reason)`. The identity is known only when the
+   * meshId is a hex nodeId (the bridgeless connectViaRelay path dials by
+   * nodeId); a bridge connection handle that never bound names no one, and
+   * nothing fires for it. Never fires for an attempt that opened; that is
+   * onPeerDied's.
+   * @param {(nodeId: bigint, reason: string) => void} handler
+   * @returns {() => void}
+   */
+  onNegotiationFailed(handler) {
+    if (typeof handler !== 'function') {
+      throw new TypeError('onNegotiationFailed: handler must be a function');
+    }
+    (this._negotiationFailedHandlers ??= []).push(handler);
+    return () => {
+      const a = this._negotiationFailedHandlers;
+      const i = a ? a.indexOf(handler) : -1;
+      if (i >= 0) a.splice(i, 1);
+    };
+  }
+
+  _onNegotiationFailed(meshId, reason) {
+    let nodeId = this._nodeIdByMeshId.get(meshId);
+    if (nodeId === undefined) {
+      // A never-opened channel has no binding; the only identity a failed
+      // attempt can name is the one it was dialed BY, i.e. a hex meshId.
+      if (typeof meshId === 'string' && isHexId(meshId)) { try { nodeId = fromHex(meshId); } catch { nodeId = undefined; } }
+    }
+    if (nodeId === undefined) { this._log('negotiation-failed-anonymous', { meshId, reason }); return; }
+    for (const h of (this._negotiationFailedHandlers ?? [])) {
+      try { h(nodeId, reason); }
+      catch (err) { this._log('negotiation-failed-handler-threw', { reportedId: String(nodeId), err: err.message }); }
+    }
   }
 
   /**
@@ -591,6 +664,10 @@ export class WebRTCTransport extends Transport {
         p.reject(new TransportError(ErrorCodes.TRANSPORT_PEER_UNREACHABLE,
           `peer ${String(nodeId)} died`, { context: { nodeId: String(nodeId) } }));
       }
+    } else if (reason === 'closeConnection') {
+      // Row 5: a voluntary close this node issued; the identity was unbound
+      // first, so this is not a death and no peer-died fires.
+      this._log('peer-closed-voluntary', { meshId });
     } else {
       this._log('peer-lost-redundant-channel', { meshId, nodeId: nodeId === undefined ? null : String(nodeId) });
     }

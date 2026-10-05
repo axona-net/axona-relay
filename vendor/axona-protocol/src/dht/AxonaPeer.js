@@ -39,6 +39,7 @@
 
 import { DHT }            from '../contracts/DHT.js';
 import { Synapse }        from './Synapse.js';
+import { DeadPeers }      from './DeadPeers.js';
 import { Subscription }   from './Subscription.js';
 import { clz264, toHex, fromHex, isHexId, extractS2Prefix, asId, BAD_ID_CODE } from '../utils/hexid.js';
 import { buildPresenceRecord, verifyPresenceRecord } from './presence.js';
@@ -630,6 +631,32 @@ export class AxonaPeer extends DHT {
       });
     }
 
+    // Row 13 (Hold-and-Fill v0.5/v0.7): class A's signal. A negotiation that
+    // never opened ended; onPeerDied never fires for it (the channel never
+    // had a user), so until this row the kernel could not mark the identity
+    // and the next tick could dial it again. The mark is written ONLY when
+    // no OPEN channel to the identity exists (Vega 79ccdf05): a failed
+    // SECOND negotiation to a peer we already reach must not punch a hole in
+    // a live route, because routing and candidate selection skip marked ids.
+    if (transport && typeof transport.onNegotiationFailed === 'function') {
+      this._onNegotiationFailedUnsub = transport.onNegotiationFailed((peerBig, reason) => {
+        try {
+          if (typeof peerBig !== 'bigint') return;
+          const node = this._node;
+          if (!node) return;
+          let open = false;
+          try { open = typeof transport.isConnected === 'function' && transport.isConnected(peerBig); } catch { open = false; }
+          if (open) { this._emitLog?.('info', 'negotiation-failed-beside-live', { peer: toHex(peerBig), reason: reason ?? 'unknown' }); return; }
+          const marks = (node._deadPeers ??= new DeadPeers());
+          if (typeof marks.fail === 'function') marks.fail(peerBig, reason ?? 'unknown');
+          else marks.add(peerBig);
+          this._emitLog?.('info', 'negotiation-failed-marked', { peer: toHex(peerBig), reason: reason ?? 'unknown' });
+        } catch (err) {
+          if (typeof console !== 'undefined') console.warn('AxonaPeer.onNegotiationFailed: mark failed', err);
+        }
+      });
+    }
+
     // Symmetric counterpart to onPeerBound: when a peer's channel dies
     // (heartbeat timeout / send-fail eviction at the transport, or a bridge
     // socket close), EVICT it from the synaptome immediately.  Until this
@@ -653,7 +680,14 @@ export class AxonaPeer extends DHT {
           node.synaptome?.delete(dead);
           node.incomingSynapses?.delete(dead);
           node.connections?.delete(dead);
-          (node._deadPeers ??= new Set()).add(dead);
+          // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. Row 10
+          // (v0.7 "Marks"): this is the FAIL input of the mark automaton; a
+          // first death writes the mark, a later one advances its schedule.
+          // A table some other owner installed as a bare Set keeps its shape;
+          // the reason then lives only in the log line below.
+          const marks = (node._deadPeers ??= new DeadPeers());
+          if (typeof marks.fail === 'function') marks.fail(dead, reason ?? 'unknown');
+          else marks.add(dead);
           this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
           // reason (4.76.3): the transport-level close cause, threaded through
           // mesh _retire → onPeerLost. Transports that do not supply one (sim,
@@ -717,8 +751,8 @@ export class AxonaPeer extends DHT {
    *                          successful lookup through us
    *
    * Not yet wired (low-impact for cold lookup success, queued):
-   *   · local_probe       — needed by _tryAnneal (anneal not run
-   *                          in the kernel-driven loop yet)
+   *   · local_probe       — serves _localCandidate for dead-synapse
+   *                          replacement (the kernel anneal is gone, row 6)
    *   · route_msg         — needed by peer.routeMessage()
    *   · find_closest_set  — needed by AxonaManager K-closest queries
    *
@@ -1097,6 +1131,9 @@ export class AxonaPeer extends DHT {
   // the abrupt (stop) and graceful (leave) paths: every timer cleared, every
   // pending channel closed NOW (it was refused; only its reclamation was
   // deferred), map emptied. Idempotent — the second call sees an empty map.
+  // Called from stop() and leave(): the node itself departs after its
+  // handoff, so these closes are not voluntary retirements of a peer below
+  // cap and the duty gate (mayRetire, row 4) is not consulted here.
   _clearGracePending() {
     for (const [sponsor, handle] of this._gracePending) {
       clearTimeout(handle);
@@ -1120,6 +1157,10 @@ export class AxonaPeer extends DHT {
     if (this._onPeerDiedUnsub) {
       this._onPeerDiedUnsub();
       this._onPeerDiedUnsub = null;
+    }
+    if (this._onNegotiationFailedUnsub) {          // row 13 (Aster 1816f5e6 R10/13-A)
+      this._onNegotiationFailedUnsub();
+      this._onNegotiationFailedUnsub = null;
     }
     if (this._maintainTimer) {
       clearInterval(this._maintainTimer);
@@ -1326,9 +1367,11 @@ export class AxonaPeer extends DHT {
   // Candidates route through `_considerCandidate` → B-3 first-party verification
   // + budgeted openConnection, so a forged "near" id can NEVER poison the table
   // (eclipse-safe). Bounded per tick; a no-op once the quota is full. Long-range
-  // / per-stratum "finger" coverage is maintained by the existing anneal path
-  // (`_tryAnneal`); both are needed (sim: near-only holds occupancy but delivery
-  // still collapses when long-range is starved).
+  // / per-stratum "finger" coverage WAS the anneal path (`_tryAnneal`, removed
+  // by Hold-and-Fill row 6 because it pruned below cap and replaced nothing);
+  // under Hold-and-Fill it is the fill (row 12) that supplies the other bands,
+  // and both are needed (sim: near-only holds occupancy but delivery still
+  // collapses when long-range is starved).
   //
   // OPT-IN via the `synaptomeMaintain` constructor option (default off → inert).
   // v1 uses `findKClosest` as the authoritative nearest source (local-first,
@@ -1565,6 +1608,10 @@ export class AxonaPeer extends DHT {
     if (this._onPeerDiedUnsub) {
       try { this._onPeerDiedUnsub(); } catch { /* swallow */ }
       this._onPeerDiedUnsub = null;
+    }
+    if (this._onNegotiationFailedUnsub) {          // row 13 (Aster 1816f5e6 R10/13-A)
+      try { this._onNegotiationFailedUnsub(); } catch { /* swallow */ }
+      this._onNegotiationFailedUnsub = null;
     }
 
     // (5) close transport
@@ -1930,9 +1977,18 @@ export class AxonaPeer extends DHT {
         // if the peer was admitted meanwhile. Pending state is bounded:
         // over graceMaxPending, the oldest pending close fires immediately.
         const graceMs = this._gateCfg.closeGraceMs ?? 0;
+        // Row 4: every voluntary close here asks the duty gate first. A
+        // refused close keeps the channel and is reported with the duty
+        // named; the grace path re-arms and asks again at the next fire.
         const doClose = () => {
+          const gate = this.mayRetire(sponsor);
+          if (!gate.ok) {
+            this._emitLog?.('info', 'refuse-grace-blocked', { peer: toHex(sponsor), duty: gate.duty });
+            return false;
+          }
           try { const p = this._node.transport?.closeConnection?.(sponsor); p?.catch?.(() => { /* best-effort */ }); }
           catch { /* best-effort */ }
+          return true;
         };
         // v4.68.1 (Aster review 1c11a94e finding 1): a deferred close KEEPS
         // a physical channel open, so deferral capacity derives from live
@@ -1959,19 +2015,29 @@ export class AxonaPeer extends DHT {
                 + this._gracePending.size + 1 <= cap);
           if (graceOn && headroom) {
             while (this._gracePending.size >= (this._gateCfg.graceMaxPending ?? 64)) {
-              const [oldSponsor, oldHandle] = this._gracePending.entries().next().value;
+              // Row 4: the oldest pending close that the duty gate permits.
+              // If every pending close is a duty, none is closed and the
+              // overflow is reported; the bound on pending closes yields to
+              // the obligations, which is Rule 1.
+              let picked = null;
+              for (const [s] of this._gracePending) { if (this.mayRetire(s).ok) { picked = s; break; } }
+              if (picked === null) { this._emitLog?.('info', 'grace-overflow-all-blocked', { pending: this._gracePending.size }); break; }
+              const oldHandle = this._gracePending.get(picked);
               clearTimeout(oldHandle);
-              this._gracePending.delete(oldSponsor);
-              try { const p = this._node.transport?.closeConnection?.(oldSponsor); p?.catch?.(() => { /* */ }); }
+              this._gracePending.delete(picked);
+              try { const p = this._node.transport?.closeConnection?.(picked); p?.catch?.(() => { /* */ }); }
               catch { /* best-effort */ }
             }
-            const handle = setTimeout(() => {
-              this._gracePending.delete(sponsor);
-              if (this._node?.synaptome?.has?.(sponsor)) return;   // rescued: admitted meanwhile
-              doClose();
-            }, graceMs);
-            if (typeof handle?.unref === 'function') handle.unref();
-            this._gracePending.set(sponsor, handle);
+            const arm = () => {
+              const handle = setTimeout(() => {
+                this._gracePending.delete(sponsor);
+                if (this._node?.synaptome?.has?.(sponsor)) return;   // rescued: admitted meanwhile
+                if (!doClose()) arm();                                // duty: keep the channel, ask again after another grace window
+              }, graceMs);
+              if (typeof handle?.unref === 'function') handle.unref();
+              this._gracePending.set(sponsor, handle);
+            };
+            arm();
           } else {
             doClose();
           }
@@ -2140,12 +2206,51 @@ export class AxonaPeer extends DHT {
     }
     if (victimKey === null) return false;                               // refuse: no admissible swap
 
+    // Row 4: the duty gate. A voluntary close of a peer this node owes
+    // something to is refused and reported; the swap is void.
+    const gate = this.mayRetire(victimKey);
+    if (!gate.ok) {
+      this._emitLog?.('info', 'swap-blocked', { victim: toHex(victimKey), duty: gate.duty });
+      return false;
+    }
     syn.delete(victimKey);
     node.connections?.delete(victimKey);
     try { const p = node.transport?.closeConnection?.(victimKey); p?.catch?.(() => { /* best-effort */ }); }
     catch { /* best-effort */ }
     this._seedInsert(sponsor, 'gate-swap');
     return true;
+  }
+
+  /**
+   * THE DUTY GATE (Hold-and-Fill v0.7 row 4, axona-docs 95c2ff4). May this
+   * node VOLUNTARILY close its channel to `id`? Reads the kernel's existing
+   * role state through AxonaManager.obligationsOf: installed roles (upstream,
+   * principal, replica, seated subscriber, handoff party) and queued role
+   * work (a REPLICATE waiting in the ingest queue names its principal). No
+   * duty → ok. A duty → refused, with the duty named, and the caller keeps
+   * the peer and its resources and tries again when the state changes.
+   *
+   * Consulted by every voluntary close below cap: the admission gate's
+   * grace close, its overflow close and its swap victim. NOT consulted by
+   * involuntary loss (a dead channel enters the role's own recovery) and not
+   * by stop()/leave(), where the node itself departs after its handoff.
+   *
+   * FAIL CLOSED on a reader that throws: "cannot say" is a duty.
+   * @param {bigint|string} id  nodeId (BigInt) or lowercase hex
+   * @returns {{ ok: boolean, duty: string|null }}
+   */
+  mayRetire(id) {
+    let hex;
+    try { hex = (typeof id === 'bigint') ? toHex(id).toLowerCase() : String(id).toLowerCase(); }
+    catch { return { ok: false, duty: 'unresolvable-id' }; }
+    const am = this._axonaManager ?? null;
+    if (!am || typeof am.obligationsOf !== 'function') return { ok: true, duty: null };   // no pubsub, no duties
+    try {
+      const kinds = am.obligationsOf(hex);
+      return kinds.length ? { ok: false, duty: kinds.join(',') } : { ok: true, duty: null };
+    } catch (err) {
+      return { ok: false, duty: `reader-threw:${err?.message ?? 'unknown'}` };
+    }
   }
 
   /**
@@ -4514,10 +4619,26 @@ export class AxonaPeer extends DHT {
    * @param {bigint} peerId
    * @param {string} source  provenance tag ('triadic'|'hopCache'|'lateralSpread')
    */
+  /**
+   * ELIGIBLE(id) of the mark automaton (Hold-and-Fill v0.7 "Marks", row 10),
+   * the one predicate nomination and dialing use. A table installed as a
+   * bare Set by another owner answers by membership, as before.
+   * @param {bigint} id
+   */
+  _isEligibleCandidate(id) {
+    const marks = this._node?._deadPeers;
+    if (!marks) return true;
+    if (typeof marks.eligible === 'function') return marks.eligible(id);
+    return !marks.has(id);
+  }
+
   async _considerCandidate(peerId, source) {
     const node = this._node;
     if (!node?.synaptome || typeof peerId !== 'bigint') return;
     if (peerId === node.id || node.synaptome.has(peerId)) return;
+    // Row 10: a marked identity is dialed on its schedule only; an unmarked
+    // one is not dialed while a full state holds.
+    if (!this._isEligibleCandidate(peerId)) { this._dialIneligible = (this._dialIneligible || 0) + 1; return; }
     const t = node.transport;
     const bindingCapable = t
       && typeof t.onPeerBound   === 'function'
@@ -4539,6 +4660,10 @@ export class AxonaPeer extends DHT {
       if (this._attemptGuard && !this._attemptGuard.allow(peerId)) return;
       this._verifyProbes = (this._verifyProbes ?? 0) + 1;
       this._attemptGuard?.begin(peerId);
+      // Row 10: CONSUME at ISSUE. Every reservation above succeeded; the
+      // attempt goes out now. An exhausted mark advances its refill window
+      // here, so a second evaluation in the window is ineligible.
+      try { this._node?._deadPeers?.consume?.(peerId); } catch { /* bookkeeping only */ }
       let opened = false;
       try { opened = await t.openConnection(peerId); }
       catch { /* unverifiable → not admitted */ }
@@ -4578,23 +4703,28 @@ export class AxonaPeer extends DHT {
     await this._addByVitality(syn);
   }
 
-  /** Admission gate.  Same logic as engine._addByVitality verbatim. */
+  /**
+   * Admission by vitality. BELOW CAP this is an admit of a bound candidate:
+   * open (bound-only on the web transport) and insert. AT CAP it was a swap
+   * (delete the lowest-vitality victim, close it, insert the candidate) and
+   * is SKIPPED BEFORE THE OPEN (Hold-and-Fill v0.5 row 6, axona-docs
+   * 4334504; Aster 76bc93dd item 5, Vega 79ccdf05 row 5): no open, no
+   * delete, no insert, counted `vitality-swap-skipped`. An unbound candidate
+   * never had a channel; a bound one stays bound and is reconciled by the
+   * fill (row 7) when it is armed. The at-cap replacement is Phase 2's swap
+   * rule, which asks the duty gate; until it exists a node at cap holds.
+   */
   async _addByVitality(newSyn) {
     const node   = this._node;
     const domain = this._domain;
     const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
 
-    let victim = null;
     if (node.synaptome.size >= cap) {
-      let minV = Infinity, minVAny = Infinity, victimAny = null;
-      for (const s of node.synaptome.values()) {
-        if (s.inertia > domain.simEpoch) continue;
-        const v = this._vitality(s);
-        if (v < minVAny) { minVAny = v; victimAny = s; }
-        if (!s.bootstrap && v < minV) { minV = v; victim = s; }
-      }
-      victim = victim ?? victimAny;
-      if (!victim) return false;
+      this._vitalitySwapSkipped = (this._vitalitySwapSkipped || 0) + 1;
+      this._emitLog?.('info', 'vitality-swap-skipped', {
+        candidate: toHex(newSyn.peerId), size: node.synaptome.size, cap, source: newSyn._addedBy ?? null,
+      });
+      return false;
     }
 
     const opened = await node.transport.openConnection(newSyn.peerId);
@@ -4603,11 +4733,6 @@ export class AxonaPeer extends DHT {
     const measuredLat = node.transport.getLatency(newSyn.peerId);
     newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
 
-    if (victim) {
-      node.synaptome.delete(victim.peerId);
-      node.connections?.delete(victim.peerId);
-      await node.transport.closeConnection(victim.peerId);
-    }
     node.addSynapse(newSyn);
     return true;
   }
@@ -4653,56 +4778,17 @@ export class AxonaPeer extends DHT {
     }
   }
 
-  /**
-   * Anneal step — replace the weakest synapse with a candidate from
-   * the under-represented stratum group.  Emits 'anneal-fired' via
-   * the engine's event bus (Phase 3 retains shared bus; future phase
-   * may split per-peer).
-   */
-  async _tryAnneal() {
-    const node   = this._node;
-    const domain = this._domain;
-    if (!node.alive || node.synaptome.size === 0) return;
-
-    let victim = null, weakW = Infinity;
-    for (const s of node.synaptome.values()) {
-      if (s.inertia > domain.simEpoch) continue;
-      if (s.weight < weakW) { weakW = s.weight; victim = s; }
-    }
-    if (!victim) return;
-
-    const counts = new Array(domain.STRATA_GROUPS).fill(0);
-    for (const s of node.synaptome.values()) {
-      counts[Math.min(domain.STRATA_GROUPS - 1, s.stratum >>> 2)]++;
-    }
-    let targetGroup = 0, minCount = Infinity;
-    for (let g = 0; g < domain.STRATA_GROUPS; g++) {
-      if (counts[g] < minCount) { minCount = counts[g]; targetGroup = g; }
-    }
-
-    const lo = targetGroup * 4, hi = lo + 3;
-    const candidate = await this._localCandidate(lo, hi);
-    if (!candidate || node.synaptome.has(candidate.id)) return;
-
-    node.synaptome.delete(victim.peerId);
-    node.connections?.delete(victim.peerId);
-    await node.transport.closeConnection(victim.peerId);
-
-    const opened = await node.transport.openConnection(candidate.id);
-    if (!opened) return;
-
-    const measuredLat = node.transport.getLatency(candidate.id);
-    const latMs   = (measuredLat >= 0) ? measuredLat : 200;
-    const stratum = clz264(node.id ^ candidate.id);
-    const syn     = new Synapse({ peerId: candidate.id, latencyMs: latMs, stratum });
-    syn.weight    = 0.1;
-    syn._addedBy  = 'anneal';
-    node.addSynapse(syn);
-    domain._emit({
-      type: 'anneal-fired', timestamp: Date.now(),
-      observerId: node.id, evicted: victim.peerId, admitted: candidate.id,
-    });
-  }
+  // _tryAnneal lived here until Hold-and-Fill v0.5 row 6 (axona-docs
+  // 4334504). It deleted the weakest synapse and closed its channel, THEN
+  // tried a candidate through the bound-only openConnection, which returns
+  // false for any stranger (webrtc.js:323-325), so under lookup load it
+  // pruned the table below cap and replaced nothing (v0.1 "What the code does
+  // today", Aster 2552a639: the defect is conditional, a bound-not-in-table
+  // candidate could open; Vega 127cb170). Removed, not patched: Rule 1 says
+  // no voluntary path removes a peer below cap, and the at-cap replacement
+  // anneal was the ancestor of is Phase 2's swap rule, which opens before it
+  // deletes and asks the duty gate first. The 'anneal-fired' event has no
+  // emitter in the kernel now; the sim engine's own anneal is untouched.
 
   /**
    * Dead-synapse replacement.  Closes the dead channel, finds a
@@ -4758,15 +4844,17 @@ export class AxonaPeer extends DHT {
     // a probe-target advertised even if WE had just marked that peer
     // dead.  The _evictAndReplace caller would then admit the same
     // dead peer back into the synaptome via _addByVitality, undoing
-    // the eviction.  Filter dead ids at assembly time.
-    const dead = node._deadPeers || new Set();
+    // the eviction.  Filter at assembly time — by ELIGIBILITY (row 10),
+    // not by mark existence: a marked identity whose schedule has come due
+    // is a candidate again; an unmarked one is not while MARKS-FULL or
+    // POLICY-FULL holds.
     const candidates = [];
     outer:
     for (const r of settled) {
       if (r.status !== 'fulfilled' || !Array.isArray(r.value)) continue;
       for (const id of r.value) {
         if (id === node.id) continue;
-        if (dead.has(id)) continue;
+        if (!this._isEligibleCandidate(id)) continue;
         if (node.synaptome.has(id)) continue;
         const stratum = clz264(node.id ^ id);
         if (stratum < lo || stratum > hi) continue;
@@ -5379,10 +5467,14 @@ export class AxonaPeer extends DHT {
     if (node.id !== sourceId) this._recordTransit(sourceId, nextId);
 
     node.temperature = Math.max(domain.T_MIN, node.temperature * domain.ANNEAL_COOLING);
-    if (Math.random() < node.temperature * domain.ANNEAL_RATE_SCALE) {
-      this._tryAnneal().catch(err =>
-        console.error(`AxonaPeer: anneal failed at ${node.id.toString(16)}:`, err));
-    }
+    // ANNEAL IS GONE (Hold-and-Fill v0.5 row 6, axona-docs 4334504). It
+    // deleted its victim and closed the channel BEFORE it tried the
+    // candidate, with a bound-only openConnection that returns false for any
+    // stranger, so under lookup load it pruned the table below cap and
+    // replaced nothing (v0.1 "What the code does today"; Aster 2552a639,
+    // Vega 127cb170). Rule 1: below cap no voluntary path removes a peer.
+    // The at-cap replacement it was the ancestor of is Phase 2's swap rule.
+    // The temperature still cools so its readers see the same series.
 
     // Lazy channel-open: synapses added by hop_cache / lateral_spread /
     // triadic_introduce point at peers we may not have opened a

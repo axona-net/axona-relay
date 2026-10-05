@@ -10,7 +10,8 @@
  * Routing decisions use the Activation Potential (AP) formula rather than
  * closest-XOR, weighting progress, latency, and reliability together.
  */
-import { DHTNode } from './DHTNode.js';
+import { DHTNode }   from './DHTNode.js';
+import { DeadPeers } from './DeadPeers.js';
 
 export class NeuronNode extends DHTNode {
   constructor({ id, lat, lng }) {
@@ -18,6 +19,16 @@ export class NeuronNode extends DHTNode {
 
     /** @type {Map<number, import('./Synapse.js').Synapse>} */
     this.synaptome = new Map();
+
+    /**
+     * Dead-peer marks: ids whose channel died and that routing and candidate
+     * selection skip until the peer re-binds (AxonaPeer onPeerDied /
+     * onPeerBound). Created here, not lazily at first death, so a consumer
+     * that wires its own died-handler before the kernel's (the bridge) finds
+     * the mark table already in place instead of installing a bare Set.
+     * @type {DeadPeers}
+     */
+    this._deadPeers = new DeadPeers();
 
     /**
      * Reverse connection index: nodes that have an outgoing synapse pointing

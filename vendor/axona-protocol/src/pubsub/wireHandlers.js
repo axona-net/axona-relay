@@ -754,7 +754,9 @@ export const wireHandlersMethods = {
   // pump so a storm of pushes can't starve mesh liveness.
   async _onReplayUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
-    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLAY_UP'));   // inline path completes here; queued path returns at once
+    // DEPENDENCY (row 4): none. A child's history pushed up to its root
+    // installs no role toward the child; nothing is owed when it drains.
+    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLAY_UP'), null);   // inline path completes here; queued path returns at once
     return 'consumed';
   },
 
@@ -903,7 +905,13 @@ export const wireHandlersMethods = {
     // Root-side: UNION_AT_ROOT (keep the claim, converge to the union). Else:
     // enter the BACKUP nature. Both are the REPLICATE policy hooks in
     // _syncIngest; the body drains through the time-sliced pump (I-11).
-    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLICATE'));   // inline path completes here; queued path returns at once
+    // DEPENDENCY (row 4): the principal this payload will install as
+    // role.backupOf when processed — the same derivation _syncIngest uses.
+    // Declared here so the duty gate sees it while the work is queued.
+    let dep = null;
+    if (payload.from && isHexId(lc(payload.from))) dep = lc(payload.from);
+    else if (meta?.fromId != null) { try { dep = lc(idHex(idBig(meta.fromId))); } catch { /* unresolvable: no pin */ } }
+    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLICATE'), dep);   // inline path completes here; queued path returns at once
     return 'consumed';
   },
 
