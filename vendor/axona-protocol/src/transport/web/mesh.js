@@ -7,7 +7,8 @@
 // `signal` payloads that carry SDP offers / answers and ICE
 // candidates.
 //
-// Once a DataChannel opens we ping the peer directly at 1 Hz; the
+// Once a DataChannel opens ONE end pings the other every 2 s and the other
+// pongs (see HEARTBEAT_DEFAULTS for the takeover and liveness rules); the
 // bridge is no longer in the data path for that pair.
 //
 // Initiation rule (matches the bridge's protocol):
@@ -25,19 +26,100 @@
 //                                                                      [removed]
 // =====================================================================
 
-const PING_INTERVAL_MS = 1000;
-const STALE_PONG_MS    = 3000;
-// No pong for this long ⇒ the channel is dead and the peer is evicted
-// (onPeerLost fires), even if dc.readyState still lies 'open'.  This is
-// the heartbeat-timeout the Transport contract requires; without it a
-// channel that goes silent (laptop sleep / screensaver, where Safari
-// keeps readyState 'open' on a dead dc) is stuck at 'stale' forever and
-// the mesh never heals.  Must be > STALE_PONG_MS so there's a visible
-// stale window first.
-const DEAD_PONG_MS     = 10000;
+// ── HEARTBEAT: one pinger per channel (David 2026-10-06) ─────────────────
+// Until 4.104.0 BOTH ends of every data channel pinged at 1 Hz and both
+// echoed pongs: four small frames a second per channel, two hundred a second
+// for a relay at cap 50, and the two loops knew nothing of each other. Now a
+// channel has ONE pinger. The offerer pings first, every `pingIntervalMs`;
+// the other end pongs at once and sends nothing of its own. A side that has
+// received no ping for `takeoverMs` becomes the pinger (the offerer waits a
+// further `tiebreakMs`, defence in depth so that two pongers do not take
+// the role in the same tick; what a collision does is decided below). A
+// side that
+// RECEIVES a ping stops pinging: the most recent pinger keeps the role, and
+// the one that was silent stays the ponger — if A goes quiet, B takes over,
+// A pongs and A does not resume. Each ping carries `hb: 1` (the protocol
+// marker), `since` (the silence the pinger observed before sending; logged)
+// and the last measured `rtt`. A receiver that is itself pinging asks
+// whether it is still ACTIVELY sending: a pinger whose own last ping is
+// older than one interval plus a tick has stalled or slept and yields
+// whatever its role; a pinger that is actively sending is in a CROSSING,
+// resolved by role — the responder yields, the offerer keeps. The decision
+// itself needs no clock comparison; how soon the pair settles is the
+// contract block's business below, and it is conditional. A ping WITHOUT
+// the marker is a
+// pre-4.105.0 peer's: in that legacy mode this end never yields and keeps
+// its own 2 s pings for its own measurement while still ponging (SP-1). The
+// ping's rtt lets the ponger learn the latency.
+// Liveness counts ANY receipt (ping or pong): nothing received for `staleMs`
+// marks the channel stale (display only), nothing for `deadMs` evicts the
+// peer (onPeerLost fires), even when dc.readyState still lies 'open' (Safari
+// after sleep). A channel that opens and never hears anything also dies at
+// `deadMs`; before this change such a channel lived until a send threw.
+// Overridable through the constructor's `heartbeat` option (tests scale it).
+//
+// THE PER-CHANNEL STATE MACHINE, as a contract (Aster a9150fe4):
+//   role ∈ {PINGER, PONGER}; set at open: offerer → PINGER, responder → PONGER.
+//   PINGER, each tickMs: if now − lastPingTxAt ≥ pingIntervalMs, send ping.
+//   PONGER, each tickMs: if now − max(lastPingRxAt, openedAt) ≥ takeoverMs
+//     (+ tiebreakMs when I am the offerer) → PINGER, send ping ("takeover").
+//   on ping received (any role): pong at once; lastPingRxAt = now; then
+//     · no `hb` marker → legacy peer: PINGER (and stay there), never yield;
+//     · PONGER → stay PONGER;
+//     · PINGER and my own lastPingTxAt is older than pingIntervalMs + tickMs
+//       → PONGER ("stalled": my loop was not running; the far end took over);
+//     · PINGER and actively sending → a CROSSING: responder → PONGER,
+//       offerer stays PINGER.
+//   on pong received: lastRxAt = now; rtt recorded. (A pong never changes
+//     the role.)
+//   liveness, each reapMs, independent of role: since := now − max(lastRxAt,
+//     openedAt); > staleMs → 'stale'; > deadMs → evicted (onPeerLost).
+// ENVIRONMENT THIS RELIES ON (assumptions, not things the code implements):
+// the data channel is ORDERED (created with ordered: true) and delivers each
+// frame once; each end's event loop runs its timers and handlers, late or
+// not; the clock the code reads is Date.now(), and the code never compares
+// one end's reading with the other's (`t` only round-trips; `since` is the
+// sender's own reading and is logged, nothing decides on it) — whether that
+// clock moves monotonically is the host's property, not this file's.
+// WHAT IS ESTABLISHED, AND HOW:
+//  · In steady state exactly one end pings. Observed in the fence (A).
+//  · After a disturbance — a stalled loop, a sleep of one or both ends,
+//    frames queued across a pause and delivered on resume — the fence
+//    OBSERVES the pair back at exactly one pinger within its own window of
+//    takeoverMs + tiebreakMs + tickMs + 50 ms, in its scaled schedules (B,
+//    C, H, I), and holding there. That is an observation of those
+//    schedules. It is NOT a general finite bound: a timer or handler that
+//    the host runs late can hold a side in the ponger role past any such
+//    window, and nothing here constrains lateness (review, 2026-10-06).
+//  · The property the code is WRITTEN TO, stated as a conditional and not
+//    proven here: if, once a disturbance has ended, every due tick and
+//    every delivered frame's handler is eventually run and frames keep
+//    arriving in order, the pair reaches one pinger and holds it while
+//    both ends are live. "Eventually" admits arbitrarily long gaps; no
+//    deadline is claimed.
+//  · Transients the fence observes on the way: ZERO pingers (queued
+//    pre-pause pings arriving while both loops still look stalled make both
+//    yield) and TWO (both wake and send before either delivery lands). Each
+//    such frame is a receipt and advances the liveness clock.
+//  · Eviction follows receipt age at the reaper's check: a peer is evicted
+//    when, at a reaper tick, nothing has been received for more than
+//    deadMs. A pause is survived only if queued receipts are processed
+//    before a reaper check finds the age past deadMs; the code orders
+//    nothing between the two.
+// NOT CLAIMED: convergence under a channel that reorders or drops frames;
+// any finite convergence bound.
+const HEARTBEAT_DEFAULTS = Object.freeze({
+  pingIntervalMs: 2000,   // the pinger's cadence
+  takeoverMs:     5000,   // silence before the ponger becomes the pinger
+  tiebreakMs:     1000,   // the offerer's extra wait, so a collision converges
+  staleMs:        10000,  // no ping or pong received → 'stale'
+  deadMs:         20000,  // no ping or pong received → evicted
+  tickMs:         1000,   // the heartbeat scheduler's own tick
+  reapMs:         500,    // the liveness reaper's tick (see _reapTick)
+});
 // Consecutive dc.send() throws that mean "this channel is dead now" —
 // a throwing send is definitive proof the channel is gone even when
-// readyState lies 'open', so we don't wait the full DEAD_PONG_MS.
+// readyState lies 'open', so we don't wait the full deadMs.
 const SEND_FAIL_LIMIT  = 3;
 const RTT_WINDOW       = 10;
 // ── Bounded mesh degree (4.95.0). Inert unless a cap is configured. ──
@@ -69,10 +151,10 @@ const NEGOTIATION_DEADLINE_MS = 30000;
 const NEGOTIATION_FAILED_REASONS = new Set(['negotiation-timeout', 'pc-closed', 'peer-left', 'disconnect']);
 // One reaper interval drives EVERY per-peer liveness decision (see _reapTick):
 // while never-opened it enforces NEGOTIATION_DEADLINE_MS; once open it folds the
-// pong-timeout (DEAD_PONG_MS), send-fail (SEND_FAIL_LIMIT) and stale-display
-// transitions that used to live in three separate timers/methods. Must be ≤
-// STALE_PONG_MS so the stale→open display flip is observed promptly.
-const REAP_INTERVAL_MS = 500;
+// heartbeat death (heartbeat.deadMs), send-fail (SEND_FAIL_LIMIT) and stale-
+// display (heartbeat.staleMs) transitions that used to live in three separate
+// timers/methods. Its tick is heartbeat.reapMs (500 ms), well below staleMs so
+// the stale→open display flip is observed promptly.
 
 /**
  * Pull the DTLS certificate fingerprint out of an SDP blob.  WebRTC SDP
@@ -167,9 +249,12 @@ export class MeshManager {
    * @param {(peerId:string)=>string|null} [opts.degree.regionOf]     peerId → keyspace region
    * @param {(peerId:string)=>boolean}     [opts.degree.isProtected]  peerId carries an obligation
    */
-  constructor({ sendSignal, log, degree = null, ledger = null }) {
+  constructor({ sendSignal, log, degree = null, ledger = null, heartbeat = null }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
+    // The heartbeat contract (one pinger per channel; see HEARTBEAT_DEFAULTS).
+    // An object overrides fields; anything else keeps the defaults.
+    this._hb = Object.freeze({ ...HEARTBEAT_DEFAULTS, ...(heartbeat && typeof heartbeat === 'object' ? heartbeat : {}) });
     // CHANNEL LEDGER (Hold-and-Fill row 3): one record per RTCPeerConnection
     // keyed by its incarnation tag, one per bound identity; counts and a
     // predicate, no dial, no close, and with the default `enforce: false` no
@@ -528,6 +613,10 @@ export class MeshManager {
       pings:      p.pings,
       pongs:      p.pongs,
       lastPongAt: p.lastPongAt,
+      pinger:     p.pinger,
+      lastRxAt:   p.lastRxAt,
+      takeovers:  p.takeovers,
+      peerLegacy: p.peerLegacy,
       rttLast:    p.rttBuffer.at(-1) ?? null,
       rttAvg:     p.rttBuffer.length
                     ? p.rttBuffer.reduce((a, b) => a + b, 0) / p.rttBuffer.length
@@ -838,6 +927,18 @@ export class MeshManager {
       openedAt: 0,
       pings: 0, pongs: 0,
       lastPongAt: 0,
+      // Heartbeat (one pinger per channel): am I the pinger; when I last
+      // received a ping; when I last sent one; when I last received anything
+      // (ping or pong — the liveness clock); how often I took the role over.
+      pinger: false,
+      lastPingRxAt: 0,
+      lastPingTxAt: 0,
+      lastRxAt: 0,
+      takeovers: 0,
+      // The far end sent a ping without the protocol marker: a pre-4.105.0
+      // peer running two 1 Hz loops. In legacy mode this end never yields and
+      // keeps its own pings for its own measurement (SP-1).
+      peerLegacy: false,
       rttBuffer: [],
       pendingCandidates: [],
       pingTimer: null,
@@ -1088,7 +1189,7 @@ export class MeshManager {
       // and keep polling so we notice ICE renegotiations later on.
       this._refreshPath(state, 'dc-open');
       this._startPathPoll(state);
-      this._startPingLoop(state);
+      this._openHeartbeat(state);
       this._notify();
     };
 
@@ -1135,11 +1236,58 @@ export class MeshManager {
       );
 
       if (msg.type === 'ping') {
+        const now = Date.now();
+        const silenceBefore = Math.max(state.lastPingRxAt, state.openedAt || 0);
+        state.lastPingRxAt = now;
+        state.lastRxAt = now;
+        if (msg.hb !== 1) {
+          // LEGACY PEER (SP-1, Aster 528c77b6): no protocol marker, so the far
+          // end runs the old two-loop heartbeat and understands no handover.
+          // This end never yields to it and measures for itself: it keeps (or
+          // takes) the pinger role, while still ponging every legacy ping so
+          // the far end's own liveness holds. Frames on such a channel: its
+          // 1 Hz ping+pong plus our 2 s ping+pong.
+          if (!state.peerLegacy) {
+            state.peerLegacy = true;
+            this._log('ping-legacy-peer', { peerId: state.peerId, role: state.role });
+          }
+          if (!state.pinger) state.pinger = true;
+        } else if (state.pinger) {
+          // ONE PINGER: the other side is pinging too. The decision is about
+          // ME, not about the far end's clock (Aster 2e70fefc, Vega c141c90f:
+          // after a shared suspension both pings can carry since ≥ takeoverMs,
+          // so a rule keyed on `since` makes both yield). Am I still actively
+          // sending? If my own last ping is older than one interval plus a
+          // tick, my loop has stalled or slept: the far end took the role
+          // legitimately and I yield, whatever my role — if A goes quiet, B
+          // takes over, A pongs and does not resume. If I AM actively sending,
+          // this is a CROSSING (both started at once, both woke at once, a
+          // ping in flight each way) and it is resolved by role: the responder
+          // yields, the offerer keeps. Deterministic, with no assumption about
+          // delivery delay or tick phase. The far end's `since` is logged.
+          const since = (typeof msg.since === 'number' && msg.since >= 0) ? msg.since : null;
+          const active = state.lastPingTxAt > 0 && (now - state.lastPingTxAt) <= this._hb.pingIntervalMs + this._hb.tickMs;
+          if (!active) {
+            state.pinger = false;
+            this._log('ping-yield', { peerId: state.peerId, role: state.role, cause: 'stalled', since, idleMs: state.lastPingTxAt ? now - state.lastPingTxAt : null });
+          } else if (state.role === 'responder') {
+            state.pinger = false;
+            this._log('ping-yield', { peerId: state.peerId, role: state.role, cause: 'crossing', since });
+          } else {
+            this._log('ping-crossing-kept', { peerId: state.peerId, role: state.role, since, sinceMine: now - silenceBefore });
+          }
+        }
+        // The pinger's measured round trip rides on its ping so this end
+        // learns the same latency without pinging itself.
+        if (typeof msg.rtt === 'number' && msg.rtt >= 0) {
+          state.rttBuffer.push(msg.rtt);
+          if (state.rttBuffer.length > RTT_WINDOW) state.rttBuffer.shift();
+        }
         // Echo the timestamp back.
         if (state.dc?.readyState === 'open') {
           try {
             state.dc.send(JSON.stringify({
-              type: 'pong', t: msg.t, peerT: Date.now(),
+              type: 'pong', t: msg.t, peerT: now,
             }));
           } catch (err) {
             this._log('pong-send-failed', {
@@ -1147,10 +1295,15 @@ export class MeshManager {
             });
           }
         }
+        if (state.state === 'stale') state.state = 'open';
+        this._emitPingTraffic(state.peerId, 'recv');
+        this._notify();
       } else if (msg.type === 'pong') {
-        const rtt = Date.now() - msg.t;
+        const now = Date.now();
+        const rtt = now - msg.t;
         state.pongs++;
-        state.lastPongAt = Date.now();
+        state.lastPongAt = now;
+        state.lastRxAt = now;
         state.rttBuffer.push(rtt);
         if (state.rttBuffer.length > RTT_WINDOW) state.rttBuffer.shift();
         if (state.state === 'stale') state.state = 'open';
@@ -1172,9 +1325,45 @@ export class MeshManager {
     };
   }
 
+  /** The channel just opened: take the pinger role if I am the offerer,
+   *  start the liveness clock, and start the heartbeat scheduler. Called from
+   *  dc.onopen; tests drive it directly on a wired fake channel. */
+  _openHeartbeat(state) {
+    state.pinger = state.role === 'offerer';
+    state.lastRxAt = state.openedAt || Date.now();
+    state.lastPingRxAt = 0;
+    state.lastPingTxAt = 0;
+    this._startPingLoop(state);
+  }
+
   _startPingLoop(state) {
     if (state.pingTimer) clearInterval(state.pingTimer);
-    state.pingTimer = setInterval(() => this._pingTick(state), PING_INTERVAL_MS);
+    state.pingTimer = setInterval(() => this._heartbeatTick(state), this._hb.tickMs);
+  }
+
+  /** The heartbeat scheduler, once per `tickMs`. The pinger sends a ping every
+   *  `pingIntervalMs`. The ponger watches for silence: no ping received for
+   *  `takeoverMs` (plus `tiebreakMs` for the offerer) and it takes the role
+   *  and pings at once. Returns 'skip' | 'ponger' | 'wait' | 'takeover' or
+   *  _pingTick's verdict. */
+  _heartbeatTick(state) {
+    if (state.dc?.readyState !== 'open') return 'skip';
+    const now = Date.now();
+    const hb = this._hb;
+    if (!state.pinger) {
+      const lastPing = Math.max(state.lastPingRxAt, state.openedAt || 0);
+      const wait = hb.takeoverMs + (state.role === 'offerer' ? hb.tiebreakMs : 0);
+      if (lastPing > 0 && now - lastPing >= wait) {
+        state.pinger = true;
+        state.takeovers++;
+        this._log('ping-takeover', { peerId: state.peerId, role: state.role, silentMs: now - lastPing });
+        this._pingTick(state);
+        return 'takeover';
+      }
+      return 'ponger';
+    }
+    if (now - state.lastPingTxAt >= hb.pingIntervalMs) return this._pingTick(state);
+    return 'wait';
   }
 
   /** One heartbeat-ping send. This is an ACTION (keepalive), not a death
@@ -1182,11 +1371,20 @@ export class MeshManager {
    *  state.sendFailures; the reaper (_reapTick) reads that streak and is the
    *  single place that evicts. Returns 'sent' | 'skip' | 'fail' | 'fail-limit'
    *  ('fail-limit' = the streak has reached SEND_FAIL_LIMIT and the next reap
-   *  will evict). */
+   *  will evict). The ping carries the last measured RTT for the ponger. */
   _pingTick(state) {
     if (state.dc?.readyState !== 'open') return 'skip';
     try {
-      state.dc.send(JSON.stringify({ type: 'ping', t: Date.now() }));
+      const now = Date.now();
+      const last = state.rttBuffer.at(-1);
+      // hb: the protocol marker (a ping without it is a legacy peer's);
+      // since: the silence I observed from the far end before sending —
+      // LOGGED by the receiver, never decided on (the receiver's own
+      // activity decides a crossing; see the 'ping' handler);
+      // rtt: my last measured round trip, for the ponger's latency.
+      const since = now - Math.max(state.lastPingRxAt, state.openedAt || now);
+      state.dc.send(JSON.stringify({ type: 'ping', hb: 1, t: now, since, ...(typeof last === 'number' ? { rtt: last } : {}) }));
+      state.lastPingTxAt = now;
       state.pings++;
       state.sendFailures = 0;          // a successful send clears the streak
       this._emitPingTraffic(state.peerId, 'sent');
@@ -1216,7 +1414,7 @@ export class MeshManager {
       this._negotiationDeadline.set(peerId, Date.now() + NEGOTIATION_DEADLINE_MS);
     }
     if (state.reaperTimer) clearInterval(state.reaperTimer);
-    state.reaperTimer = setInterval(() => this._reapTick(state), REAP_INTERVAL_MS);
+    state.reaperTimer = setInterval(() => this._reapTick(state), this._hb.reapMs);
   }
 
   /** The single liveness verdict for one peer, run by the reaper interval from
@@ -1257,18 +1455,24 @@ export class MeshManager {
     }
 
     // ── open: heartbeat timeout (hard death) + stale↔open display flip ──
-    if (state.lastPongAt > 0) {                    // after the first pong
-      const since = now - state.lastPongAt;
-      if (since > DEAD_PONG_MS) {
-        // Pongs stopped long enough that the channel is dead. Evict + fire
+    // The liveness clock is the last RECEIPT of anything — a ping (I am the
+    // ponger) or a pong (I am the pinger) — and, before the first receipt,
+    // the moment the channel opened, so a channel that never hears anything
+    // dies too. The reason string stays 'pong-timeout' for the marks and
+    // the logs that read it.
+    const lastRx = Math.max(state.lastRxAt ?? 0, state.lastPongAt ?? 0, state.lastPingRxAt ?? 0, state.openedAt ?? 0);
+    if (lastRx > 0) {
+      const since = now - lastRx;
+      if (since > this._hb.deadMs) {
+        // Nothing received long enough that the channel is dead. Evict + fire
         // onPeerLost so upper layers route around and the mesh rebuilds.
         this._retire(state.peerId, 'pong-timeout');
         return 'reaped-pong';
       }
-      if (since > STALE_PONG_MS && state.state !== 'stale') {
+      if (since > this._hb.staleMs && state.state !== 'stale') {
         state.state = 'stale'; this._notify(); return 'stale';
       }
-      if (since <= STALE_PONG_MS && state.state === 'stale') {
+      if (since <= this._hb.staleMs && state.state === 'stale') {
         state.state = 'open';  this._notify(); return 'recovered';
       }
     }
