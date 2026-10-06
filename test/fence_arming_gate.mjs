@@ -12,7 +12,8 @@
 //
 // Run: node test/fence_arming_gate.mjs
 // =====================================================================
-import { ARM_ENVS, armingFromEnv, assertArmingSupported, assertArmedModules } from '../src/relay.js';
+import { readFileSync } from 'node:fs';
+import { ARM_ENVS, armingFromEnv, assertArmingSupported, assertArmingCoherent, assertArmedModules } from '../src/relay.js';
 
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
@@ -70,6 +71,31 @@ console.log('armed-canary arming fence\n');
   check('3 MISSING: guard alone requested, guard absent → refused', throws(() => assertArmedModules({}, ['RELAY_ATTEMPT_GUARD'])));
   check('3 SCOPED: unrequested modules are not required', !throws(() => assertArmedModules(oldVendorPeer, ['RELAY_SYNAPTOME_MAINTAIN'])));
   check('3 OFF: nothing armed asserts nothing', !throws(() => assertArmedModules({}, [])));
+}
+
+// ── 4. coherence (Hold-and-Fill v0.15 Rule 2, row 12): maintenance only with
+//      the guard AND the gate; the launcher refuses any other arming at launch ──
+{
+  const msg = (fn) => { try { fn(); return null; } catch (e) { return String(e.message); } };
+  const envsOf = (o) => armingFromEnv(o).armedEnvs;
+  check('4 maintenance ALONE: refused', throws(() => assertArmingCoherent(envsOf({ RELAY_SYNAPTOME_MAINTAIN: '1' }))));
+  check('4 maintenance + guard, no gate: refused', throws(() => assertArmingCoherent(envsOf({ RELAY_SYNAPTOME_MAINTAIN: '1', RELAY_ATTEMPT_GUARD: '1' }))));
+  check('4 maintenance + gate, no guard: refused', throws(() => assertArmingCoherent(envsOf({ RELAY_SYNAPTOME_MAINTAIN: '1', RELAY_ADMISSION_GATE: '1' }))));
+  check('4 maintenance + guard + gate: allowed', !throws(() => assertArmingCoherent(envsOf({ RELAY_SYNAPTOME_MAINTAIN: '1', RELAY_ATTEMPT_GUARD: '1', RELAY_ADMISSION_GATE: '1' }))));
+  check('4 all four (the fleet\'s configuration): allowed', !throws(() => assertArmingCoherent(ARM_ENVS.slice())));
+  check('4 guard alone, gate alone, presence alone, guard+gate without maintenance: allowed (the rule is about maintenance)',
+    !throws(() => assertArmingCoherent(['RELAY_ATTEMPT_GUARD'])) && !throws(() => assertArmingCoherent(['RELAY_ADMISSION_GATE']))
+    && !throws(() => assertArmingCoherent(['RELAY_PRESENCE'])) && !throws(() => assertArmingCoherent(['RELAY_ATTEMPT_GUARD', 'RELAY_ADMISSION_GATE'])));
+  check('4 nothing armed: nothing asserted', !throws(() => assertArmingCoherent([])) && !throws(() => assertArmingCoherent(undefined)));
+  const m1 = msg(() => assertArmingCoherent(['RELAY_SYNAPTOME_MAINTAIN']));
+  check('4 the refusal names BOTH missing envs and the remedy, in the kernel-floor refusal\'s shape', /^arming refused: RELAY_SYNAPTOME_MAINTAIN=1 set without RELAY_ATTEMPT_GUARD and RELAY_ADMISSION_GATE/.test(m1) && /Set RELAY_ATTEMPT_GUARD=1 and RELAY_ADMISSION_GATE=1, or unset RELAY_SYNAPTOME_MAINTAIN/.test(m1), m1);
+  const m2 = msg(() => assertArmingCoherent(['RELAY_SYNAPTOME_MAINTAIN', 'RELAY_ATTEMPT_GUARD']));
+  check('4 with one companion present the refusal names only the missing one', /set without RELAY_ADMISSION_GATE —/.test(m2) && !/RELAY_ATTEMPT_GUARD and/.test(m2), m2);
+  // the launcher calls it: after the kernel floor, before the peer is built (fail closed, at launch)
+  const src = readFileSync(new URL('../src/relay.js', import.meta.url), 'utf8');
+  const cr = src.indexOf('export function createRelay('); const body = src.slice(cr);
+  const iSup = body.indexOf('assertArmingSupported(KERNEL_VERSION, armedEnvs);'); const iCoh = body.indexOf('assertArmingCoherent(armedEnvs);'); const iPeer = body.indexOf('new AxonaPeer(');
+  check('4 createRelay calls assertArmingCoherent after the kernel floor and BEFORE the peer is constructed', iSup > 0 && iCoh > iSup && iPeer > iCoh, JSON.stringify({ iSup, iCoh, iPeer }));
 }
 
 console.log(`\nResult: ${passed} passed, ${failed} failed`);

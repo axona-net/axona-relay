@@ -71,6 +71,10 @@ export function regionDescriptor(token = 'eagle') {
 //                             understands synaptomeMaintain, so that flag
 //                             alone against an old vendor is the 2026-06-29
 //                             storm with no guard (fail closed, at launch)
+//   assertArmingCoherent()    Hold-and-Fill row 12: RELAY_SYNAPTOME_MAINTAIN
+//                             without RELAY_ATTEMPT_GUARD and
+//                             RELAY_ADMISSION_GATE throws (maintenance is
+//                             armed only with the guard and the gate)
 //   assertArmedModules()      post-construction, PRE-JOIN proof that every
 //                             requested module actually LANDED on the peer
 //                             (a version string is a claim; the peer's own
@@ -112,6 +116,27 @@ export function assertArmingSupported(kernelVersion, armedEnvs) {
       `4.67.0 predates the _laneSeen restore. ` +
       `Re-vendor 4.67.1+ (scripts/sync-protocol.sh from 7fc3e56+) or unset the arming envs.`);
   }
+}
+
+/**
+ * Hold-and-Fill v0.15 (axona-docs e4809d2) Rule 2, row 12: maintenance is
+ * armed ONLY with the attempt guard AND the admission gate. The kernel makes
+ * the same refusal inside (its fill runs only with both present and falls
+ * back to the legacy near refill otherwise), and the launcher makes it here,
+ * at launch, in the same shape as the kernel-floor refusal above: a relay
+ * configured with RELAY_SYNAPTOME_MAINTAIN=1 and either companion missing
+ * never comes up. Maintenance without the guard is the 2026-06-29 storm; the
+ * fill without the gate has no cap to stop at. Every fleet harness already
+ * sets all four envs; this makes the other configurations impossible.
+ */
+export function assertArmingCoherent(armedEnvs) {
+  if (!armedEnvs || !armedEnvs.includes('RELAY_SYNAPTOME_MAINTAIN')) return;
+  const missing = ['RELAY_ATTEMPT_GUARD', 'RELAY_ADMISSION_GATE'].filter((e) => !armedEnvs.includes(e));
+  if (missing.length === 0) return;
+  throw new Error(
+    `arming refused: RELAY_SYNAPTOME_MAINTAIN=1 set without ${missing.join(' and ')} — ` +
+    `maintenance is armed only with the attempt guard and the admission gate (Hold-and-Fill Rule 2; ` +
+    `maintenance alone is the 2026-06-29 storm). Set ${missing.map((e) => e + '=1').join(' and ')}, or unset RELAY_SYNAPTOME_MAINTAIN.`);
 }
 
 export function assertArmedModules(peer, armedEnvs) {
@@ -200,6 +225,7 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
   // call, never a default.
   const { armedEnvs, armMaintain, armGate, armGuard, armPresence } = armingFromEnv(process.env);
   assertArmingSupported(KERNEL_VERSION, armedEnvs);
+  assertArmingCoherent(armedEnvs);   // row 12: maintenance only with the guard AND the gate
   const peer   = new AxonaPeer({ domain, node, nodeIdentity: identity, transport,
     ...(frameRegistry === true ? { frameRegistry: true } : {}),
     ...(armMaintain ? { synaptomeMaintain: armMaintain } : {}),
