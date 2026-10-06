@@ -443,6 +443,8 @@ export function webTransport({
   // Filled in right after the WebRTCTransport is constructed; the mesh degree
   // resolver closes over it. See the note on `degree` below.
   let webrtcRef = null;
+  /** Row 12: kernel handlers for the bridge `peer-list` sample (composite.onPeerList). */
+  const peerListHandlers = new Set();
   const mesh = new MeshManager({
     // THE KEYSPACE REGION COMES FROM THE AUTHENTICATED nodeId, NOT THE
     // SIGNALLING ID (4.96.0 — this was wrong in 4.95.0 and the cap could never
@@ -620,12 +622,15 @@ export function webTransport({
           // so it never re-runs welcome's connId/nonce/handshake bookkeeping.
           applyTurnFrame(frame.turn ?? null);
           return;
-        case 'peer-list':
+        case 'peer-list': {
           b3observe('peer-list', null, frame);   // S4b shadow (no-op unless flag on)
+          const peers = Array.isArray(frame.peers) ? frame.peers : [];
+          for (const h of peerListHandlers) { try { h(peers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
           if (typeof mesh.onPeerList === 'function') {
-            return mesh.onPeerList(Array.isArray(frame.peers) ? frame.peers : []);
+            return mesh.onPeerList(peers);
           }
           break;
+        }
         case 'peer-joined':
           b3observe('peer-joined', frame.peerId, frame);   // S4b shadow
           if (typeof mesh.onPeerJoined === 'function' && typeof frame.peerId === 'string') {
@@ -1288,12 +1293,34 @@ export function webTransport({
     const pending = mesh.pendingNegotiations();
     if (pending >= MAX_PENDING_RELAY_NEGOTIATIONS) {
       log('relay-connect-throttled', { to: toHex, pending });
-      return false;
+      return null;   // row 12 (R12-2): capacity refused, nothing started — the dialer defers, consuming nothing
     }
     log('relay-connect-initiate', { to: toHex });
     mesh._initiateTo(toHex);
-    return true;
+    // Row 8: return the incarnation of the negotiation just started (the
+    // state exists synchronously after _initiateTo), so the dialer can
+    // correlate the channel's terminal event with its guard token. `true`
+    // when the mesh cannot say (a refused allocation returns false below).
+    const inc = (typeof mesh.incFor === 'function') ? mesh.incFor(toHex) : null;
+    if (inc == null && !mesh.hasPeer(toHex)) {
+      // Nothing was started. Row 12 (R12-2): when the LEDGER refused the
+      // allocation this is a capacity refusal at the allocation boundary —
+      // `null`, so the dialer defers the candidate in place, consumes no
+      // attempt and no mark, and reports no dial. Any other reason is `false`.
+      return (typeof mesh.allocRefusedFor === 'function' && mesh.allocRefusedFor(toHex)) ? null : false;
+    }
+    return inc ?? true;
   };
+  // connectViaRelay's answer, the contract the kernel's dialers read:
+  //   string  — issued; the incarnation of the negotiation just started
+  //   true    — issued; the mesh cannot name the incarnation
+  //   false   — NOT issued: relay disabled, bad or own id, a channel or
+  //             negotiation to this peer already exists (the dialer ends its
+  //             token as a cancel)
+  //   null    — NOT issued: CAPACITY refused (the relay negotiation throttle,
+  //             or the ledger at allocation); nothing started, nothing to
+  //             end; the dialer releases its token, consumes nothing and
+  //             defers the candidate (row 12, case 45)
   // Advisory capability surface (forward-compat; functional gate is the flag).
   composite.capabilities = () => (meshRelay ? ['mesh-relay'] : []);
   composite.hasCapability = (cap) => composite.capabilities().includes(cap);
@@ -1463,6 +1490,28 @@ export function webTransport({
   composite.channelLedgerStats = () => {
     try { return mesh.ledgerStats ? mesh.ledgerStats() : null; }
     catch { return null; }
+  };
+
+  /**
+   * Row 12 (Hold-and-Fill v0.15, Rule 2): the channel-token half of the fill's
+   * reservation — may an outbound channel be allocated right now? The ledger's
+   * pure predicate (no counting); true when the ledger is off.
+   */
+  composite.mayDial = () => {
+    try { return mesh.canAllocate ? mesh.canAllocate('out') !== false : true; }
+    catch { return true; }
+  };
+
+  /**
+   * Row 12: the DIRECTORY sample. Every bridge `peer-list` frame is handed to
+   * these handlers (hex nodeIds, as the frame carries them) in addition to the
+   * mesh's own bootstrap dialing of it, which is unchanged. The kernel
+   * nominates the sample into its candidate cache.
+   */
+  composite.onPeerList = (handler) => {
+    if (typeof handler !== 'function') throw new TypeError('onPeerList: handler must be a function');
+    peerListHandlers.add(handler);
+    return () => { peerListHandlers.delete(handler); };
   };
 
   return composite;

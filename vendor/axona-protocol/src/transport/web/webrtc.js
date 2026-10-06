@@ -162,7 +162,7 @@ export class WebRTCTransport extends Transport {
     this._unsubPeerLost = this._mesh.onPeerLost((peerId, reason) => this._onPeerLost(peerId, reason));
     // Row 13: class A's signal, when the mesh provides it.
     this._unsubNegotiationFailed = (typeof this._mesh.onNegotiationFailed === 'function')
-      ? this._mesh.onNegotiationFailed((peerId, reason) => this._onNegotiationFailed(peerId, reason))
+      ? this._mesh.onNegotiationFailed((peerId, reason, inc) => this._onNegotiationFailed(peerId, reason, inc))
       : null;
     this._started = true;
     this._log('transport-started', { localNodeId: String(this._localNodeId) });
@@ -266,8 +266,12 @@ export class WebRTCTransport extends Transport {
     // Row 3: the channel ledger's peer record points at this channel now.
     try { this._mesh?.ledgerBind?.(meshId, nodeId.toString(16).padStart(66, '0')); } catch { /* bookkeeping only */ }
     if (isNew && this._peerBoundHandlers) {
+      // Row 8: the bound channel's incarnation rides along (null when the
+      // mesh cannot say) so the kernel ends the guard token of the attempt
+      // that started THIS channel and no other.
+      const inc = (typeof this._mesh?.incFor === 'function') ? this._mesh.incFor(meshId) : null;
       for (const h of this._peerBoundHandlers) {
-        try { h(nodeId); }
+        try { h(nodeId, meshId, inc); }
         catch (err) { this._log('peer-bound-handler-threw', { err: err.message }); }
       }
     }
@@ -488,7 +492,7 @@ export class WebRTCTransport extends Transport {
     };
   }
 
-  _onNegotiationFailed(meshId, reason) {
+  _onNegotiationFailed(meshId, reason, inc = null) {
     let nodeId = this._nodeIdByMeshId.get(meshId);
     if (nodeId === undefined) {
       // A never-opened channel has no binding; the only identity a failed
@@ -497,7 +501,7 @@ export class WebRTCTransport extends Transport {
     }
     if (nodeId === undefined) { this._log('negotiation-failed-anonymous', { meshId, reason }); return; }
     for (const h of (this._negotiationFailedHandlers ?? [])) {
-      try { h(nodeId, reason); }
+      try { h(nodeId, reason, inc); }   // row 8: the channel incarnation rides along for token correlation
       catch (err) { this._log('negotiation-failed-handler-threw', { reportedId: String(nodeId), err: err.message }); }
     }
   }

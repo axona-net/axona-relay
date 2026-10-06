@@ -35,19 +35,27 @@ export function identitySuffix(id) {
 }
 
 export class AttemptGuard {
-  constructor({ maxAttempts = 4, baseMs = 30000, factor = 2, refillWindowMs = 60000 } = {}) {
+  constructor({ maxAttempts = 4, baseMs = 30000, factor = 2, refillWindowMs = 60000, inflightMaxMs = 45000 } = {}) {
     this.maxAttempts = maxAttempts;
     this.baseMs = baseMs;
     this.factor = factor;
     this.refillWindowMs = refillWindowMs;
-    this._state = new Map();        // suffix -> { attempts, inflight, nextAt, expired }
+    // Row 8 (Hold-and-Fill v0.15, axona-docs e4809d2): an attempt whose dial
+    // went out holds its token until BIND, CANCEL or DEADLINE. The deadline
+    // normally arrives as the mesh's negotiation failure (row 13); this bound
+    // is the fail-safe for a lost signal, so an identity can never stay
+    // in flight (and therefore undialable) for ever. NEGOTIATION_DEADLINE_MS
+    // is 30 s; 45 s leaves the signal room to arrive first.
+    this.inflightMaxMs = inflightMaxMs;
+    this._state = new Map();        // suffix -> { attempts, inflight, k, beganAt, nextAt, expired }
     this._lastRefillAt = new Map(); // suffix -> ts of last granted refill
-    this.refills = 0; this.coalesced = 0;
+    this._seq = 0;                  // completion-token counter (k)
+    this.refills = 0; this.coalesced = 0; this.staleEnded = 0; this.ignoredEnds = 0;
   }
 
   _s(key) {
     let s = this._state.get(key);
-    if (!s) { s = { attempts: 0, inflight: false, nextAt: 0, expired: false }; this._state.set(key, s); }
+    if (!s) { s = { attempts: 0, inflight: false, k: 0, beganAt: 0, nextAt: 0, expired: false }; this._state.set(key, s); }
     return s;
   }
 
@@ -59,24 +67,82 @@ export class AttemptGuard {
     return !s.expired && !s.inflight && t >= s.nextAt;
   }
 
-  begin(id) {
+  /** Open an attempt. Returns the completion token `k` the attempt owns
+   *  (row 8, case 16: `begin(id, k)` once; `end(id, k, ·)` exactly once). */
+  begin(id, t = Date.now()) {
     const key = identitySuffix(id);
-    if (key === null) return;
-    this._s(key).inflight = true;
+    if (key === null) return 0;
+    const s = this._s(key);
+    s.inflight = true; s.k = ++this._seq; s.beganAt = t;
+    return s.k;
   }
 
-  /** Record the probe outcome. Bind clears the entry (expiry-on-bind);
-   *  failure schedules the exponential backoff; exhaustion expires. */
-  end(id, bound, t = Date.now()) {
+  /** Record the attempt's outcome, EXACTLY ONCE. Bind clears the entry
+   *  (expiry-on-bind); failure schedules the exponential backoff; exhaustion
+   *  expires. An `end` with no attempt in flight, or carrying a token that is
+   *  not the live one, is ignored and counted: a bind of an identity this
+   *  guard never dialed, a second deadline for one dial, or a stale
+   *  completion after a newer attempt must not count a failure or clear a
+   *  live attempt. Returns true when it acted. */
+  end(id, bound, t = Date.now(), k = undefined, inc = undefined) {
     const key = identitySuffix(id);
-    if (key === null) return;
-    const s = this._s(key);
-    s.inflight = false;
-    if (bound) { this._state.delete(key); return; }
+    if (key === null) return false;
+    const s = this._state.get(key);
+    if (!s || !s.inflight || (k !== undefined && k !== s.k)) { this.ignoredEnds++; return false; }
+    // Row 8 (Aster a2c1d79f R8-2): a terminal event names the CHANNEL
+    // INCARNATION it came from. When the attempt recorded the incarnation of
+    // the negotiation it started (`attach`) and the event carries one, they
+    // must match: an old channel's deadline or bind after a newer dial to
+    // the same identity ends nothing and counts nothing.
+    if (inc != null && s.inc != null && inc !== s.inc) { this.ignoredEnds++; this.staleIncEnds = (this.staleIncEnds ?? 0) + 1; return false; }
+    s.inflight = false; s.k = 0; s.inc = null;
+    if (bound) { this._state.delete(key); return true; }
     s.attempts++;
-    if (s.attempts >= this.maxAttempts) { s.expired = true; return; }
+    if (s.attempts >= this.maxAttempts) { s.expired = true; return true; }
     s.nextAt = t + this.baseMs * Math.pow(this.factor, s.attempts - 1);
+    return true;
   }
+
+  /** Record the channel incarnation the live attempt's dial started (row 8,
+   *  R8-2), so a terminal event from another incarnation is ignored. */
+  attach(id, k, inc) {
+    const key = identitySuffix(id);
+    if (key === null) return false;
+    const s = this._state.get(key);
+    if (!s || !s.inflight || s.k !== k) return false;
+    s.inc = (typeof inc === 'string' && inc.length) ? inc : null;
+    return true;
+  }
+
+  /** Release a live token WITHOUT counting an attempt: the dial site found,
+   *  after its awaited open, that nothing may go out (the identity became
+   *  ineligible). Nothing was issued, so nothing is counted; the identity is
+   *  simply no longer in flight. Stale or absent tokens are ignored as in
+   *  `end`. Returns true when it acted. */
+  release(id, k = undefined) {
+    const key = identitySuffix(id);
+    if (key === null) return false;
+    const s = this._state.get(key);
+    if (!s || !s.inflight || (k !== undefined && k !== s.k)) { this.ignoredEnds++; return false; }
+    s.inflight = false; s.k = 0; this.released = (this.released ?? 0) + 1;
+    if (s.attempts === 0 && !s.expired) this._state.delete(key);
+    return true;
+  }
+
+  /** The fail-safe deadline: end, as a failure, every attempt in flight
+   *  longer than `inflightMaxMs`. Called by the dial sites before they ask
+   *  `allow`. Returns how many it ended. */
+  sweep(t = Date.now(), maxMs = this.inflightMaxMs) {
+    let n = 0;
+    for (const [key, s] of this._state) {
+      if (s.inflight && t - s.beganAt > maxMs) { this.end(key, false, t, s.k); this.staleEnded++; n++; }
+    }
+    return n;
+  }
+
+  inflightOf(id) { return this._state.get(identitySuffix(id))?.inflight ?? false; }
+  /** Row 12: peer(PENDING) — attempts whose dial went out and have not ended. The pending-slot half of the reservation. */
+  inflightCount() { let n = 0; for (const s of this._state.values()) if (s.inflight) n++; return n; }
 
   /** The presence valve. Watermark monotonicity is enforced UPSTREAM (the
    *  presence handler fires hooks only on a fresh gen); this method paces:
@@ -88,7 +154,14 @@ export class AttemptGuard {
     const last = this._lastRefillAt.get(key) ?? -Infinity;
     if (t - last < this.refillWindowMs) { this.coalesced++; return 'coalesced'; }
     this._lastRefillAt.set(key, t);
-    this._state.delete(key);                   // one fresh budget, re-eligible
+    // Row 8 (Aster a2c1d79f R8-3): freshness refills the BUDGET (attempts,
+    // expiry, backoff). It does not end an attempt: a live token keeps its
+    // in-flight state, k, incarnation and start time, so nothing becomes
+    // allowed by freshness while a dial is out; the dial's own bind,
+    // deadline or sweep ends it.
+    const s = this._state.get(key);
+    if (s && s.inflight) { s.attempts = 0; s.expired = false; s.nextAt = 0; }
+    else this._state.delete(key);              // one fresh budget, re-eligible
     this.refills++;
     return true;
   }

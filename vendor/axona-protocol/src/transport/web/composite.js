@@ -174,7 +174,16 @@ export class CompositeTransport extends Transport {
    * deduplicated across sub-transports (a peer that gets bound on both
    * the bridge and the mesh fires once).
    *
-   * @param {(nodeIdBig: bigint) => void} handler
+   * Row 8 (Hold-and-Fill v0.15, R8-2; Aster 20904613): the sub-transport's
+   * meshId and channel incarnation travel THROUGH this adapter unchanged, so
+   * the kernel's guard can tell the bind of the channel its attempt started
+   * from a stale channel's late bind. A handler that returns `false` has
+   * REJECTED the event (the kernel does, for a bind on a stale incarnation):
+   * the peer is then not recorded as seen, so the current channel's bind that
+   * follows still fires. A sub that names no incarnation (the bridge) passes
+   * none and the kernel ends by identity, as before.
+   *
+   * @param {(nodeIdBig: bigint, meshId?: string, inc?: string|null) => (void|boolean)} handler
    * @returns {() => void} unsubscribe
    */
   onPeerBound(handler) {
@@ -189,12 +198,16 @@ export class CompositeTransport extends Transport {
     // ignores a peer it is actually connected to.  Clearing the nodeId from
     // `seen` on peer-death lets the next bind re-fire.
     const seen = new Set();
-    const wrapped = (nodeIdBig) => {
+    const wrapped = (nodeIdBig, meshId, inc) => {
       if (typeof nodeIdBig !== 'bigint') return;
       if (seen.has(nodeIdBig)) return;
       seen.add(nodeIdBig);
-      try { handler(nodeIdBig); }
+      let r;
+      try { r = handler(nodeIdBig, meshId, inc); }
       catch (err) { this._log?.('peer-bound-fanout-threw', { err: err.message }); }
+      // R8-2: a rejected event (stale incarnation) did not bind this peer for
+      // the handler; un-see it so the current channel's bind is not swallowed.
+      if (r === false) seen.delete(nodeIdBig);
     };
     const rearm = (nodeIdBig) => { if (typeof nodeIdBig === 'bigint') seen.delete(nodeIdBig); };
     const unsubs = [];

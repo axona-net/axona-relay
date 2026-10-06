@@ -140,6 +140,23 @@ export class ChannelLedger {
    * @param {'in'|'out'} dir
    * @returns {{ ok: boolean, why: string|null }}
    */
+  /**
+   * Row 12: the PURE form of the predicate — the same bounds, no counting, no
+   * log. The fill asks it before a dial as the channel-token half of its
+   * reservation; a refusal there is counted by the fill as dial-deferred,
+   * not here as alloc-refused, because nothing was allocated or refused.
+   * @param {'in'|'out'} dir
+   * @returns {{ ok: boolean, why: string|null }}
+   */
+  canAllocate(dir) {
+    let why = null;
+    if (this.chanAll() >= this.cPhys) why = 'phys';
+    else if (dir === 'in' && this.chanInboundUnbound() >= this.cInbound) why = 'inbound';
+    else if (dir === 'out' && this.chanOutboundPending() >= this.pPending) why = 'pending';
+    if (why == null || !this.enforce) return { ok: true, why };
+    return { ok: false, why };
+  }
+
   mayAllocate(dir) {
     let why = null;
     if (this.chanAll() >= this.cPhys) why = 'phys';
