@@ -100,6 +100,16 @@ export class CompositeTransport extends Transport {
    * (idempotent — register on the sub-transport).
    */
   addSubtransport(t) {
+    // Bridge fill v0.8 (axona-docs 9b1ed08): ONE DIALER. The sub-transport that
+    // exposes connectViaRelay is the composite's dialer; a second one is a
+    // configuration error and refuses here, before the sub is added, so the
+    // kernel never sees two allocators behind one transport (Aster BF-B).
+    if (typeof t.connectViaRelay === 'function') {
+      if (this._dialer) {
+        throw new TypeError('CompositeTransport.addSubtransport: two sub-transports expose connectViaRelay; a composite has one dialer');
+      }
+      this._setDialer(t);
+    }
     this._subs.push(t);
     // Replay handler registrations to the new sub-transport (via its capability).
     for (const [type, h] of this._reqHandlers) this._fanOutRequest(t, type, h);
@@ -107,6 +117,67 @@ export class CompositeTransport extends Transport {
     for (const h of this._peerDiedHandlers)    t.onPeerDied(h);
     if (typeof t.onNegotiationFailed === 'function') for (const e of (this._negotiationFailedHandlers ?? [])) e.unsubs.push(t.onNegotiationFailed(e.handler));
     for (const reg of this._peerBoundRegistrars) reg(t);
+    for (const reg of this._peerListRegistrars ?? []) reg(t);
+  }
+
+  /**
+   * Bridge fill v0.8: install the dial surface of the one dialer on THIS
+   * composite, as instance properties, so that:
+   *
+   *   - a composite with NO dialer has no `connectViaRelay` at all, and the
+   *     kernel's `openIsTheDial` (AxonaPeer._considerCandidate) reads true,
+   *     exactly as before this change — the sim and every legacy composite
+   *     are untouched;
+   *   - a composite WITH a dialer forwards `connectViaRelay`, `mayDial`,
+   *     `canAllocate` and `allocRefusedFor` to that one sub-transport and
+   *     returns each answer UNCHANGED (the incarnation string, true, false or
+   *     null mean to the kernel exactly what the dialer meant), so the
+   *     ledger the kernel reads before a dial is the ledger the dial
+   *     allocates against;
+   *   - `openConnection` is NOT touched: it stays owner-or-false and
+   *     allocates nothing, which is what the kernel takes a bound-only open
+   *     for on a transport that has connectViaRelay (Aster BF-A).
+   *
+   * A surface the dialer lacks is not installed: the kernel treats a missing
+   * mayDial as "no ledger, nothing to reserve against", as it does today.
+   */
+  _setDialer(t) {
+    this._dialer = t;
+    this.connectViaRelay = (toHex) => t.connectViaRelay(toHex);
+    if (typeof t.mayDial         === 'function') this.mayDial         = ()     => t.mayDial();
+    if (typeof t.canAllocate     === 'function') this.canAllocate     = (dir)  => t.canAllocate(dir);
+    if (typeof t.allocRefusedFor === 'function') this.allocRefusedFor = (peer) => t.allocRefusedFor(peer);
+    this._log('dialer-set', { mayDial: typeof t.mayDial === 'function', canAllocate: typeof t.canAllocate === 'function', allocRefusedFor: typeof t.allocRefusedFor === 'function' });
+  }
+
+  /** The one sub-transport that dials, or null. */
+  dialer() { return this._dialer ?? null; }
+
+  /**
+   * Bridge fill v0.8: the DIRECTORY sample, fanned IN from every sub-transport
+   * that emits `peer-list` frames (the web transport does; a WebSocket server
+   * does not). Registered per handler through a registrar, like onPeerBound,
+   * so a sub-transport added after the kernel subscribed (the bridge's uplink
+   * is added after start) still feeds the handler. The frame's hex nodeIds
+   * pass through unchanged.
+   *
+   * @param {(peers: string[]) => void} handler
+   * @returns {() => void} unsubscribe
+   */
+  onPeerList(handler) {
+    if (typeof handler !== 'function') throw new TypeError('onPeerList: handler must be a function');
+    const unsubs = [];
+    const register = (t) => {
+      if (typeof t.onPeerList === 'function') unsubs.push(t.onPeerList(handler));
+    };
+    (this._peerListRegistrars ??= []).push(register);
+    for (const t of this._subs) register(t);
+    return () => {
+      const a = this._peerListRegistrars;
+      const i = a ? a.indexOf(register) : -1;
+      if (i >= 0) a.splice(i, 1);
+      for (const u of unsubs) try { u(); } catch { /* swallow */ }
+    };
   }
 
   async start(localNodeId) {
@@ -229,6 +300,11 @@ export class CompositeTransport extends Transport {
 
   // ── Channel pool ────────────────────────────────────────────────────
 
+  // Bridge fill v0.8 (Aster BF-A): this open is BOUND-ONLY and stays so. It
+  // routes to the sub-transport that already owns the peer and returns false
+  // for a peer none owns; it never dials and never allocates. On a composite
+  // with a dialer the kernel dials through `connectViaRelay` (installed by
+  // _setDialer), where the CONSUME and the incarnation live.
   async openConnection(nodeId) {
     const t = this._routeFor(nodeId);
     if (!t) return false;
