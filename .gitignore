@@ -22,3 +22,6 @@ relay-logs/
 harness/results/
 harness/results-archive-pre72/
 *.jsonl
+
+# relay-side probe facility: requests and per-relay results carry node ids; never committed
+probe-requests/

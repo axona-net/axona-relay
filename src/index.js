@@ -32,6 +32,9 @@ import './polyfill.js';                 // MUST be first — installs RTCPeerCon
 import { cleanupWebRTC } from './polyfill.js';
 import { createEphemeralIdentity, createEphemeralAuthor } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion, regionDescriptor } from './relay.js';
+import { startProbeWorker } from './probe.js';
+import { fileURLToPath } from 'node:url';
+import { dirname, join as joinPath } from 'node:path';
 import { powCalibrate, powDifficulty } from '../vendor/axona-protocol/src/pow/pow.js';
 import { makeDashboard, makePlainLog } from './tui.js';
 import { geoCellId, geoCellCenter } from '../vendor/axona-protocol/src/utils/s2.js';
@@ -338,6 +341,20 @@ async function main() {
   }
   if (shuttingDown) return;
   present.logLine('started — meshing…');
+
+  // RELAY-SIDE PROBE FACILITY (0.150.0, David 2026-10-08): a request file
+  // dropped into the checkout's probe-requests/ makes THIS relay a sender in
+  // the all-pairs RTT matrix (src/probe.js). The directory is anchored on this
+  // file's location, not the cwd, so a Windows service or a systemd unit finds
+  // the same place a laptop relay does. RELAY_PROBE=0 turns it off.
+  if ((process.env.RELAY_PROBE ?? '1') !== '0') {
+    const probeDir = process.env.RELAY_PROBE_DIR || joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'probe-requests');
+    const pollMs = Number.parseInt(process.env.RELAY_PROBE_POLL_MS ?? '10000', 10);
+    try {
+      startProbeWorker({ peer, transport, selfId: identity.id, dir: probeDir, pollMs, log: onLog, label: process.env.RELAY_PROBE_LABEL || null });
+      onLog('info', 'probe-worker-armed', { dir: probeDir, pollMs });
+    } catch (e) { onLog('warn', 'probe-worker-failed', { err: String(e?.message || e) }); }
+  }
 
   const startedAt = Date.now();
   tick = setInterval(() => {

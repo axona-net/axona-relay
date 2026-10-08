@@ -70,6 +70,10 @@ Quit the dashboard with **q** or **Ctrl-C**.
 | `RELAY_REGION` | — | `auto` (detect), a region **name** (`eagle`), or a code (`0x89`) — sets the nodeId's geo prefix |
 | `RELAY_LAT` / `RELAY_LNG` | `37.77` / `-122.42` | Geo prefix by coordinate (used if `RELAY_REGION` is unset). Default = SF (`grizzly`) |
 | `RELAY_TUI` | auto (`stdout.isTTY`) | `1` force dashboard, `0` force plain log |
+| `RELAY_PROBE` | `1` | 0.150.0: the relay-side probe facility. A request file `<run>.json` (`{targets:[{id,label}], samples, gapMs}`) dropped into `probe-requests/` under the checkout makes this relay a sender in the all-pairs RTT matrix from its own seat; it writes `<run>.<self12>.jsonl` and `.done` beside it. No network surface: the only way to ask is a file on the host. `0` disables. `ops/fleet-probe.sh` drops and collects fleet-wide |
+| `RELAY_PROBE_DIR` | `<checkout>/probe-requests` | where requests are read and results written (anchored on the code, not the cwd) |
+| `RELAY_PROBE_POLL_MS` | `10000` | how often the directory is read |
+| `RELAY_PROBE_LABEL` | — | the sender label written into the rows; unset = the node id's first 12 hex, which the fold relabels from the census |
 
 Bridge selection precedence: `BRIDGE_URL` › `RELAY_NETWORK` › default (`prod`).
 
