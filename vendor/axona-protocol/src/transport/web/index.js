@@ -126,6 +126,11 @@ const UPGRADE_CLOSE_CODE = 4426;
  *  when graduated reconnects immediately, so the bridge can graduate
  *  optimistically and the client self-corrects. */
 const GRADUATED_CLOSE_CODE = 4200;
+// Socket-is-bootstrap v0.5: the form of a bridge's RESERVED connection id in
+// its peer-list (`c-self-<doorEpoch>`); the door's counter yields `c<n>` and
+// never produces it. A client dials it like any peer-list entry and requires
+// attempt ids on that session.
+export const RESERVED_BRIDGE_ID_PREFIX = 'c-self-';
 /** Window of recent RTT samples kept for the average. */
 const RTT_WINDOW = 10;
 // Ceiling on concurrent in-flight relay negotiations a node will START. The
@@ -204,7 +209,15 @@ export function webTransport({
   // them. With the runtime shadow flag off (the default) observe() is a no-op, so
   // flag-off is byte-identical. Dispatch is NOT migrated.
   frameRegistry = false,
+  // Socket-is-bootstrap v0.5 (axona-docs 7a27d24, § Mixed versions): a MESH
+  // WITHOUT AN UPSTREAM SOCKET, for a seed bridge that has no bridge above it
+  // (B1) and whose only signalling domain is its own door. No socket is
+  // opened, start() waits on no handshake, and signalling for a non-hex
+  // peer id goes to the door sink (setDoorSignalSink) or is dropped. Every
+  // other consumer leaves this false and is byte-identical.
+  meshOnly = false,
 } = {}) {
+  if (meshOnly && bridgeUrl == null) bridgeUrl = 'ws://mesh-only.invalid';   // never dialled; see openSocket
   if (typeof bridgeUrl !== 'string' || !/^wss?:\/\//.test(bridgeUrl)) {
     throw new TransportError(ErrorCodes.TRANSPORT_NOT_STARTED,
       'webTransport: bridgeUrl must be a ws:// or wss:// URL',
@@ -262,6 +275,7 @@ export function webTransport({
 
   function openSocket() {
     if (socket) return;
+    if (meshOnly) return;   // socket-is-bootstrap v0.5: no upstream socket on a mesh-only transport
     try {
       socket = new WSImpl(bridgeUrl);
     } catch (err) {
@@ -428,6 +442,12 @@ export function webTransport({
   // took ownership (will route through the mesh), else we fall back to the
   // bridge.  Pure bridge behaviour is preserved when meshRelay is off.
   let signalRelay = null;
+  // Socket-is-bootstrap v0.5 (§ Signalling domains, the SINK): a bridge's own
+  // door is a signalling domain of its own. Frames for a peer id that is not
+  // a hex nodeId (so not the relayed path) are offered to this sink first;
+  // it returns true when it owns the key (a door key `d<epoch>:<connId>`),
+  // false to fall through to the upstream socket as before. Null = no door.
+  let doorSignalSink = null;
   // Signaling-path telemetry (W1): how often WebRTC signaling rides the mesh
   // (peer-relayed, bridge untouched) vs falls back to the bridge. Message-level
   // counts show load split; the distinct-peer sets approximate how many *links*
@@ -514,6 +534,12 @@ export function webTransport({
         catch (err) { log('signal-relay-threw', { to: toPeerId, err: err.message }); }
         if (took) { signalStats.meshMsgs++; signalStats.meshPeers.add(toPeerId); return; }
       }
+      if (typeof doorSignalSink === 'function' && !isHexId(toPeerId)) {
+        let took = false;
+        try { took = doorSignalSink(toPeerId, payload) === true; }
+        catch (err) { log('door-signal-sink-threw', { to: toPeerId, err: err.message }); }
+        if (took) { signalStats.doorMsgs = (signalStats.doorMsgs ?? 0) + 1; return; }
+      }
       if (!socketOpen) {
         signalStats.dropMsgs++;
         log('signal-drop-no-bridge', { to: toPeerId });
@@ -528,6 +554,12 @@ export function webTransport({
     },
     log,
   });
+
+  // Socket-is-bootstrap v0.5 (axona-docs 7a27d24): a bridge that offers its
+  // own reserved connection id (`c-self-<epoch>`) in the peer-list speaks
+  // attempt-id signalling on that session, and so must we: a frame on that
+  // key without an attempt id is dropped, never accepted as legacy.
+  mesh.setAttemptPolicy?.({ requireFor: (id) => typeof id === 'string' && id.startsWith(RESERVED_BRIDGE_ID_PREFIX) });
 
   // REF-1.1 S4a — Boundary-2 observers (SHADOW, DEFAULT-OFF). Built once, only
   // under the `frameRegistry` flag. `b2observe(wire, connId, body)` is a pure
@@ -1135,6 +1167,15 @@ export function webTransport({
   const origStart = composite.start.bind(composite);
   composite.start = async () => {
     openSocket();
+    // Socket-is-bootstrap v0.5: a mesh-only transport has no socket to wait
+    // for and no bridge handshake to await; its sub-transports start and the
+    // mesh is ready for door-side negotiations at once.
+    if (meshOnly) {
+      if (typeof mesh.setMyId === 'function') mesh.setMyId(localNodeIdHex);
+      await origStart(localNodeIdBig);
+      setBridgeState('mesh-only');
+      return;
+    }
     // Wait for socket open before starting BridgeTransport (so its
     // notify/send don't fail-fast against a not-yet-open socket).
     if (!socketOpen) {
@@ -1255,6 +1296,16 @@ export function webTransport({
     }
     signalRelay = fn;
   };
+  // setDoorSignalSink(fn): socket-is-bootstrap v0.5 — the bridge's own-door
+  //   signalling domain. fn(toPeerId, payload) → true when the sink owns the
+  //   key (wrote the frame to that door socket), false to fall through.
+  composite.setDoorSignalSink = (fn) => {
+    if (fn !== null && typeof fn !== 'function') {
+      throw new TypeError('setDoorSignalSink: fn must be a function or null');
+    }
+    doorSignalSink = fn;
+  };
+  composite.isMeshOnly = () => meshOnly === true;
   // deliverMeshSignal(fromHex, payload): terminal ingress — a relayed
   //   `mesh:signal` reached us as its target; feed it into the SAME mesh
   //   signaling state machine the bridge path drives (offerer/responder/ICE).

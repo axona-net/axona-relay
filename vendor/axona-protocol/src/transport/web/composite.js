@@ -50,12 +50,21 @@ export class CompositeTransport extends Transport {
     /** @type {Map<string, Function>} */ this._reqHandlers = new Map();
     /** @type {Map<string, Function>} */ this._ntfHandlers = new Map();
     /** @type {Function[]}            */ this._peerDiedHandlers = [];
-    // onPeerBound is registered per-handler via a registrar closure so a
-    // sub-transport added AFTER onPeerBound() was called (e.g. an uplink added
-    // post-start) still propagates its bound peers. Without this, late subs
-    // never reach the routing layer and their mesh peers never enter the
-    // synaptome.
-    /** @type {Array<(t: Transport) => void>} */ this._peerBoundRegistrars = [];
+    // Socket-is-bootstrap v0.5 (axona-docs 7a27d24, § Ownership): ONE
+    // subscription per sub-transport for bind and death events, dispatched
+    // through the ROUTE-TOKEN RULE below before any kernel handler sees them.
+    // Handlers registered through onPeerBound / onPeerDied are entries here;
+    // a sub added later is subscribed once in addSubtransport.
+    /** @type {Array<{handler: Function, seen: Set<bigint>}>} */ this._peerBoundEntries = [];
+    /**
+     * Per identity: the one ADMITTED route and the routes SUPERSEDED under it.
+     * A route is (sub, token); the token is the sub's channel id for the
+     * identity (meshId / connId). The record outlives the admitted route until
+     * every superseded route has closed, so a retired token cannot re-admit.
+     * @type {Map<bigint, {admitted: {sub: Transport, token: string|null}|null, superseded: Map<Transport, string|null>}>}
+     */
+    this._routes = new Map();
+    this.routeStats = { admitted: 0, switched: 0, bornSuperseded: 0, staleToken: 0, deathSwallowed: 0, deathForwarded: 0 };
 
     this._started = false;
 
@@ -114,11 +123,232 @@ export class CompositeTransport extends Transport {
     // Replay handler registrations to the new sub-transport (via its capability).
     for (const [type, h] of this._reqHandlers) this._fanOutRequest(t, type, h);
     for (const [type, h] of this._ntfHandlers) this._fanOutNotification(t, type, h);
-    for (const h of this._peerDiedHandlers)    t.onPeerDied(h);
+    // Socket-is-bootstrap v0.5: ONE death and ONE bind subscription per sub,
+    // both dispatched through the route-token rule (_onSubDeath / _onSubBound).
+    if (typeof t.onPeerDied === 'function') t.onPeerDied((id, reason, token) => this._onSubDeath(t, id, reason, token));
+    if (typeof t.onPeerBound === 'function') t.onPeerBound((n, m, inc) => this._onSubBound(t, n, m, inc));
     if (typeof t.onNegotiationFailed === 'function') for (const e of (this._negotiationFailedHandlers ?? [])) e.unsubs.push(t.onNegotiationFailed(e.handler));
-    for (const reg of this._peerBoundRegistrars) reg(t);
     for (const reg of this._peerListRegistrars ?? []) reg(t);
   }
+
+  // ── Route-token rule (socket-is-bootstrap v0.5, § Ownership) ───────────
+  //
+  // Each sub-transport reports its own peer's bind and death. Without a rule
+  // the first sub in order owns a disputed identity and EVERY sub's death
+  // reaches the kernel, so closing a bootstrap socket after a mesh channel to
+  // the same identity has bound evicts the identity (Vega 2b16970f, Aster
+  // BS-1). The rule, run here before the attempt guard and before any kernel
+  // side effect:
+  //
+  //   STEP 0  a bind whose token is not the sub's CURRENT token for the
+  //           identity, or whose route is superseded, is ignored (R8-2 is not
+  //           this check: it rejects only with a live attempt).
+  //   (a)     no admitted route → admitted; the kernel handler runs.
+  //   (b)     DIRECTIONAL. admitted on a BOOTSTRAP sub + binding on a
+  //           non-bootstrap sub → switch: the new route is admitted, the old
+  //           is superseded (routing skips it, its death is swallowed, its
+  //           pending requests fail `route-superseded`); the kernel sees NO
+  //           re-admission. admitted on a non-bootstrap sub + binding on a
+  //           bootstrap sub → the bootstrap route is born superseded.
+  //   (c)     same sub, current token → the sub's own duplicate rule; the
+  //           kernel handler runs as today (R8-2 inside it).
+  //   death   from a superseded route: swallowed. From the admitted route:
+  //           forwarded; the identity dies. A superseded route is never
+  //           re-promoted.
+  //
+  // A sub declares `isBootstrap === true` (the bridge door's WebSocket
+  // transport, the client's BridgeTransport). With no bootstrap sub in the
+  // composite, (b) never applies and behaviour is as before this rule.
+
+  _currentToken(t, nodeId) {
+    try {
+      if (typeof t.channelIdFor === 'function') return t.channelIdFor(nodeId) ?? null;
+      if (typeof t.meshIdFor    === 'function') return t.meshIdFor(nodeId)    ?? null;
+      if (typeof t.connIdFor    === 'function') return t.connIdFor(nodeId)    ?? null;
+    } catch { /* fall through */ }
+    return undefined;   // the sub cannot name a token: validation is skipped for it
+  }
+
+  _isSuperseded(t, nodeId) {
+    const rec = this._routes.get(nodeId);
+    return !!rec && rec.superseded.has(t);
+  }
+
+  _supersede(rec, nodeId, t, token, why) {
+    rec.superseded.set(t, token ?? null);
+    this._log('route-superseded', { nodeId: String(nodeId), sub: t.constructor?.name, token: token ?? null, why });
+    try { t.supersedePeer?.(nodeId, token ?? null); } catch (err) { this._log('supersede-hook-threw', { err: err?.message }); }
+  }
+
+  /**
+   * Decide what a bind event does. Returns 'admit' (run the kernel handlers),
+   * 'switch' (route changed, no kernel handler), or 'ignore'.
+   */
+  _routeBind(t, nodeId, token) {
+    // STEP 0: token validation, independent of the attempt guard.
+    const cur = this._currentToken(t, nodeId);
+    if (cur !== undefined && token != null && cur !== token) {
+      this.routeStats.staleToken++;
+      this._log('bind-stale-token', { nodeId: String(nodeId), sub: t.constructor?.name, token, current: cur });
+      return 'ignore';
+    }
+    let rec = this._routes.get(nodeId);
+    if (rec && rec.superseded.has(t)) {
+      this.routeStats.staleToken++;
+      this._log('bind-on-superseded-route', { nodeId: String(nodeId), sub: t.constructor?.name, token });
+      return 'ignore';
+    }
+    if (!rec) { rec = { admitted: null, superseded: new Map() }; this._routes.set(nodeId, rec); }
+    const tok = token ?? cur ?? null;
+    if (!rec.admitted) {
+      // (a): admitted only once the bind policy (if any) has passed — see
+      // _onSubBound, which sets rec.admitted for 'admit-new'.
+      this._pendingAdmit = { rec, sub: t, token: tok };
+      return 'admit-new';
+    }
+    if (rec.admitted.sub === t) {                          // (c): the sub's own duplicate rule, kernel handler as today
+      // Step 0 proved `tok` is the sub's CURRENT token; the admitted token
+      // follows it, so a later death on an older token of this sub is stale
+      // and a death on this token is the route's.
+      if (tok != null && rec.admitted.token !== tok) rec.admitted.token = tok;
+      return 'admit';
+    }
+    const oldBoot = rec.admitted.sub.isBootstrap === true;
+    const newBoot = t.isBootstrap === true;
+    if (oldBoot && !newBoot) {                              // (b) socket → mesh: the switch
+      this._supersede(rec, nodeId, rec.admitted.sub, rec.admitted.token, 'switch');
+      rec.admitted = { sub: t, token: tok };
+      this.routeStats.switched++;
+      this._log('route-switched', { nodeId: String(nodeId), to: t.constructor?.name, token: tok });
+      return 'switch';
+    }
+    if (!oldBoot && newBoot) {                              // (b) reverse: born superseded
+      this._supersede(rec, nodeId, t, tok, 'born-superseded');
+      this.routeStats.bornSuperseded++;
+      return 'ignore';
+    }
+    return 'admit';   // two non-bootstrap subs: the dedup below keeps today's one-fire behaviour
+  }
+
+  /**
+   * Socket-is-bootstrap v0.5 (§ Make room): a BIND POLICY consulted after
+   * step 0 and before any kernel handler, for a bind that would ADMIT a new
+   * route (verdict (a)). `fn(nodeIdBig, sub, token) → boolean`; false refuses
+   * the bind: no route is recorded, no kernel handler runs, and the policy
+   * owner is expected to close the channel it refused. Side-effect-free
+   * preflights belong here (a bridge's identity cooldown, the kernel's
+   * gatePreflight, make-room victim and budget); the commit is the kernel's
+   * own handler, which runs only when the policy passes. Null clears it.
+   */
+  setBindPolicy(fn) {
+    if (fn !== null && typeof fn !== 'function') throw new TypeError('setBindPolicy: fn must be a function or null');
+    this._bindPolicy = fn;
+  }
+
+  /**
+   * (a) ADMIT A NEW ROUTE: the ONE place a new admitted route is written, used
+   * by live delivery (_onSubBound) and by the existing-peer replay in
+   * onPeerBound alike (RT-1, Aster 3d778257: the replay must run the same
+   * admission policy as live delivery). Returns true when admitted.
+   */
+  _admitNew(t, nodeIdBig, pa) {
+    if (this._bindPolicy) {
+      let ok = true;
+      try { ok = this._bindPolicy(nodeIdBig, t, pa.token) !== false; }
+      catch (err) { ok = false; this._log('bind-policy-threw', { err: err?.message }); }
+      if (!ok) {
+        this.routeStats.policyRefused = (this.routeStats.policyRefused ?? 0) + 1;
+        this._log('bind-refused-by-policy', { nodeId: String(nodeIdBig), sub: t.constructor?.name, token: pa.token });
+        if (!pa.rec.admitted && pa.rec.superseded.size === 0) this._routes.delete(nodeIdBig);
+        return false;
+      }
+    }
+    pa.rec.admitted = { sub: t, token: pa.token };
+    this.routeStats.admitted++;
+    return true;
+  }
+
+  _onSubBound(t, nodeIdBig, meshId, inc) {
+    if (typeof nodeIdBig !== 'bigint') return;
+    const token = typeof meshId === 'string' ? meshId : null;
+    const verdict = this._routeBind(t, nodeIdBig, token);
+    if (verdict === 'admit-new') {
+      const pa = this._pendingAdmit; this._pendingAdmit = null;
+      if (!this._admitNew(t, nodeIdBig, pa)) return false;
+    } else if (verdict !== 'admit') {
+      return false;
+    }
+    for (const e of this._peerBoundEntries) this._fireBound(e, nodeIdBig, meshId, inc);
+    return true;
+  }
+
+  _fireBound(e, nodeIdBig, meshId, inc) {
+    // Dedup per handler: fires once per identity until the admitted route
+    // dies (rearmed in _onSubDeath). R8-2: a handler returning false did not
+    // bind the peer; un-see it so the current channel's bind still fires.
+    if (e.seen.has(nodeIdBig)) return;
+    e.seen.add(nodeIdBig);
+    let r;
+    try { r = e.handler(nodeIdBig, meshId, inc); }
+    catch (err) { this._log?.('peer-bound-fanout-threw', { err: err.message }); }
+    if (r === false) e.seen.delete(nodeIdBig);
+  }
+
+  /**
+   * A death from sub `t` for identity `id`, optionally with the route token
+   * the sub reports it for (a connId, a meshId). Forwarded to the kernel ONLY
+   * when it is the ADMITTED route's death (RT-2, Aster 3d778257): a death from
+   * a superseded sub is swallowed however many times it arrives; a death from
+   * a sub that is not the identity's admitted route is swallowed; a death the
+   * admitted sub reports for an OLDER token than the admitted one is stale
+   * and swallowed. An identity this composite never saw bound forwards as
+   * before.
+   */
+  _onSubDeath(t, id, reason, token) {
+    let big = null;
+    if (typeof id === 'bigint') big = id;
+    else if (typeof id === 'string' && /^[0-9a-f]{66}$/i.test(id)) { try { big = BigInt('0x' + id); } catch { big = null; } }
+    let forward = true;
+    if (big !== null) {
+      const rec = this._routes.get(big);
+      if (rec) {
+        if (rec.superseded.has(t)) {
+          rec.superseded.delete(t);
+          forward = false;
+          this.routeStats.deathSwallowed++;
+          this._log('death-superseded-swallowed', { nodeId: String(big), sub: t.constructor?.name, reason: reason ?? null });
+        } else if (rec.admitted && rec.admitted.sub === t) {
+          if (token != null && rec.admitted.token != null && token !== rec.admitted.token) {
+            forward = false;
+            this.routeStats.deathStaleToken = (this.routeStats.deathStaleToken ?? 0) + 1;
+            this._log('death-stale-token-swallowed', { nodeId: String(big), sub: t.constructor?.name, token, admitted: rec.admitted.token });
+          } else {
+            rec.admitted = null;
+            this.routeStats.deathForwarded++;
+          }
+        } else if (rec.admitted && (t.isBootstrap === true || rec.admitted.sub.isBootstrap === true)) {
+          // Where a bootstrap route is involved, a sub that is neither the
+          // admitted route nor (any longer) a superseded one cannot kill the
+          // identity: a REPEATED death from a retired socket (RT-2). A
+          // composite with no bootstrap sub keeps its pre-rule behaviour here
+          // (every sub's death forwards), byte-identical for the sim and
+          // every legacy two-mesh composite.
+          forward = false;
+          this.routeStats.deathSwallowed++;
+          this._log('death-non-owner-swallowed', { nodeId: String(big), sub: t.constructor?.name, reason: reason ?? null });
+        }
+        if (!rec.admitted && rec.superseded.size === 0) this._routes.delete(big);
+      }
+    }
+    if (!forward) return;
+    if (big !== null) for (const e of this._peerBoundEntries) e.seen.delete(big);
+    for (const h of this._peerDiedHandlers) {
+      try { h(id, reason); } catch (err) { this._log('peer-died-handler-threw', { err: err?.message }); }
+    }
+  }
+
+  /** The admitted route of an identity: {sub, token} or null. */
+  routeOf(nodeId) { return this._routes.get(nodeId)?.admitted ?? null; }
 
   /**
    * Bridge fill v0.8: install the dial surface of the one dialer on THIS
@@ -205,6 +435,8 @@ export class CompositeTransport extends Transport {
 
   _routeFor(nodeId) {
     for (const t of this._subs) {
+      // Socket-is-bootstrap v0.5: a superseded route is never routable again.
+      if (this._isSuperseded(t, nodeId)) continue;
       if (typeof t.ownsPeer === 'function') {
         if (t.ownsPeer(nodeId)) return t;
       } else {
@@ -262,39 +494,37 @@ export class CompositeTransport extends Transport {
       throw new TypeError('onPeerBound: handler must be a function');
     }
     // Dedup the fan-out so `handler` fires once per peer even if more than one
-    // sub-transport binds the same nodeId.  The dedup MUST be re-armed when the
-    // peer dies — otherwise it is PERMANENT: a peer that drops and later
-    // reconnects (churn, or a bridgeless relay reconnect) would never re-fire
-    // onPeerBound, so the routing layer never re-admits it to the synaptome and
-    // ignores a peer it is actually connected to.  Clearing the nodeId from
-    // `seen` on peer-death lets the next bind re-fire.
-    const seen = new Set();
-    const wrapped = (nodeIdBig, meshId, inc) => {
-      if (typeof nodeIdBig !== 'bigint') return;
-      if (seen.has(nodeIdBig)) return;
-      seen.add(nodeIdBig);
-      let r;
-      try { r = handler(nodeIdBig, meshId, inc); }
-      catch (err) { this._log?.('peer-bound-fanout-threw', { err: err.message }); }
-      // R8-2: a rejected event (stale incarnation) did not bind this peer for
-      // the handler; un-see it so the current channel's bind is not swallowed.
-      if (r === false) seen.delete(nodeIdBig);
-    };
-    const rearm = (nodeIdBig) => { if (typeof nodeIdBig === 'bigint') seen.delete(nodeIdBig); };
-    const unsubs = [];
-    // A registrar wires this handler onto one sub-transport. Stored so that
-    // subs added later (addSubtransport) inherit it too — same `seen` set, so
-    // dedup stays correct across all subs including late ones.
-    const register = (t) => {
-      if (typeof t.onPeerBound === 'function') unsubs.push(t.onPeerBound(wrapped));
-      if (typeof t.onPeerDied  === 'function') unsubs.push(t.onPeerDied(rearm));
-    };
-    this._peerBoundRegistrars.push(register);
-    for (const t of this._subs) register(t);
+    // sub-transport binds the same nodeId.  The dedup is re-armed when the
+    // ADMITTED route dies (_onSubDeath) — otherwise it is PERMANENT: a peer
+    // that drops and later reconnects would never re-fire onPeerBound, so the
+    // routing layer never re-admits it. A superseded route's death does NOT
+    // re-arm it: the identity is still admitted elsewhere.
+    //
+    // Socket-is-bootstrap v0.5: the per-sub subscription lives in
+    // addSubtransport and dispatches through the route-token rule; this entry
+    // only receives what that rule admits. Peers a sub already holds bound at
+    // subscribe time are replayed through the same rule.
+    const entry = { handler, seen: new Set() };
+    this._peerBoundEntries.push(entry);
+    for (const t of this._subs) {
+      if (typeof t.boundPeers !== 'function') continue;
+      let ids = [];
+      try { ids = t.boundPeers(); } catch { ids = []; }
+      for (const id of ids) {
+        if (typeof id !== 'bigint') continue;
+        const token = this._currentToken(t, id);
+        const verdict = this._routeBind(t, id, token ?? null);
+        if (verdict === 'admit-new') {
+          const pa = this._pendingAdmit; this._pendingAdmit = null;
+          if (this._admitNew(t, id, pa)) this._fireBound(entry, id, token ?? undefined, null);   // RT-1: same policy as live delivery
+        } else if (verdict === 'admit') {
+          this._fireBound(entry, id, token ?? undefined, null);
+        }
+      }
+    }
     return () => {
-      const i = this._peerBoundRegistrars.indexOf(register);
-      if (i >= 0) this._peerBoundRegistrars.splice(i, 1);
-      for (const u of unsubs) try { u(); } catch { /* swallow */ }
+      const i = this._peerBoundEntries.indexOf(entry);
+      if (i >= 0) this._peerBoundEntries.splice(i, 1);
     };
   }
 
@@ -313,6 +543,11 @@ export class CompositeTransport extends Transport {
 
   async closeConnection(nodeId) {
     const t = this._routeFor(nodeId);
+    // Socket-is-bootstrap v0.5: a voluntary close ends the identity's route
+    // record here (the sub unbinds before it closes, so no death follows to
+    // clear it); superseded routes it still holds close by their own paths.
+    const rec = this._routes.get(nodeId);
+    if (rec) { rec.admitted = null; if (rec.superseded.size === 0) this._routes.delete(nodeId); }
     if (t) await t.closeConnection(nodeId);
   }
 
@@ -351,12 +586,15 @@ export class CompositeTransport extends Transport {
   // ── Liveness & latency ─────────────────────────────────────────────
 
   onPeerDied(handler) {
+    if (typeof handler !== 'function') throw new TypeError('onPeerDied: handler must be a function');
+    // Socket-is-bootstrap v0.5: subs are subscribed once each in
+    // addSubtransport; every death reaches _onSubDeath, which forwards only a
+    // death from an identity's ADMITTED route (or from a route this composite
+    // never saw bound) to the handlers registered here.
     this._peerDiedHandlers.push(handler);
-    const unsubs = this._subs.map(t => t.onPeerDied(handler));
     return () => {
       const i = this._peerDiedHandlers.indexOf(handler);
       if (i >= 0) this._peerDiedHandlers.splice(i, 1);
-      for (const u of unsubs) try { u(); } catch {}
     };
   }
 
@@ -421,16 +659,28 @@ export class CompositeTransport extends Transport {
   /** Forward-lookup the channel id (meshId or 'bridge') for a BigInt nodeId.
    *  @param {bigint} nodeId */
   channelIdFor(nodeId) {
-    for (const t of this._subs) {
-      if (typeof t.meshIdFor === 'function') {
-        const id = t.meshIdFor(nodeId);
-        if (id != null) return id;
-      }
-      if (typeof t.connIdFor === 'function') {
-        const id = t.connIdFor(nodeId);
-        if (id != null) return id;
-      }
+    // Socket-is-bootstrap v0.5 (Aster 3d778257): the ADMITTED route's token
+    // first; then the subs in order, skipping a sub superseded for this
+    // identity, and recursing into a nested composite's own channelIdFor.
+    const adm = this._routes.get(nodeId)?.admitted;
+    if (adm) {
+      const id = this._tokenFrom(adm.sub, nodeId);
+      if (id != null) return id;
     }
+    for (const t of this._subs) {
+      if (this._isSuperseded(t, nodeId)) continue;
+      const id = this._tokenFrom(t, nodeId);
+      if (id != null) return id;
+    }
+    return null;
+  }
+
+  _tokenFrom(t, nodeId) {
+    try {
+      if (typeof t.channelIdFor === 'function') { const id = t.channelIdFor(nodeId); if (id != null) return id; }
+      if (typeof t.meshIdFor === 'function')    { const id = t.meshIdFor(nodeId);    if (id != null) return id; }
+      if (typeof t.connIdFor === 'function')    { const id = t.connIdFor(nodeId);    if (id != null) return id; }
+    } catch { /* a sub that cannot answer names no token */ }
     return null;
   }
 }

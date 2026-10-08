@@ -59,13 +59,17 @@ echo "── the WHOLE state vocabulary, pinned ──"
 # 'down' fallback). Every state that is NOT terminal-healthy must be rejected
 # here; adding one to the kernel without adding it here leaves it untested, and
 # adding a prefix-colliding one fails this block loudly.
-for s in connecting disconnected stale upgrade-required down; do
+# `mesh-only` (kernel 4.107.0, socket-is-bootstrap): a web transport with NO
+# upstream socket, for a seed bridge whose only signalling domain is its own
+# door. A relay never runs it; were it ever printed by a relay there is no
+# bridge link behind it, so it does NOT satisfy the backstop.
+for s in connecting disconnected stale upgrade-required down mesh-only; do
   ok "state=$s does NOT satisfy the backstop"   "$(no  _fc_open "state=$s peers=0 mesh(open/bound)=0/0")"
 done
 for s in open graduated; do
   ok "state=$s DOES satisfy the backstop"       "$(yes _fc_open "state=$s peers=9 mesh(open/bound)=9/9")"
 done
-KNOWN="connecting disconnected graduated open stale upgrade-required"
+KNOWN="connecting disconnected graduated mesh-only open stale upgrade-required"
 ACTUAL=$(grep -rhoE "setBridgeState\('[a-z-]+'" \
            vendor/axona-protocol/src/transport/web/index.js \
          | sed -E "s/.*'([a-z-]+)'/\1/" | sort -u | tr '\n' ' ' | sed 's/ $//')

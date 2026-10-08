@@ -655,7 +655,7 @@ export class WebRTCTransport extends Transport {
     const isActiveRoute = nodeId !== undefined && this._meshIdByNodeId.get(nodeId) === meshId;
     if (isActiveRoute) {
       for (const h of this._peerDiedHandlers) {
-        try { h(nodeId, reason); }
+        try { h(nodeId, reason, meshId); }   // socket-is-bootstrap v0.5: the route token rides along for the composite's death fence
         catch (err) {
           this._log('peer-died-handler-threw', { reportedId: String(nodeId), err: err.message });
         }

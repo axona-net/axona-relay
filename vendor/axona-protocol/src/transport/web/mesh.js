@@ -304,6 +304,30 @@ export class MeshManager {
     this._degreeRefused   = 0;
     /** Monotonic enforcement-pass counter; the obligation reader caches on it. */
     this._degreePass      = 0;
+    // ── Socket-is-bootstrap v0.5 (axona-docs 7a27d24) ──────────────────
+    // ATTEMPT ID (§ Signalling domains, Aster 96992789 A / 156d2e1d 4): the
+    // offerer mints one per attempt and carries it in the offer; the
+    // responder stores it with the key and echoes it in its answer and every
+    // candidate; both ends drop a frame whose attempt is not the key's
+    // current one. A frame with NO attempt id is legacy and accepted as the
+    // current attempt ONLY where the attempt policy does not require one;
+    // on a key the policy names (a bridge's door keys, a client's reserved
+    // bridge id) a missing id is dropped, so a negotiated door session never
+    // runs with the check off.
+    this._attemptSeq    = 0;
+    this.attemptStats   = { stale: 0, missing: 0, replaced: 0, ignoredOnOpen: 0 };
+    this._attemptPolicy = null;   // { requireFor(peerId) → boolean } or null
+    // DEGREE POLICY (§ Make room, § Capacity): a bridge marks door channels
+    // PROVISIONAL until their identity binds. The degree pass counts and
+    // retires only non-provisional channels; provisional ones are bounded by
+    // `maxProvisional` (the newest is retired above it) and by
+    // `bindDeadlineMs` (a channel still provisional that long is retired),
+    // because the ledger's inbound count covers only pre-open records and the
+    // negotiation deadline is cleared at open (Aster 156d2e1d 1–2).
+    this._degreePolicy  = null;   // { isProvisional(peerId), maxProvisional, bindDeadlineMs } or null
+    this._makeRoomRetired = 0;
+    this._provisionalRefused = 0;
+    this._bindTimeouts  = 0;
     /** @type {Map<string, PeerState>} */
     this._peers = new Map();
     /** Absolute negotiation deadline (ms) per peerId, set on the FIRST
@@ -758,7 +782,11 @@ export class MeshManager {
     if (now - this._lastRetireAt < this._degreeInterval) return;
 
     const open = [];
-    for (const st of this._peers.values()) if (st.openedAt > 0) open.push(st);
+    // Socket-is-bootstrap v0.5: provisional channels (open, identity not yet
+    // bound, under a degree policy) are neither counted nor candidates here;
+    // their bound is the policy's, and an incumbent is retired for one only
+    // at its bind (retireForNewcomer).
+    for (const st of this._peers.values()) if (st.openedAt > 0 && !this._isProvisional(st.peerId)) open.push(st);
     if (open.length <= this._degreeMax + this._degreeSlack) return;   // hysteresis
 
     // ONE OBLIGATION READ PER PASS, and the pass id is how that is enforced
@@ -835,6 +863,10 @@ export class MeshManager {
       cap: this._degreeMax, slack: this._degreeSlack, open,
       retired: this._degreeRetired, refused: this._degreeRefused,
       inCooldown: this._retiredRecently.size,
+      // socket-is-bootstrap v0.5
+      provisional: this.provisionalCount(), provisionalRefused: this._provisionalRefused,
+      bindTimeouts: this._bindTimeouts, makeRoomRetired: this._makeRoomRetired,
+      attempts: { ...this.attemptStats },
     };
   }
 
@@ -875,15 +907,33 @@ export class MeshManager {
     try {
       if (payload.kind === 'sdp-offer') {
         // We're the responder.  Build (or reuse) the PC and answer.
+        let existing = this._peers.get(from);
+        // Socket-is-bootstrap v0.5, attempt ids on the offer:
+        //  · missing where the policy requires one → dropped;
+        //  · a NEW attempt for a key holding an OPEN channel → ignored: no
+        //    unauthenticated frame closes an authenticated channel; the open
+        //    channel's own vitality frees the key;
+        //  · a NEW attempt for a key holding an unbound negotiation → that
+        //    negotiation is replaced (its frames are stale from here on);
+        //  · no id and not required (legacy) → today's path, unchanged.
+        if (payload.attempt == null) {
+          if (this._attemptPolicy?.requireFor(from)) { this.attemptStats.missing++; this._log('signal-missing-attempt', { from, kind: 'sdp-offer' }); return; }
+        } else if (existing && existing.attempt !== payload.attempt) {
+          if (existing.openedAt > 0) { this.attemptStats.ignoredOnOpen++; this._log('offer-on-open-ignored', { from, attempt: payload.attempt, current: existing.attempt }); return; }
+          this.attemptStats.replaced++;
+          this._log('attempt-replaced', { from, attempt: payload.attempt, previous: existing.attempt });
+          this._retire(from, 'attempt-replaced', { notifyLost: false });
+          existing = undefined;
+        }
         // Row 3: an inbound offer that would need a NEW PC asks the ledger
         // first; counted with enforce off, refused (offer ignored, nothing
         // built, nothing sent) with enforce on.
-        const existing = this._peers.get(from);
         if (!existing?.pc && this._ledger && !this._ledger.mayAllocate('in').ok) {
           this._log('offer-refused', { from, ledger: this._ledger.stats() });
           return;
         }
         const state = existing ?? this._initResponderState(from);
+        if (payload.attempt != null) state.attempt = payload.attempt;
         await this._handleOffer(state, payload.sdp);
       } else if (payload.kind === 'sdp-answer') {
         const peer = this._peers.get(from);
@@ -891,7 +941,9 @@ export class MeshManager {
           this._log('answer-for-unknown', { from });
           return;
         }
+        if (!this._attemptOk(from, peer, payload, 'sdp-answer')) return;
         await peer.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
+        if (this._peers.get(from) !== peer) return;   // continuation: the attempt ended while we awaited
         await this._flushPendingCandidates(peer);
       } else if (payload.kind === 'ice') {
         const peer = this._peers.get(from);
@@ -899,6 +951,7 @@ export class MeshManager {
           this._log('ice-for-unknown', { from });
           return;
         }
+        if (!this._attemptOk(from, peer, payload, 'ice')) return;
         if (peer.pc && peer.pc.remoteDescription) {
           await peer.pc.addIceCandidate(payload.candidate);
         } else {
@@ -950,7 +1003,115 @@ export class MeshManager {
       remoteCand: null,
       pathPollTimer: null,
       inc: null,              // set per RTCPeerConnection in _attachPc
+      attempt: null,          // socket-is-bootstrap v0.5: this negotiation's attempt id (wire-carried)
+      bindTimer: null,        // provisional bind deadline (degree policy)
     };
+  }
+
+  // ── Socket-is-bootstrap v0.5: attempt ids and the degree policy ──────
+
+  _mintAttempt() { return `${this._incRun}-${++this._attemptSeq}`; }
+
+  /** @param {{requireFor:(peerId:string)=>boolean}|null} policy */
+  setAttemptPolicy(policy) {
+    this._attemptPolicy = (policy && typeof policy.requireFor === 'function') ? policy : null;
+  }
+
+  /**
+   * Is this frame's attempt id acceptable for the key's current attempt?
+   * Drops (and counts) a stale id, and a missing id where the policy
+   * requires one. Legacy (no id, not required) passes as the current attempt.
+   */
+  _attemptOk(from, state, payload, kind) {
+    const a = payload.attempt;
+    if (a == null) {
+      if (this._attemptPolicy?.requireFor(from)) {
+        this.attemptStats.missing++;
+        this._log('signal-missing-attempt', { from, kind });
+        return false;
+      }
+      return true;
+    }
+    if (state && state.attempt != null && state.attempt !== a) {
+      this.attemptStats.stale++;
+      this._log('signal-stale-attempt', { from, kind, attempt: a, current: state.attempt });
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * @param {{isProvisional:(peerId:string)=>boolean, maxProvisional?:number, bindDeadlineMs?:number}|null} policy
+   */
+  setDegreePolicy(policy) {
+    if (!policy || typeof policy.isProvisional !== 'function') { this._degreePolicy = null; return; }
+    this._degreePolicy = {
+      isProvisional:  policy.isProvisional,
+      maxProvisional: Number.isFinite(policy.maxProvisional) && policy.maxProvisional > 0 ? policy.maxProvisional : Infinity,
+      bindDeadlineMs: Number.isFinite(policy.bindDeadlineMs) && policy.bindDeadlineMs > 0 ? policy.bindDeadlineMs : 0,
+    };
+  }
+
+  _isProvisional(peerId) {
+    try { return !!this._degreePolicy?.isProvisional(peerId); } catch { return false; }
+  }
+
+  /** Open channels the policy marks provisional (open, identity not yet bound). */
+  provisionalCount() {
+    if (!this._degreePolicy) return 0;
+    let n = 0;
+    for (const st of this._peers.values()) if (st.openedAt > 0 && this._isProvisional(st.peerId)) n++;
+    return n;
+  }
+
+  /**
+   * MAKE ROOM AT BIND (§ Make room). Retire ONE incumbent so `newcomerId`
+   * can be admitted: the selector runs over OPEN, NON-PROVISIONAL channels
+   * with the newcomer excluded, the mesh's cooldown and the kernel's
+   * protections honoured. Returns the victim's key, or null when no victim
+   * is eligible (the caller then refuses the newcomer). This is outside
+   * `_enforceDegree` and its interval early return; the caller holds the
+   * rate budget. `dryRun` selects without retiring (a side-effect-free
+   * preflight for the caller's bind policy).
+   */
+  retireForNewcomer(newcomerId, { now = Date.now(), dryRun = false, excludeIds = null } = {}) {
+    const open = [];
+    for (const st of this._peers.values()) {
+      if (!(st.openedAt > 0)) continue;
+      if (st.peerId === newcomerId) continue;
+      if (this._isProvisional(st.peerId)) continue;
+      if (excludeIds && excludeIds.has(st.peerId)) continue;
+      open.push(st);
+    }
+    const passId = ++this._degreePass;
+    const pick = selectMeshRetire(open.map((st) => ({
+      id:          st.peerId,
+      region:      this._degreeRegionOf(st.peerId),
+      openedAt:    st.openedAt,
+      rttMs:       this.getLatency(st.peerId),
+      inCooldown:  this._retiredRecently.has(st.peerId),
+      isProtected: !!this._degreeProtected(st.peerId, passId),
+    })), { now, minUptimeMs: this._degreeMinUptime });
+    if (!pick) return null;
+    if (dryRun) return pick.id;
+    this._retiredRecently.set(pick.id, now);
+    this._makeRoomRetired++;
+    this._log('mesh-make-room-retire', { peerId: pick.id, forNewcomer: newcomerId, region: pick.region, ageMs: pick.ageMs, basis: pick.basis, open: open.length });
+    this._retire(pick.id, 'make-room');
+    return pick.id;
+  }
+
+  /** Open channels, non-provisional, as the make-room preflight counts them. */
+  openNonProvisionalCount() {
+    let n = 0;
+    for (const st of this._peers.values()) if (st.openedAt > 0 && !this._isProvisional(st.peerId)) n++;
+    return n;
+  }
+
+  /** Called by the owner when a provisional channel's identity bound: its bind deadline is cleared. */
+  clearBindDeadline(peerId) {
+    const st = this._peers.get(peerId);
+    if (st?.bindTimer) { clearTimeout(st.bindTimer); st.bindTimer = null; }
   }
 
   /** Build a PC for either role and wire its common event handlers. */
@@ -966,6 +1127,10 @@ export class MeshManager {
 
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
+      // Socket-is-bootstrap v0.5: a candidate from an attempt that is no
+      // longer the key's current one is not sent (continuation validates its
+      // captured attempt at the effect).
+      if (this._peers.get(state.peerId) !== state) { this._log('ice-continuation-stale', { peerId: state.peerId, attempt: state.attempt }); return; }
       // Log every candidate we generate locally; helps diagnose which
       // address family / interface is being offered.
       this._log('ice-candidate-local', {
@@ -978,6 +1143,7 @@ export class MeshManager {
       this._sendSignal(state.peerId, {
         kind: 'ice',
         candidate: ev.candidate.toJSON(),
+        ...(state.attempt != null ? { attempt: state.attempt } : {}),
       });
     };
 
@@ -1095,6 +1261,7 @@ export class MeshManager {
     }
     this._log('initiate', { peerId });
     const state = this._newPeerState(peerId, 'offerer');
+    state.attempt = this._mintAttempt();   // socket-is-bootstrap v0.5: one id per attempt, carried on the wire
     this._peers.set(peerId, state);
     this._armReaper(state);
     this._attachPc(state);
@@ -1107,7 +1274,10 @@ export class MeshManager {
     try {
       const offer = await state.pc.createOffer();
       await state.pc.setLocalDescription(offer);
-      this._sendSignal(peerId, { kind: 'sdp-offer', sdp: offer.sdp });
+      // A continuation validates its captured attempt before any effect: the
+      // state it started under must still be the key's current one.
+      if (this._peers.get(peerId) !== state) { this._log('offer-continuation-stale', { peerId, attempt: state.attempt }); return; }
+      this._sendSignal(peerId, { kind: 'sdp-offer', sdp: offer.sdp, attempt: state.attempt });
       this._ledger?.negotiating(state.inc);   // row 3: first frame out
     } catch (err) {
       this._log('offer-create-failed', { peerId, err: err.message });
@@ -1143,11 +1313,14 @@ export class MeshManager {
       };
     }
     await state.pc.setRemoteDescription({ type: 'offer', sdp });
+    if (this._peers.get(state.peerId) !== state) return;   // continuation: replaced while we awaited
     this._ledger?.negotiating(state.inc);   // row 3: first frame in
     await this._flushPendingCandidates(state);
+    if (this._peers.get(state.peerId) !== state) return;
     const answer = await state.pc.createAnswer();
     await state.pc.setLocalDescription(answer);
-    this._sendSignal(state.peerId, { kind: 'sdp-answer', sdp: answer.sdp });
+    if (this._peers.get(state.peerId) !== state) { this._log('answer-continuation-stale', { peerId: state.peerId, attempt: state.attempt }); return; }
+    this._sendSignal(state.peerId, { kind: 'sdp-answer', sdp: answer.sdp, ...(state.attempt != null ? { attempt: state.attempt } : {}) });
   }
 
   async _flushPendingCandidates(state) {
@@ -1183,7 +1356,37 @@ export class MeshManager {
       state.retryUsed = false;
       this._ledger?.open(state.inc);   // row 3: OPEN
       this._log('dc-open', { peerId: state.peerId, inc: state.inc, role: state.role });
+      // Socket-is-bootstrap v0.5, provisional channels: above the policy's
+      // bound the NEWLY opened provisional channel is retired (the newest,
+      // not an incumbent); otherwise a bind deadline is armed so an open
+      // channel that never binds does not hold capacity for ever (the
+      // negotiation deadline was cleared above; the ledger's inbound count
+      // covers only pre-open records).
+      if (this._degreePolicy && this._isProvisional(state.peerId)) {
+        if (this.provisionalCount() > this._degreePolicy.maxProvisional) {
+          this._provisionalRefused++;
+          this._log('provisional-refused', { peerId: state.peerId, inc: state.inc, provisional: this.provisionalCount(), max: this._degreePolicy.maxProvisional });
+          this._retire(state.peerId, 'provisional-cap');
+          return;
+        }
+        if (this._degreePolicy.bindDeadlineMs > 0) {
+          state.bindTimer = setTimeout(() => {
+            state.bindTimer = null;
+            if (this._peers.get(state.peerId) !== state) return;
+            if (!this._isProvisional(state.peerId)) return;   // bound meanwhile
+            this._bindTimeouts++;
+            this._log('bind-timeout', { peerId: state.peerId, inc: state.inc, afterMs: this._degreePolicy.bindDeadlineMs });
+            this._retire(state.peerId, 'bind-timeout');
+            this._notify();
+          }, this._degreePolicy.bindDeadlineMs);
+          state.bindTimer.unref?.();
+        }
+      }
       this._enforceDegree();   // bounded degree (4.95.0); inert unless a cap is configured
+      // The degree pass may have retired THIS channel (Vega 4cd16bde, Aster
+      // 156d2e1d): a continuation validates its captured state at the effect
+      // and starts no timers on a retired one.
+      if (this._peers.get(state.peerId) !== state) return;
       // Dump the nominated candidate pair so we can see what
       // address family / protocol the data path is actually using —
       // and keep polling so we notice ICE renegotiations later on.
@@ -1581,6 +1784,7 @@ export class MeshManager {
     if (state.reaperTimer)   clearInterval(state.reaperTimer);
     if (state.retryTimer)    clearTimeout (state.retryTimer);
     if (state.pathPollTimer) clearInterval(state.pathPollTimer);
+    if (state.bindTimer)     clearTimeout (state.bindTimer);
     // Row 3: CLOSING before the close is issued; the peer pointer clears in
     // the same step. Capacity waits for the transport's 'closed' (gone) or
     // the ledger's escalation. A state that never got a PC has no record.

@@ -385,11 +385,37 @@ export class BridgeTransport extends Transport {
     }
   }
 
+  /**
+   * Socket-is-bootstrap v0.5 (axona-docs 7a27d24, § Ownership): this
+   * transport is the BOOTSTRAP route to the bridge. When the mesh binds the
+   * bridge's identity the composite supersedes this route and calls this:
+   * pending requests fail `route-superseded` at once (a request pending at
+   * the switch is never resolved later), the binding is kept so the socket
+   * still carries signalling and the peer-list, and the composite's router
+   * skips this sub for the identity from now on. The socket's later close
+   * fires peer-died here as always; the composite swallows it.
+   */
+  get isBootstrap() { return true; }
+
+  supersedePeer(nodeId) {
+    let n = 0;
+    for (const [id, p] of this._pending.entries()) {
+      if (p.nodeId !== nodeId) continue;
+      clearTimeout(p.timer);
+      this._pending.delete(id);
+      n++;
+      p.reject(new TransportError(ErrorCodes.TRANSPORT_PEER_UNREACHABLE,
+        'route-superseded',
+        { context: { nodeId: String(p.nodeId), reason: 'route-superseded' } }));
+    }
+    this._log('route-superseded', { nodeId: String(nodeId), rejected: n });
+  }
+
   /** Called by client.js when the bridge WebSocket closes. */
   handleConnClosed() {
     const reported = this._bridgeNodeId ?? BRIDGE_CONN_ID;
     for (const h of this._peerDiedHandlers) {
-      try { h(reported, 'bridge-closed'); }
+      try { h(reported, 'bridge-closed', BRIDGE_CONN_ID); }   // socket-is-bootstrap v0.5: the route token rides along
       catch (err) { this._log('peer-died-handler-threw', { err: err.message }); }
     }
     for (const [id, p] of this._pending.entries()) {

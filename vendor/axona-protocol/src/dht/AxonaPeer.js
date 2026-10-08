@@ -2535,6 +2535,52 @@ export class AxonaPeer extends DHT {
    * Returns true when the candidate entered the table.
    */
   _admitOrImprove(sponsor) {
+    const d = this._gateDecision(sponsor);
+    return this._gateCommit(sponsor, d);
+  }
+
+  /**
+   * Socket-is-bootstrap v0.5 (axona-docs 7a27d24; Aster 156d2e1d blocker 3):
+   * the gate's decision WITHOUT its side effects, for a caller that must know
+   * whether a bind would be admitted before it spends anything on it (a
+   * bridge retiring an incumbent to make room). Same code path as the commit:
+   * `_admitOrImprove` is `_gateDecision` followed by `_gateCommit`, so a
+   * preflight in the same synchronous tick predicts the commit exactly.
+   * Returns {admit:true, how:'already'} for a sponsor already in the table.
+   * @param {bigint} sponsor
+   */
+  gatePreflight(sponsor) {
+    if (typeof sponsor !== 'bigint') throw new TypeError('gatePreflight: sponsor must be bigint');
+    if (!this._gateCfg) return { admit: true, how: 'ungated' };
+    const syn = this._node?.synaptome;
+    if (!syn) return { admit: false, why: 'no-node' };
+    if (syn.has?.(sponsor) || syn.has?.(toHex(sponsor))) return { admit: true, how: 'already' };
+    return this._gateDecision(sponsor);
+  }
+
+  _gateCommit(sponsor, d) {
+    if (!d.admit) return false;
+    if (d.how === 'gate-lane') {
+      this._laneSeen.set(d.laneKey, d.t);
+      this._laneLastAt = d.t;
+      this._seedInsert(sponsor, 'gate-lane');
+      return true;
+    }
+    if (d.how === 'gate-swap') {
+      const node = this._node;
+      node.synaptome.delete(d.victimKey);
+      node.connections?.delete(d.victimKey);
+      try { const p = node.transport?.closeConnection?.(d.victimKey); p?.catch?.(() => { /* best-effort */ }); }
+      catch { /* best-effort */ }
+      this._seedInsert(sponsor, 'gate-swap');
+      return true;
+    }
+    this._seedInsert(sponsor, 'gate-admit');
+    return true;
+  }
+
+  /** The gate's pure decision. See _admitOrImprove / gatePreflight. */
+  _gateDecision(sponsor) {
     const node = this._node;
     const domain = this._domain;
     const cfg = this._gateCfg;
@@ -2551,7 +2597,7 @@ export class AxonaPeer extends DHT {
       const kJoin = cfg.kJoin ?? 0;
       if (kJoin > 0 && syn.size >= cap - kJoin) {
         const key = identitySuffix(sponsor);
-        if (key === null) return false;
+        if (key === null) return { admit: false, why: 'lane-no-key' };
         const t = Date.now();
         // Prune expired entries at the decision point (Aster de1e46a3): an
         // entry older than the window is useless — qualification only looks
@@ -2565,15 +2611,11 @@ export class AxonaPeer extends DHT {
           if (t - at >= cfg.laneWindowMs) this._laneSeen.delete(k);
         }
         const seenAt = this._laneSeen.get(key);
-        if (seenAt !== undefined && t - seenAt < cfg.laneWindowMs) return false;  // one per id per window
-        if (t - this._laneLastAt < cfg.laneCooldownMs) return false;              // lane rate limit
-        this._laneSeen.set(key, t);
-        this._laneLastAt = t;
-        this._seedInsert(sponsor, 'gate-lane');
-        return true;
+        if (seenAt !== undefined && t - seenAt < cfg.laneWindowMs) return { admit: false, why: 'lane-seen' };  // one per id per window
+        if (t - this._laneLastAt < cfg.laneCooldownMs) return { admit: false, why: 'lane-cooldown' };         // lane rate limit
+        return { admit: true, how: 'gate-lane', laneKey: key, t };
       }
-      this._seedInsert(sponsor, 'gate-admit');
-      return true;
+      return { admit: true, how: 'gate-admit' };
     }
 
     const selfId = node.id;
@@ -2625,21 +2667,16 @@ export class AxonaPeer extends DHT {
         victimKey = e.key; victimVit = v; victimCount = c;
       }
     }
-    if (victimKey === null) return false;                               // refuse: no admissible swap
+    if (victimKey === null) return { admit: false, why: 'no-swap' };    // refuse: no admissible swap
 
     // Row 4: the duty gate. A voluntary close of a peer this node owes
     // something to is refused and reported; the swap is void.
     const gate = this.mayRetire(victimKey);
     if (!gate.ok) {
       this._emitLog?.('info', 'swap-blocked', { victim: toHex(victimKey), duty: gate.duty });
-      return false;
+      return { admit: false, why: 'duty', duty: gate.duty };
     }
-    syn.delete(victimKey);
-    node.connections?.delete(victimKey);
-    try { const p = node.transport?.closeConnection?.(victimKey); p?.catch?.(() => { /* best-effort */ }); }
-    catch { /* best-effort */ }
-    this._seedInsert(sponsor, 'gate-swap');
-    return true;
+    return { admit: true, how: 'gate-swap', victimKey };
   }
 
   /**
