@@ -176,6 +176,8 @@ export function webTransport({
   // production bridge held ONE inbound WebSocket and SEVEN WebRTC peers, and
   // BRIDGE_MAX_PEERS governed only the first number. See mesh_degree.js.
   meshDegree = null,
+  // 4.107.2: bind deadline for EVERY mesh channel (ms). Default 30 s; 0 = off.
+  meshBindDeadlineMs = undefined,
   // CHANNEL LEDGER (Hold-and-Fill v0.5 row 3, axona-docs 4334504). One record
   // per RTCPeerConnection and one per bound identity, with the counts the
   // design bounds (C_phys, C_inbound, P_pending). Bookkeeping and a predicate:
@@ -491,6 +493,7 @@ export function webTransport({
     // manager (it takes the manager as an argument), so the resolver closes
     // over a reference filled in below.
     ledger: meshLedger,
+    bindDeadlineMs: meshBindDeadlineMs,
     degree: meshDegree
       ? {
           regionOf: (meshId) => {

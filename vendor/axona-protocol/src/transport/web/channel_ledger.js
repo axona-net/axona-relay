@@ -96,8 +96,18 @@ export class ChannelLedger {
     this._onEscalate = typeof o.onEscalate === 'function' ? o.onEscalate : null;
     this._now     = typeof o.now === 'function' ? o.now : Date.now;
     this._log     = typeof o.log === 'function' ? o.log : () => {};
-    this._setTimeout   = typeof o.setTimeout === 'function' ? o.setTimeout : setTimeout;
-    this._clearTimeout = typeof o.clearTimeout === 'function' ? o.clearTimeout : clearTimeout;
+    // BROWSER TRAP (David, 2026-10-08, axona.chat 0.81.0 console): the host's
+    // native setTimeout stored on an instance property and then called as a
+    // METHOD runs with `this` = this ledger, and Chrome throws
+    // "Illegal invocation" — from closing(), inside mesh._retire, BEFORE the
+    // peer is deleted from the mesh's map, so every retired channel became a
+    // zombie in every browser client. Node tolerates any `this`, which is why
+    // no fence saw it. The timers are called as free functions always; an
+    // injected pair (tests) is called the same way.
+    const st = typeof o.setTimeout === 'function' ? o.setTimeout : setTimeout;
+    const ct = typeof o.clearTimeout === 'function' ? o.clearTimeout : clearTimeout;
+    this._setTimeout   = (fn, ms) => st(fn, ms);
+    this._clearTimeout = (h) => ct(h);
 
     /** @type {Map<string, {t:string, meshId:string, dir:'in'|'out', state:string, since:number, negotiatingAt:number, openedAt:number, closingAt:number, goneAt:number, reason:string|null, nodeId:string|null, escalateTimer:any}>} */
     this._chan = new Map();

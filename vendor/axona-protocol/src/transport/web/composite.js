@@ -65,6 +65,10 @@ export class CompositeTransport extends Transport {
      */
     this._routes = new Map();
     this.routeStats = { admitted: 0, switched: 0, bornSuperseded: 0, staleToken: 0, deathSwallowed: 0, deathForwarded: 0 };
+    /** Route-change listeners (Aster 88f4c2f7): a switch or a same-sub token
+     *  update is announced upward WITHOUT a bind, so a parent composite keeps
+     *  its admitted token for this child current. @type {Function[]} */
+    this._routeChangedHandlers = [];
 
     this._started = false;
 
@@ -127,6 +131,11 @@ export class CompositeTransport extends Transport {
     // both dispatched through the route-token rule (_onSubDeath / _onSubBound).
     if (typeof t.onPeerDied === 'function') t.onPeerDied((id, reason, token) => this._onSubDeath(t, id, reason, token));
     if (typeof t.onPeerBound === 'function') t.onPeerBound((n, m, inc) => this._onSubBound(t, n, m, inc));
+    // Nested composites (Aster 88f4c2f7): a child's route change (its own
+    // switch, or a same-sub token update) fires no bind upward; this keeps the
+    // parent's admitted token for the child current, so the child's later
+    // death, which carries that token, is read as the admitted route's.
+    if (typeof t.onRouteChanged === 'function') t.onRouteChanged((n, token) => this._onSubRouteChanged(t, n, token));
     if (typeof t.onNegotiationFailed === 'function') for (const e of (this._negotiationFailedHandlers ?? [])) e.unsubs.push(t.onNegotiationFailed(e.handler));
     for (const reg of this._peerListRegistrars ?? []) reg(t);
   }
@@ -210,7 +219,7 @@ export class CompositeTransport extends Transport {
       // Step 0 proved `tok` is the sub's CURRENT token; the admitted token
       // follows it, so a later death on an older token of this sub is stale
       // and a death on this token is the route's.
-      if (tok != null && rec.admitted.token !== tok) rec.admitted.token = tok;
+      if (tok != null && rec.admitted.token !== tok) { rec.admitted.token = tok; this._emitRouteChanged(nodeId, tok); }
       return 'admit';
     }
     const oldBoot = rec.admitted.sub.isBootstrap === true;
@@ -220,6 +229,7 @@ export class CompositeTransport extends Transport {
       rec.admitted = { sub: t, token: tok };
       this.routeStats.switched++;
       this._log('route-switched', { nodeId: String(nodeId), to: t.constructor?.name, token: tok });
+      this._emitRouteChanged(nodeId, tok);
       return 'switch';
     }
     if (!oldBoot && newBoot) {                              // (b) reverse: born superseded
@@ -268,6 +278,48 @@ export class CompositeTransport extends Transport {
     return true;
   }
 
+  /** Subscribe to this composite's route changes: `handler(nodeIdBig, newToken)`. */
+  onRouteChanged(handler) {
+    if (typeof handler !== 'function') throw new TypeError('onRouteChanged: handler must be a function');
+    this._routeChangedHandlers.push(handler);
+    return () => { const i = this._routeChangedHandlers.indexOf(handler); if (i >= 0) this._routeChangedHandlers.splice(i, 1); };
+  }
+
+  _emitRouteChanged(nodeId, token) {
+    for (const h of this._routeChangedHandlers) {
+      try { h(nodeId, token); } catch (err) { this._log('route-changed-handler-threw', { err: err?.message }); }
+    }
+  }
+
+  /**
+   * A child composite announced a route change for `nodeId`. If that child is
+   * this identity's admitted route here, follow the child's CURRENT token —
+   * never the notified value (Aster b4d4516c): under the synchronous listener
+   * API a listener registered on the child earlier than this parent can,
+   * during the notification for token A, cause a same-sub replacement to B
+   * whose nested notification already moved this parent to B; when A's loop
+   * resumes, copying A would write it over B. Re-reading the child's route
+   * table resolves every ordering to the child's present state. A child whose
+   * current token is null (route gone) changes nothing; its death settles it.
+   */
+  /** The identity's ADMITTED route token from this composite's route table, or null. No fallback to a sub's bound mapping (Aster 6a8d4ab9). */
+  admittedTokenOf(nodeId) { return this._routes.get(nodeId)?.admitted?.token ?? null; }
+
+  _onSubRouteChanged(t, nodeId, _notified) {
+    const rec = this._routes.get(nodeId);
+    if (!rec?.admitted || rec.admitted.sub !== t) return;
+    // Authoritative admission, not lookup: a child's channelIdFor falls back
+    // to a sub's bound mapping when the child has no admitted route, which is
+    // exactly the state (still bound, no longer admitted) this must not follow.
+    const cur = (typeof t.admittedTokenOf === 'function') ? t.admittedTokenOf(nodeId) : this._currentToken(t, nodeId);
+    if (cur == null) { this.routeStats.routeChangeNull = (this.routeStats.routeChangeNull ?? 0) + 1; return; }
+    if (rec.admitted.token !== cur) {
+      rec.admitted.token = cur;
+      this.routeStats.tokenFollowed = (this.routeStats.tokenFollowed ?? 0) + 1;
+      this._emitRouteChanged(nodeId, cur);   // and onward to our own parent, if any
+    }
+  }
+
   _onSubBound(t, nodeIdBig, meshId, inc) {
     if (typeof nodeIdBig !== 'bigint') return;
     const token = typeof meshId === 'string' ? meshId : null;
@@ -309,9 +361,11 @@ export class CompositeTransport extends Transport {
     if (typeof id === 'bigint') big = id;
     else if (typeof id === 'string' && /^[0-9a-f]{66}$/i.test(id)) { try { big = BigInt('0x' + id); } catch { big = null; } }
     let forward = true;
+    let tokenOut = token;   // what this composite reports upward: its admitted token for the identity
     if (big !== null) {
       const rec = this._routes.get(big);
       if (rec) {
+        if (rec.admitted && rec.admitted.sub === t) tokenOut = rec.admitted.token ?? token;
         if (rec.superseded.has(t)) {
           rec.superseded.delete(t);
           forward = false;
@@ -343,7 +397,9 @@ export class CompositeTransport extends Transport {
     if (!forward) return;
     if (big !== null) for (const e of this._peerBoundEntries) e.seen.delete(big);
     for (const h of this._peerDiedHandlers) {
-      try { h(id, reason); } catch (err) { this._log('peer-died-handler-threw', { err: err?.message }); }
+      // The token travels upward (Aster 88f4c2f7): a parent composite reads it
+      // against the admitted token it keeps current for this child.
+      try { h(id, reason, tokenOut); } catch (err) { this._log('peer-died-handler-threw', { err: err?.message }); }
     }
   }
 

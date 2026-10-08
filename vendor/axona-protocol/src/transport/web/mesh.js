@@ -133,6 +133,16 @@ const MESH_DEGREE_SLACK        = 2;
 const MESH_DEGREE_INTERVAL_MS  = 3000;
 const MESH_DEGREE_COOLDOWN_MS  = 60_000;
 const MESH_DEGREE_MIN_UPTIME_MS = 30_000;
+// BIND DEADLINE, EVERY CHANNEL (4.107.2). An open data channel whose peer never
+// completes the mesh handshake is retired after this long. Before 4.107.2 only
+// a PROVISIONAL channel (the degree policy's, socket-is-bootstrap v0.5) had a
+// deadline; an ordinary channel that opened and never bound was kept as live
+// for ever, because the peer's legacy pings kept its vitality up. On
+// 2026-10-08 east's door held sixteen such peers (a kernel-4.84.0 application
+// that pings but never sends a hello); every newcomer dialled eight of them,
+// opened eight channels, bound one, and routed through one peer. A bound
+// channel binds within a second (0.3 s observed); 30 s is generous. 0 = off.
+const MESH_BIND_DEADLINE_MS    = 30_000;
 const DC_LABEL         = 'axona';
 const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // Absolute ceiling on how long a peer may stay in negotiation WITHOUT ever
@@ -249,9 +259,12 @@ export class MeshManager {
    * @param {(peerId:string)=>string|null} [opts.degree.regionOf]     peerId → keyspace region
    * @param {(peerId:string)=>boolean}     [opts.degree.isProtected]  peerId carries an obligation
    */
-  constructor({ sendSignal, log, degree = null, ledger = null, heartbeat = null }) {
+  constructor({ sendSignal, log, degree = null, ledger = null, heartbeat = null, bindDeadlineMs = MESH_BIND_DEADLINE_MS }) {
     this._sendSignal = sendSignal;
     this._log = log ?? (() => {});
+    // Bind deadline for EVERY channel (see MESH_BIND_DEADLINE_MS). A finite
+    // non-negative number sets it; 0 disables; anything else keeps the default.
+    this._bindDeadlineMs = (Number.isFinite(bindDeadlineMs) && bindDeadlineMs >= 0) ? bindDeadlineMs : MESH_BIND_DEADLINE_MS;
     // The heartbeat contract (one pinger per channel; see HEARTBEAT_DEFAULTS).
     // An object overrides fields; anything else keeps the defaults.
     this._hb = Object.freeze({ ...HEARTBEAT_DEFAULTS, ...(heartbeat && typeof heartbeat === 'object' ? heartbeat : {}) });
@@ -852,7 +865,16 @@ export class MeshManager {
     return true;
   }
   /** Row 3: the handshake bound `nodeIdHex` on the channel serving `meshId`. */
-  ledgerBind(meshId, nodeIdHex) { this._ledger?.bind(meshId, nodeIdHex); }
+  ledgerBind(meshId, nodeIdHex) {
+    this._ledger?.bind(meshId, nodeIdHex);
+    // The handshake bound an identity on this channel: it is no longer a
+    // candidate for the bind deadline (every-channel or provisional).
+    const st = this._peers.get(meshId);
+    if (st) {
+      st.boundAt = Date.now();
+      if (st.bindTimer) { clearTimeout(st.bindTimer); st.bindTimer = null; }
+    }
+  }
   /** Row 3: the binding for `meshId` was dropped. */
   ledgerUnbind(meshId) { this._ledger?.unbind(meshId); }
 
@@ -1004,7 +1026,8 @@ export class MeshManager {
       pathPollTimer: null,
       inc: null,              // set per RTCPeerConnection in _attachPc
       attempt: null,          // socket-is-bootstrap v0.5: this negotiation's attempt id (wire-carried)
-      bindTimer: null,        // provisional bind deadline (degree policy)
+      bindTimer: null,        // bind deadline (provisional policy's, or the every-channel one)
+      boundAt: 0,             // epoch ms the handshake bound an identity on this channel (ledgerBind); 0 = unbound
     };
   }
 
@@ -1381,6 +1404,23 @@ export class MeshManager {
           }, this._degreePolicy.bindDeadlineMs);
           state.bindTimer.unref?.();
         }
+      }
+      // Every-channel bind deadline (4.107.2): where the provisional policy
+      // armed nothing, arm the general one. Cleared by ledgerBind when the
+      // handshake binds; on expiry an open, still-unbound channel is retired
+      // so the slot can be re-dialled instead of held by a peer that pings
+      // and never says who it is.
+      if (!state.bindTimer && !state.boundAt && this._bindDeadlineMs > 0) {
+        state.bindTimer = setTimeout(() => {
+          state.bindTimer = null;
+          if (this._peers.get(state.peerId) !== state) return;
+          if (state.boundAt) return;   // bound meanwhile
+          this._bindTimeouts++;
+          this._log('bind-timeout', { peerId: state.peerId, inc: state.inc, afterMs: this._bindDeadlineMs, basis: 'every-channel' });
+          this._retire(state.peerId, 'bind-timeout');
+          this._notify();
+        }, this._bindDeadlineMs);
+        state.bindTimer.unref?.();
       }
       this._enforceDegree();   // bounded degree (4.95.0); inert unless a cap is configured
       // The degree pass may have retired THIS channel (Vega 4cd16bde, Aster
