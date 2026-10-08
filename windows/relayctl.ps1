@@ -103,7 +103,15 @@ function Prep([string]$k, [switch]$Pull) {
     & git -C $RelayDir fetch origin $Manifest.relay.branch -q; if ($LASTEXITCODE) { Fail 'git fetch failed' }
     & git -C $RelayDir pull --ff-only origin $Manifest.relay.branch -q; if ($LASTEXITCODE) { Fail 'git pull --ff-only failed (diverged); resolve by hand' }
     Push-Location $RelayDir
-    try { & npm.cmd install --no-audit --no-fund *> $null; if ($LASTEXITCODE) { Fail 'npm install failed' } } finally { Pop-Location }
+    # 0.150.1: npm's update notifier writes "npm notice ..." to stderr about once a
+    # day when a newer npm exists; under $ErrorActionPreference = 'Stop' PowerShell
+    # 5.1 turns that stderr line into a terminating error even behind *> $null, and
+    # the roll died with RESULT=FAIL "npm notice" (2026-10-08 22:44Z) after the pull
+    # and before any service was touched. Native stderr is not an error: the exit
+    # code is. Relax the preference for this one call and ask npm not to notify.
+    $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'; $code = 1
+    try { & npm.cmd install --no-audit --no-fund --no-update-notifier *> $null; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $eap; Pop-Location }
+    if ($code) { Fail 'npm install failed' }
   }
   $v = VendoredKernel
   if ($v -ne $k) { Fail "vendored kernel $v != -Kernel $k" }
