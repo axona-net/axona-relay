@@ -143,6 +143,10 @@ const MESH_DEGREE_MIN_UPTIME_MS = 30_000;
 // opened eight channels, bound one, and routed through one peer. A bound
 // channel binds within a second (0.3 s observed); 30 s is generous. 0 = off.
 const MESH_BIND_DEADLINE_MS    = 30_000;
+// A macrotask hop for the native close in _retire (4.108.0): setImmediate in
+// Node, a zero timeout in a browser. Never a microtask — a microtask still runs
+// before the current callback's native frame returns.
+const deferMacrotask = (typeof setImmediate === 'function') ? (fn) => setImmediate(fn) : (fn) => setTimeout(fn, 0);
 const DC_LABEL         = 'axona';
 const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 // Absolute ceiling on how long a peer may stay in negotiation WITHOUT ever
@@ -688,7 +692,7 @@ export class MeshManager {
   /** Disconnect from everyone and stop all timers. */
   dispose() {
     for (const id of [...this._peers.keys()]) {
-      this._retire(id, 'dispose');
+      this._retire(id, 'dispose', { immediateClose: true });
     }
     this._negotiationDeadline.clear();
     this._listeners.clear();
@@ -1802,7 +1806,7 @@ export class MeshManager {
    *        opened. The retry path passes false: it's immediately re-initiating,
    *        so the peer isn't "lost" from the Transport's perspective.
    */
-  _retire(peerId, reason, { keepDeadline = false, notifyLost = true } = {}) {
+  _retire(peerId, reason, { keepDeadline = false, notifyLost = true, immediateClose = false } = {}) {
     const state = this._peers.get(peerId);
     if (!state) return;
     // "Was this channel ever open?" — check the openedAt timestamp set when
@@ -1830,8 +1834,25 @@ export class MeshManager {
     // the ledger's escalation. A state that never got a PC has no record.
     if (state.inc) this._ledger?.closing(state.inc, reason);
     if (state.inc && state.pc && this._ledger) this._closingPcs.set(state.inc, state.pc);
-    if (state.dc) try { state.dc.close(); } catch {}
-    if (state.pc) try { state.pc.close(); } catch {}
+    // THE NATIVE CLOSE IS DEFERRED TO THE NEXT MACROTASK (4.108.0). A retire can
+    // be reached from inside this very connection's data-channel callback —
+    // the hello arrives on the channel, binds, is deduplicated against an
+    // older channel to the same identity, and the loser is retired while its
+    // own `onmessage` is still on the stack. On 2026-10-09 two Windows relays
+    // froze at exactly that line (research_windows_relay_freeze_dedup_close_in_
+    // callback_20261009): event loop dead, CPU time frozen, sockets held, for
+    // 5 h and 16 h. libdatachannel documents that closing a PeerConnection from
+    // within one of its own callbacks can deadlock. The bookkeeping above and
+    // the map delete below stay synchronous — the channel is gone to every
+    // reader at once — only `dc.close()` / `pc.close()` move off the current
+    // stack. `immediateClose` (dispose, reset) keeps the old order where no
+    // callback can be on the stack and the process may be about to exit.
+    const dc = state.dc, pc = state.pc;
+    const closeNative = () => {
+      if (dc) try { dc.close(); } catch {}
+      if (pc) try { pc.close(); } catch {}
+    };
+    if (immediateClose) closeNative(); else deferMacrotask(closeNative);
     this._peers.delete(peerId);
     if (!keepDeadline) this._negotiationDeadline.delete(peerId);
     // Fire onPeerLost for Transport listeners ONLY when the channel actually

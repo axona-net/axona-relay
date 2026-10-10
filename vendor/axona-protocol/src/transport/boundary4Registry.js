@@ -111,7 +111,10 @@ function rowDefs() {
       // and rejects below effectiveMin = max(MIN_PEER_VERSION, that floor).
       admissionGuard: 'version gate: REQUIRED_WIRE_MAJOR; peerVersion >= max(MIN_PEER_VERSION, flagDayFloor floor MIN_KERNEL_VERSION|MIN_PEER_APP_VERSION by ns); STRICT_MIN_KERNEL optional; below closes 4426 (full detail in note)',
       placementGuard: NA,
-      projection: { payload: ['version', 'wireVersion', 'kernelVersion', 'capabilities', 'nodeId'] },
+      projection: { payload: ['version', 'wireVersion', 'kernelVersion', 'capabilities', 'nodeId', 'intent'] },
+      // `intent` (4.108.0) is OPTIONAL: 'turn-refresh' marks a graduated peer
+      // back for a TURN credential only; a 2.155.0 bridge answers welcome +
+      // 4200 and sends no peer-list. Absent on every kernel at or below 4.107.2.
       // `capabilities` is a non-scalar (string[]) — required-present + projected but
       // NOT typed, mirroring B3's ICE `candidate` object (type only the scalars).
       // `nodeId` (row 2b, Hold-and-Fill v0.5) is OPTIONAL: typed when present,
@@ -119,7 +122,7 @@ function rowDefs() {
       // the bridge admits those unchanged. It is the hex nodeId the peer will
       // authenticate as on hello-ack — an UNAUTHENTICATED CLAIM the bridge
       // reads only as an anchor-selection / list-order hint.
-      schema: { require: ['version', 'wireVersion', 'kernelVersion'], types: { version: 'string', wireVersion: 'string', kernelVersion: 'string', nodeId: 'string' } },
+      schema: { require: ['version', 'wireVersion', 'kernelVersion'], types: { version: 'string', wireVersion: 'string', kernelVersion: 'string', nodeId: 'string', intent: 'string' } },
       errorContract: [], traceFields: ['wireVersion'], budget: budget(6),
       note: 'the peer\'s opening frame; the ADMISSION GATE the bridge waits for — until it passes conn.admitted is false and every other frame is dropped. THREE stages: REQUIRED_WIRE_MAJOR, then MIN_PEER_VERSION, then flagDayFloor(peerVersion) picks a namespace floor (MIN_KERNEL_VERSION|MIN_PEER_APP_VERSION) and rejects below max of the two; a miss closes 4426. Success sets admitted + answers with `welcome` (Boundary-2). + nodeId optional (row 2b, unauthenticated hint).',
     }),

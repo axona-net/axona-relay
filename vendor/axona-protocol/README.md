@@ -27,7 +27,7 @@ Two design commitments shape everything here:
 ## Install
 
 ```bash
-npm install github:axona-net/axona-protocol#v4.107.2
+npm install github:axona-net/axona-protocol#v4.108.0
 ```
 
 Pure JS, ESM only, no native dependencies in the browser. Node ≥ 20 or any

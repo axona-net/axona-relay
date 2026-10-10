@@ -346,6 +346,10 @@ export function webTransport({
             // ignores an unknown field.
             nodeId:        localNodeIdHex,
             ...(meshRelay ? { capabilities: ['mesh-relay'] } : {}),
+            // 4.108.0: a graduate back for a credential only. A bridge that
+            // understands it (2.155.0) sends welcome with the credential, no
+            // peer-list, no announce, and releases the socket with 4200.
+            ...(turnOnlyRedial ? { intent: 'turn-refresh' } : {}),
           }));
         } catch (err) {
           log('auto-handshake-client-hello-failed', { err: err.message });
@@ -391,6 +395,7 @@ export function webTransport({
       // reconnect path) can create a fresh one — its `if (socket) return`
       // guard would otherwise block reconnection.
       socket = null;
+      turnOnlyRedial = false;   // 4.108.0: the credential-only re-dial ends with its socket
       for (const h of socketEvents.close) try { h(ev); } catch (e) { log('close-handler-threw', { err: e.message }); }
     });
     socket.addEventListener('message', (ev) => {
@@ -648,6 +653,16 @@ export function webTransport({
             version: frame.version,
             turn:    !!frame.turn,
           });
+          // 4.108.0: the credential-only re-dial has what it came for. Release
+          // the socket ourselves with the graduation code so the close handler
+          // takes the graduated branch; a 2.155.0 bridge closes it the same
+          // way a moment later and the second close is a no-op. The close is
+          // deferred one macrotask so the welcome handlers above finish first.
+          if (turnOnlyRedial) {
+            log('turn-refresh-redial-complete', { turn: !!frame.turn, meshPeers: meshBoundCount() });
+            const s = socket;
+            setTimeout(() => { if (s && s === socket && socketOpen) { try { s.close(GRADUATED_CLOSE_CODE, 'turn credential refreshed; returning to graduated'); } catch { /* close handler runs either way */ } } }, 0);
+          }
           return;
         case 'turn':
           b4observe('turn', null, frame);   // S4c shadow (no-op unless flag on)
@@ -659,6 +674,13 @@ export function webTransport({
           return;
         case 'peer-list': {
           b3observe('peer-list', null, frame);   // S4b shadow (no-op unless flag on)
+          // 4.108.0: a credential-only re-dial dials nobody. A bridge without
+          // the intent still sends its list; the mesh never sees it, so no
+          // duplicate channel to a peer this node already holds is opened.
+          if (turnOnlyRedial) {
+            log('peer-list-ignored-turn-refresh', { peers: Array.isArray(frame.peers) ? frame.peers.length : 0 });
+            return;
+          }
           const peers = Array.isArray(frame.peers) ? frame.peers : [];
           for (const h of peerListHandlers) { try { h(peers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
           if (typeof mesh.onPeerList === 'function') {
@@ -800,6 +822,14 @@ export function webTransport({
   let reconnectAttempt = 0;
   let stopped          = false;  // composite.stop() sets this — suppresses reconnect
   let graduated        = false;  // released by the bridge while meshed — no reconnect
+  // 4.108.0: a graduated node re-dialling ONLY for a fresh TURN credential. The
+  // client-hello says so (`intent: 'turn-refresh'`), the peer-list — if a bridge
+  // without the intent still sends one — is ignored, and the node returns to
+  // graduated as soon as the welcome's credential is installed. Before this a
+  // graduate re-dialled as a newcomer every TTL − safety (1 h 55 min), dialled
+  // anchors it already held, and deduplicated the duplicates; two Windows
+  // relays froze inside that dedup (2026-10-09).
+  let turnOnlyRedial   = false;
   let graduationTimer  = null;   // watchdog: re-dial if the mesh thins post-graduation
   let turnRefreshTimer = null;   // fires before the TURN credential's TTL lapses
   let turnRefreshReplyTimer = null;  // awaits the bridge's in-band `turn` reply
@@ -946,6 +976,11 @@ export function webTransport({
         // bridge work to lose, so a re-dial is the safe path (same one a
         // mesh-thin graduation re-dial takes). This is the case that heals the
         // backbone relays behind the prod flood.
+        // 4.108.0: a graduate whose mesh is still above the floor comes back
+        // for the credential ONLY (see turnOnlyRedial). A thin graduate takes
+        // the full re-admission as before — it needs anchors, not just a key.
+        turnOnlyRedial = graduated && meshBoundCount() >= graduationMeshFloor;
+        log(turnOnlyRedial ? 'turn-refresh-redial' : 'turn-refresh-rebootstrap', { meshPeers: meshBoundCount(), floor: graduationMeshFloor });
         graduated = false;
         stopGraduationWatch();
         setBridgeState('connecting');
@@ -1165,6 +1200,9 @@ export function webTransport({
     };
   }
 
+  // Test hook (4.108.0): thin a graduate without bound peers so a fence can
+  // drive the `turn-refresh-rebootstrap` branch. Not a public surface.
+  composite._setGraduationMeshFloorForTest = (n) => { graduationMeshFloor = n; };
   // Wire start() so calling composite.start() opens the socket and
   // starts the sub-transports in order.  Stop reverses the chain.
   const origStart = composite.start.bind(composite);
