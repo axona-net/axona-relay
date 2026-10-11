@@ -47,6 +47,18 @@ const DEFAULTS = Object.freeze({
   // engine has long used 40). 40-hop lookups are exceedingly rare, so the
   // worst-case latency cost is paid by almost no one.
   MAX_HOPS:            40,
+  // R2 (Routed-Walk-Terminals v0.5): the two-hop lookahead is a ROUND with a
+  // budget, not a fan-out that waits for its slowest probe. A round ends on the
+  // first reply that names a node closer than self, or at LOOKAHEAD_MS with
+  // nothing. Before this the round waited DEFAULT_REQUEST_TIMEOUT_MS (5000) on
+  // one silent synapse, which is also the upstream request timeout, so the
+  // origin reported `exhausted` at hop 0 — measured 650/800 and 95/200 walks
+  // (ops/p2p-strand-808f-20261010T1855Z, ops/p2p-topics-root-20261011T0130Z).
+  LOOKAHEAD_MS:        1500,
+  // R3: route_msg carries the last PATH_MEMORY node ids of the walk and no hop
+  // forwards onto that path. The measured loop was two nodes trading the frame
+  // to MAX_HOPS; eight covers four such pairs. The cap above stays the outer bound.
+  PATH_MEMORY:         8,
   EPSILON:             0.05,
   LOOKAHEAD_ALPHA:     5,
   GEO_REGION_BITS:     8,

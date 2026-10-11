@@ -116,8 +116,28 @@ function newLookaheadStats() {
     incomingCandidateLinks: 0,   // qualifying reverse links, summed over calls
     incomingCouldAnswerCalls: 0, // calls where >=1 incoming link beat MY distance
     incomingWonFinalCalls: 0,    // calls where incoming beat the probes' best
+    // R2 (Routed-Walk-Terminals v0.5). probeTargets now passes the SAME filter
+    // greedy applies, so `probesEmitted` is not comparable with the unfiltered
+    // census unless the skips are counted beside it. `targetsNearerThanSelf`
+    // must trend to zero from here on; if it does not, the filter is wrong.
+    probesSkippedUnconnected: 0,
+    probesSkippedDead: 0,
+    probesSkippedOnPath: 0,        // R3: synapses on the walk's path are never probed
+    roundsTimedOut: 0,             // rounds that ended at LOOKAHEAD_MS with nothing
+    lookaheadRoundMs: new Array(ROUND_BINS).fill(0),   // wall-clock per round, bucketed
+    // The two-hop forwarding commitment: the lookahead reply names the two-hop
+    // node; the forward carries it as `via`; the receiving hop forwards there
+    // when it is connected and not on the path, before its own selection.
+    viaHonoured: 0,
+    viaUnavailable: 0,
   };
 }
+
+/** R2 round-time buckets (ms): <50, <100, <250, <500, <1000, <1500, 1500+. */
+const ROUND_EDGES  = [50, 100, 250, 500, 1000, 1500];
+const ROUND_LABELS = ['<50', '<100', '<250', '<500', '<1000', '<1500', '1500+'];
+const ROUND_BINS   = ROUND_LABELS.length;
+function roundBin(ms) { for (let i = 0; i < ROUND_EDGES.length; i++) if (ms < ROUND_EDGES[i]) return i; return ROUND_BINS - 1; }
 
 /** Cut-offs evaluated for top-K viability. */
 const K_PROBES = [1, 2, 4, 8, 16, 32];
@@ -1091,25 +1111,56 @@ export class AxonaPeer extends DHT {
       const connOk = (typeof node.transport?.isConnected === 'function')
         ? node.transport.isConnected.bind(node.transport) : null;
       const deadSet = node._deadPeers;
+      const meId = node.id;
+
+      // R3 (Routed-Walk-Terminals v0.5): the frame carries the last PATH_MEMORY
+      // node ids of the walk and NO hop forwards onto that path — greedy, the
+      // lookahead's first hop, the via commitment and the lazy mid-walk open
+      // all choose from outside it. A legacy sender carries no path; the one
+      // node we know the frame has visited is the sender, so that is the path.
+      const pathHex = Array.isArray(msg.path) ? msg.path.filter((h) => typeof h === 'string') : [];
+      const exclude = new Set();
+      for (const h of pathHex) { try { exclude.add(asId(h)); } catch { /* unreadable id: not a path entry */ } }
+      if (pathHex.length === 0 && fromId != null) { try { exclude.add(asId(fromId)); } catch { /* */ } }
+      exclude.add(meId);
+
+      // R2: the two-hop forwarding commitment. The upstream hop's lookahead
+      // named the node its reply came from; forward there first when it is
+      // connected, not dead and not on the path. Otherwise select on our own.
+      const LS = (this._lookaheadStats ??= newLookaheadStats());
+      let viaId = null;
+      if (msg.via != null) { try { viaId = asId(msg.via); } catch { viaId = null; } }
       let nextHopId = null;
-      let bestDist  = node.id ^ targetBig;
-      for (const syn of node.synaptome.values()) {
-        if (deadSet && deadSet.has(syn.peerId)) continue;
-        if (connOk && !connOk(syn.peerId)) continue;
-        const d = syn.peerId ^ targetBig;
-        if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
+      let viaNext   = null;
+      if (viaId !== null) {
+        const viaOk = viaId !== meId && !exclude.has(viaId)
+          && !(deadSet && deadSet.has(viaId))
+          && (connOk ? connOk(viaId) : node.synaptome.has(viaId));
+        if (viaOk) { nextHopId = viaId; LS.viaHonoured++; } else { LS.viaUnavailable++; }
+      }
+      if (nextHopId === null) {
+        let bestDist = meId ^ targetBig;
+        for (const syn of node.synaptome.values()) {
+          if (deadSet && deadSet.has(syn.peerId)) continue;
+          if (connOk && !connOk(syn.peerId)) continue;
+          if (exclude.has(syn.peerId)) continue;          // R3
+          const d = syn.peerId ^ targetBig;
+          if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
+        }
       }
 
       let isTerminal = nextHopId === null;
       if (isTerminal) {
-        const closer = await this._findCloserInTwoHops(targetBig);
-        if (closer !== null && closer !== node.id) {
-          nextHopId  = closer;
+        const closer = await this._findCloserInTwoHops(targetBig, { exclude });
+        if (closer && closer.first !== meId) {
+          nextHopId  = closer.first;
+          viaNext    = closer.via;
           isTerminal = false;
         }
       }
-
-      const meId = node.id;
+      // Defensive: no chosen hop is ever on the path. Every selector above
+      // excludes it; if one did not, stop here rather than loop.
+      if (nextHopId !== null && exclude.has(nextHopId)) { nextHopId = null; isTerminal = true; }
       const result = await this._deliverRouted(type, payload, {
         fromId,
         targetId: targetBig,
@@ -1141,8 +1192,11 @@ export class AxonaPeer extends DHT {
       try {
         // Wire payload targetId is hex (v1.5 contract).
         if (_hopLt) _fSendT = Date.now();
+        const pathMem = Number(domain.PATH_MEMORY) > 0 ? Number(domain.PATH_MEMORY) : 8;
         const downstream = await node.transport.send(nextHopId, 'route_msg', {
           type, payload, targetId: toHex(targetBig), hops: hops + 1, originId,
+          path: [...pathHex.slice(-(pathMem - 1)), toHex(meId)],          // R3
+          ...(viaNext != null ? { via: toHex(viaNext) } : {}),             // R2
           ...(_hopLt ? { hopAttemptId: _hopId } : {}),
         });
         if (_hopLt) {
@@ -4704,144 +4758,134 @@ export class AxonaPeer extends DHT {
    * that just ANSWERED a probe, so the channel to it is proven live.
    * Returns null if this peer is a true 2-hop terminal.
    */
-  async _findCloserInTwoHops(targetId) {
+  /**
+   * Two-hop lookahead — R2 of Routed-Walk-Terminals v0.5 (axona-docs 10f43fc).
+   *
+   * Called when greedy found nobody closer. Returns `{ first, via }` — the
+   * ADJACENT peer to forward to and the two-hop node that peer named — or
+   * null when the round produced no node closer than self.
+   *
+   * What changed and why (2026-10-11, measured on two probe runs of 1000
+   * routed walks from 50 relays):
+   *   - The probe set passes the SAME filter greedy applies: connected, not
+   *     dead, not on the walk's path. The old fan-out mapped the whole
+   *     synaptome unfiltered, so a silent synapse was probed every time.
+   *   - The round LOCKS on the first reply whose two-hop node is closer than
+   *     self and stops; it never waits for the slowest probe. The old
+   *     Promise.allSettled waited DEFAULT_REQUEST_TIMEOUT_MS on one silent
+   *     peer, which equals the upstream request timeout, so the origin
+   *     reported `exhausted` at hop 0 after 4999–6126 ms in 650 of 800 walks.
+   *   - A round that has no closer reply ends at LOOKAHEAD_MS with null.
+   *   - The free pass over incomingSynapses runs FIRST, since it costs no
+   *     network: a reverse channel closer than self is the answer.
+   * This is a semantics change, stated in the design: best-among-all-settled
+   * bought XOR progress with wall-clock; first-closer-wins buys the fastest
+   * closer hop. Progress over the PAIR (first, via) is strict; the first hop
+   * alone need not be closer, and R3's path memory is what stops a pair from
+   * trading the frame when `via` is gone.
+   *
+   * WE ARE THE DESTINATION: return null without probing (council 2026-09-08).
+   * Both scoring tests are `d < myDist` and myDist is 0 here, so nothing can
+   * win; the result is fixed before the first packet leaves.
+   *
+   * EMIT-SIDE CENSUS — see lookaheadStats(). This is the only emitter.
+   */
+  async _findCloserInTwoHops(targetId, { exclude = null } = {}) {
     const node = this._node;
     const target = asId(targetId);   // wire→internal id gate
     const myDist = node.id ^ target;
-
-    // WE ARE THE DESTINATION. Return null WITHOUT probing (council 2026-09-08,
-    // four seats; measured by ops/lookahead-control.mjs).
-    //
-    // This is not a behaviour change — it returns the value the body below is
-    // ARITHMETICALLY REQUIRED to return, without the network round trips. Both
-    // scoring tests are `d < bestDist`, bestDist starts at myDist, and myDist is
-    // 0 here. XOR distance is unsigned, so `d < 0` is unsatisfiable: neither the
-    // probe loop nor the incomingSynapses loop can assign bestPeerId. The result
-    // is fixed before the first packet leaves.
-    //
-    // What it cost. Both callers (the route_msg handler at :893 and routeMessage
-    // at :4553) reach here whenever greedy finds nobody closer — and at the
-    // destination greedy CANNOT find anybody closer, because nothing beats
-    // distance 0. So every routed message ran a Promise.allSettled fan-out over
-    // the WHOLE synaptome (63-72 peers, unfiltered — no isConnected, no
-    // _deadPeers, no bridge, unlike greedy 20 lines above) on arrival, and
-    // allSettled waits for the slowest. One connected-but-silent peer therefore
-    // cost DEFAULT_REQUEST_TIMEOUT_MS (5_000) before the local handler was
-    // reached, and route_msg is recursive-await, so that wait blocked every
-    // upstream node back to the publisher.
-    //
-    // Paired control, same peer / same payload / one hop, n=40 per arm:
-    //   transport.send  p50    1.0ms   p90     2.9ms
-    //   routeMessage    p50  536.2ms   p90 5,001.0ms   — 531x, 15/40 at the timer
-    // Two of five destinations paid the full 5s on EVERY delivery while
-    // answering a direct probe in ~1ms.
-    //
-    // Deliberately narrow. The genuine local-minimum case (myDist > 0, no closer
-    // neighbour) still probes: that is what lookahead is FOR, and on a sparse
-    // mesh it is how routing escapes a dead end. Filter parity, top-K and a
-    // shorter lookahead timeout were all considered and are NOT bundled here —
-    // Aster's objection stands that degree is not global completeness and a
-    // timeout chosen off one RTT sample is a constant chosen off a sample.
-    // EMIT-SIDE CENSUS — see lookaheadStats(). Counting here (not at the call
-    // sites) makes it complete by construction: this is the only emitter.
     const LS = (this._lookaheadStats ??= newLookaheadStats());
     LS.calls++;
     if (myDist === 0n) { LS.bypassedAtDestination++; return null; }
 
-    let bestPeerId = null;        // the FIRST-HOP (adjacent) peer to forward to
-    let bestDist   = myDist;
+    const t = node.transport;
+    const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
+    const dead   = node._deadPeers;
+    const onPath = (id) => !!(exclude && exclude.has(id));
+    const eligible = (id) => id !== node.id && !onPath(id) && !(dead && dead.has(id)) && !(connOk && !connOk(id));
 
-    const probeTargets = [...node.synaptome.values()].map(s => s.peerId);
-    if (probeTargets.length > 0) {
-      LS.probingCalls++;
-      LS.probesEmitted += probeTargets.length;
-      // XOR RANK, FOR ACCOUNTING ONLY. probeTargets is left in its original
-      // order and every target is still probed — this computes each one's rank
-      // without changing who is asked, so the measurement cannot alter the
-      // behaviour it is measuring.
-      const rawRank = new Array(probeTargets.length);   // exact rank — K needs it
-      const ranks   = new Array(probeTargets.length);   // bucket — histograms use it
-      {
-        const byDist = probeTargets.map((p, i) => [i, p ^ target]);
-        // BigInt: subtracting into a Number would lose precision at 256 bits.
-        byDist.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
-        for (let r = 0; r < byDist.length; r++) {
-          const idx = byDist[r][0];
-          rawRank[idx] = r;
-          ranks[idx]   = rankBin(r);
-          LS.rankSent[ranks[idx]]++;
-          // A probe target NEARER than self is one greedy would have taken had
-          // it been eligible — so its presence here means the two sets differ.
-          if (byDist[r][1] < myDist) LS.targetsNearerThanSelf++;
-        }
-      }
-      let minCloserRank = Infinity;
-      const settled = await Promise.allSettled(
-        probeTargets.map(peerId =>
-          node.transport.send(peerId, 'lookahead_probe', { target, fromDist: myDist })
-        )
-      );
-      // settled[i] corresponds to probeTargets[i] (Promise.allSettled preserves
-      // order).  r.value.peerId is the 2-hop node that first hop would forward
-      // to; we score by ITS distance but forward to the FIRST HOP (probeTargets[i]).
-      for (let i = 0; i < settled.length; i++) {
-        const r = settled[i];
-        if (r.status !== 'fulfilled') { LS.probesRejected++; LS.rankRejected[ranks[i]]++; continue; }
-        LS.probesFulfilled++;
-        if (!r.value || r.value.terminal) { LS.probesTerminal++; LS.rankTerminal[ranks[i]]++; continue; }
-        const d = r.value.peerId ^ target;
-        // "Useful" is measured against MY distance, not against the running
-        // bestDist: whether a given reply carried a closer node is a property of
-        // the reply, and scoring it against a value that moves as the loop runs
-        // would make the count depend on arrival order.
-        if (d < myDist) {
-          LS.probesCloserThanMe++;
-          LS.rankCloser[ranks[i]]++;
-          if (rawRank[i] < minCloserRank) minCloserRank = rawRank[i];
-        } else {
-          LS.rankNonCloser[ranks[i]]++;
-        }
-        if (d < bestDist) {
-          bestDist   = d;
-          bestPeerId = probeTargets[i];   // adjacent next hop, not the 2-hop node
-        }
-      }
-      if (minCloserRank !== Infinity) {
-        LS.callsWithAnyCloser++;
-        for (const k of K_PROBES) if (minCloserRank < k) LS.answeredWithinK[k]++;
-      }
-    }
-    // Did the FAN-OUT produce the answer, or would we have had it anyway? The
-    // incomingSynapses pass below costs no network at all, so an answer it could
-    // have supplied on its own is an answer the probes did not buy.
-    const answeredByProbe = bestPeerId !== null;
-    const probeBest = bestPeerId;
-
-    // incomingSynapses are reverse channels — the peer IS directly connected,
-    // so the peer id itself is a valid (adjacent) next hop.
-    //
-    // TWO SEPARATE QUESTIONS, and the old counter conflated them (Aster,
-    // 938e4162; Vega 260f527b; Orion d0c04f27). `answeredByIncoming` only ever
-    // fired when the probes returned NOTHING, so its zero proved that probes
-    // always found something — not that this free pass could not have answered.
-    //   incomingCandidateLinks   : qualifying reverse LINKS, summed over calls
-    //   incomingCouldAnswerCalls : CALLS where at least one such link existed —
-    //                              the free answer, per call, comparable to
-    //                              probingCalls
-    //   incomingWonFinalCalls    : CALLS where incoming also beat the probes
-    let incomingQualifies = false;
+    // 1. The free pass. incomingSynapses are reverse channels — adjacent, no
+    //    network cost. The nearest eligible one closer than self is the answer.
+    let incomingBest = null, incomingDist = myDist;
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
-      if (d < myDist) { LS.incomingCandidateLinks++; incomingQualifies = true; }
-      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
+      if (d < myDist) LS.incomingCandidateLinks++;
+      if (d < incomingDist && eligible(syn.peerId)) { incomingDist = d; incomingBest = syn.peerId; }
     }
-    if (incomingQualifies) LS.incomingCouldAnswerCalls++;
-    if (bestPeerId !== null && bestPeerId !== probeBest) LS.incomingWonFinalCalls++;
+    if (incomingBest !== null) {
+      LS.incomingCouldAnswerCalls++; LS.incomingWonFinalCalls++; LS.answeredByIncoming++;
+      return { first: incomingBest, via: null };
+    }
 
-    if (bestPeerId === null)          LS.answeredNull++;
-    else if (answeredByProbe)         LS.answeredByProbe++;
-    else                              LS.answeredByIncoming++;
-    return bestPeerId;
+    // 2. Filter parity with greedy (route_msg handler and _greedyNextHopToward).
+    const probeTargets = [];
+    for (const syn of node.synaptome.values()) {
+      const id = syn.peerId;
+      if (dead && dead.has(id))        { LS.probesSkippedDead++;        continue; }
+      if (connOk && !connOk(id))       { LS.probesSkippedUnconnected++; continue; }
+      if (onPath(id))                  { LS.probesSkippedOnPath++;      continue; }
+      probeTargets.push(id);
+    }
+    if (probeTargets.length === 0) { LS.answeredNull++; return null; }
+    LS.probingCalls++;
+    LS.probesEmitted += probeTargets.length;
+
+    // XOR RANK, FOR ACCOUNTING ONLY — the order probes are sent is unchanged.
+    const rawRank = new Array(probeTargets.length);
+    const ranks   = new Array(probeTargets.length);
+    {
+      const byDist = probeTargets.map((p, i) => [i, p ^ target]);
+      byDist.sort((a, b) => (a[1] < b[1] ? -1 : a[1] > b[1] ? 1 : 0));
+      for (let r = 0; r < byDist.length; r++) {
+        const idx = byDist[r][0];
+        rawRank[idx] = r;
+        ranks[idx]   = rankBin(r);
+        LS.rankSent[ranks[idx]]++;
+        // With filter parity this cannot happen: a target nearer than self is
+        // one greedy would have taken. If it counts, the filter is wrong.
+        if (byDist[r][1] < myDist) LS.targetsNearerThanSelf++;
+      }
+    }
+
+    // 3. The round: lock on the first closer reply, bounded by LOOKAHEAD_MS.
+    const roundMs = Number(this._domain?.LOOKAHEAD_MS) > 0 ? Number(this._domain.LOOKAHEAD_MS) : 1500;
+    const t0 = Date.now();
+    const result = await new Promise((resolve) => {
+      let done = false, pending = probeTargets.length;
+      const finish = (v) => { if (done) return; done = true; clearTimeout(timer); resolve(v); };
+      // The round timer is NOT unref'd: a walk in progress is work, and a
+      // process whose only pending handle is this round must not exit under
+      // it (fence_lookahead_round check 6 found exactly that on 2026-10-11).
+      const timer = setTimeout(() => { LS.roundsTimedOut++; finish(null); }, roundMs);
+      probeTargets.forEach((peerId, i) => {
+        let p;
+        try { p = Promise.resolve(t.send(peerId, 'lookahead_probe', { target, fromDist: myDist })); }
+        catch (e) { p = Promise.reject(e); }
+        p.then((v) => {
+          if (done) return;                       // late reply: the round is over
+          LS.probesFulfilled++;
+          if (!v || v.terminal) { LS.probesTerminal++; LS.rankTerminal[ranks[i]]++; return; }
+          let viaBig = null;
+          try { viaBig = asId(v.peerId); } catch { viaBig = null; }
+          const d = (viaBig === null) ? myDist : (viaBig ^ target);
+          if (d < myDist) {
+            LS.probesCloserThanMe++; LS.rankCloser[ranks[i]]++;
+            // answeredWithinK now means: the rank of the CHOSEN first hop.
+            LS.callsWithAnyCloser++;
+            for (const k of K_PROBES) if (rawRank[i] < k) LS.answeredWithinK[k]++;
+            finish({ first: peerId, via: viaBig });
+          } else {
+            LS.rankNonCloser[ranks[i]]++;
+          }
+        }, () => {
+          if (done) return;
+          LS.probesRejected++; LS.rankRejected[ranks[i]]++;
+        }).finally(() => { pending--; if (!done && pending === 0) finish(null); });
+      });
+    });
+    LS.lookaheadRoundMs[roundBin(Date.now() - t0)]++;
+    if (result === null) LS.answeredNull++; else LS.answeredByProbe++;
+    return result;
   }
 
   /**
@@ -4895,6 +4939,14 @@ export class AxonaPeer extends DHT {
       answeredByProbe: s.answeredByProbe,
       answeredByIncoming: s.answeredByIncoming,
       answeredNull: s.answeredNull,
+      // R2/R3 (v0.5): the filter's skips, the round clock, the via commitment.
+      probesSkippedUnconnected: s.probesSkippedUnconnected,
+      probesSkippedDead: s.probesSkippedDead,
+      probesSkippedOnPath: s.probesSkippedOnPath,
+      roundsTimedOut: s.roundsTimedOut,
+      lookaheadRoundMs: ROUND_LABELS.map((label, i) => ({ bucket: label, rounds: s.lookaheadRoundMs[i] })),
+      viaHonoured: s.viaHonoured,
+      viaUnavailable: s.viaUnavailable,
       usefulProbeRate: probing ? +(s.answeredByProbe / probing).toFixed(4) : 0,
       closerReplyRate: s.probesFulfilled ? +(s.probesCloserThanMe / s.probesFulfilled).toFixed(4) : 0,
       // THE TOP-K QUESTION. rate = closer replies / probes sent, per XOR-rank
@@ -5587,11 +5639,14 @@ export class AxonaPeer extends DHT {
     const originId   = opts.fromId ?? nodeIdToHex(originNode.id);
 
     let nextHopId = this._greedyNextHopToward(targetId);
+    let viaNext   = null;
     let isTerminal = nextHopId === null;
     if (isTerminal) {
-      const closer = await this._findCloserInTwoHops(targetId);
-      if (closer !== null && closer !== originNode.id) {
-        nextHopId  = closer;
+      // R2/R3: the origin's path is itself.
+      const closer = await this._findCloserInTwoHops(targetId, { exclude: new Set([originNode.id]) });
+      if (closer && closer.first !== originNode.id) {
+        nextHopId  = closer.first;
+        viaNext    = closer.via;
         isTerminal = false;
       }
     }
@@ -5643,6 +5698,8 @@ export class AxonaPeer extends DHT {
       if (_hopLt) _sendT = Date.now();   // hand-to-transport moment
       const downstream = await originNode.transport.send(nextHopId, 'route_msg', {
         type, payload, targetId: toHex(targetId), hops: 1, originId,
+        path: [toHex(originNode.id)],                                     // R3
+        ...(viaNext != null ? { via: toHex(viaNext) } : {}),              // R2
         ...(_hopLt ? { hopAttemptId: _hopId } : {}),
       });
       if (_hopLt) {
