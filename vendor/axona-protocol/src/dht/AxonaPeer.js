@@ -1161,18 +1161,34 @@ export class AxonaPeer extends DHT {
       // Defensive: no chosen hop is ever on the path. Every selector above
       // excludes it; if one did not, stop here rather than loop.
       if (nextHopId !== null && exclude.has(nextHopId)) { nextHopId = null; isTerminal = true; }
+
+      // R4: a node is a TERMINAL only if it can serve. A node that holds nothing
+      // closer but cannot serve is not terminal — the handlers see
+      // isTerminal:false (so nothing roots here), an exact-target handler may
+      // still consume, and the walk goes on to a capable peer or stops.
+      const capable = isTerminal ? this._servingCapable() : true;
       const result = await this._deliverRouted(type, payload, {
         fromId,
         targetId: targetBig,
         hopCount: hops,
-        isTerminal,
+        isTerminal: isTerminal && capable,
       });
 
       if (result === 'consumed') {
         return { consumed: true, atNode: meId, hops };
       }
-      if (isTerminal) {
+      if (isTerminal && capable) {
         return { consumed: false, atNode: meId, hops, terminal: true };
+      }
+      if (isTerminal && !capable) {
+        const st = (this._servingCapableStats ??= { calls: 0, capable: 0, incapable: 0, exception: 0 });
+        const fb = this._capableFallbackHop(targetBig, exclude);
+        if (fb === null) {
+          st.noCapableTerminal = (st.noCapableTerminal | 0) + 1;
+          return { consumed: false, atNode: meId, hops, exhausted: true, stopped: 'no-capable-terminal' };
+        }
+        st.forwardedIncapable = (st.forwardedIncapable | 0) + 1;
+        nextHopId = fb; isTerminal = false;
       }
       if (hops + 1 >= domain.MAX_HOPS) {
         return { consumed: false, atNode: meId, hops, exhausted: true };
@@ -4027,6 +4043,7 @@ export class AxonaPeer extends DHT {
       // the rest of health, so a relay's SIGUSR1 dump can carry it without a
       // second mechanism.
       lookahead:     (() => { try { return this.lookaheadStats(); } catch { return null; } })(),
+      servingCapable: (() => { try { return { ...(this._servingCapableStats ?? { calls: 0, capable: 0, incapable: 0, exception: 0 }), now: this._servingCapable() }; } catch { return null; } })(),   // R4
       started:       this._started === true,
       transport,
       meshDegraded,
@@ -4257,6 +4274,10 @@ export class AxonaPeer extends DHT {
       // verified CAP_ATTEST; transports without a mesh (sim/node-WS/bridge) expose
       // no isCapable, so this returns false and pickCapableAdjacent fails closed.
       isCapable: (hex) => node.transport?.isCapable?.(hex) ?? false,
+      // R4 (Routed-Walk-Terminals v0.6): can THIS node serve — hold a root,
+      // answer a lookup, deliver to subscribers? AxonaManager gates every root
+      // birth and promote() on it; route_msg gates "terminal" on it.
+      servingCapable: () => peer._servingCapable(),
       // Mesh re-warm hook (task #332 facet 2): refreshTick calls this when the
       // mesh stays starved. Two complementary paths: ask the bridge to resend
       // its peer-list (a dissolved mesh leaves an EMPTY routing table, so
@@ -4717,6 +4738,64 @@ export class AxonaPeer extends DHT {
    * `routeMessage` to find a first-hop closer to target than self.
    * Returns peerId or null if no synapse makes XOR progress.
    */
+  /**
+   * R4 (Routed-Walk-Terminals v0.6): can this node SERVE a message that ends
+   * here — hold a root, answer a lookup, deliver to subscribers? The transport
+   * answers: the web composite (browsers AND relays) says meshBoundCount() is at
+   * least its serve floor; the bridge's node says seated and not neverRoot.
+   *
+   * THE EXCEPTION BRANCH, named as one in the design: a transport with no
+   * servingCapable() is treated as capable, because refusing every terminal on
+   * a transport nobody can assess would strand every walk through it. It is
+   * logged ONCE and counted, so if such a transport ever appears in production
+   * the log line and the counter say what was admitted and why. None exists
+   * today (the sim transport in tests is one).
+   */
+  _servingCapable() {
+    const st = (this._servingCapableStats ??= { calls: 0, capable: 0, incapable: 0, exception: 0 });
+    st.calls++;
+    const t = this._node?.transport;
+    if (typeof t?.servingCapable !== 'function') {
+      st.exception++;
+      if (!this._servingCapableUnknownLogged) {
+        this._servingCapableUnknownLogged = true;
+        this._emitLog?.('warn', 'serving-capable-unknown', { transport: t?.constructor?.name ?? typeof t, treatedAs: 'capable' });
+      }
+      return true;
+    }
+    let ok = false;
+    try { ok = !!t.servingCapable(); } catch { ok = false; }
+    if (ok) st.capable++; else st.incapable++;
+    return ok;
+  }
+
+  /**
+   * R4: where a node that cannot serve sends a walk that would otherwise end
+   * here. The bridge's own node first, when the transport names it and holds
+   * it (a door-only node's one capable neighbour); else the XOR-closest
+   * connected, non-dead peer off the walk's path, whatever its distance — the
+   * path memory (R3) keeps that from becoming a loop; else null, and the
+   * caller stops the walk with `no-capable-terminal`.
+   */
+  _capableFallbackHop(targetId, exclude) {
+    const node = this._node; const t = node?.transport;
+    if (!node) return null;
+    const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
+    const dead = node._deadPeers;
+    const eligible = (id) => id !== node.id && !(exclude && exclude.has(id)) && !(dead && dead.has(id)) && !(connOk && !connOk(id));
+    let b = null;
+    try { b = (t && t.bridgeNodeIdBig != null) ? asId(t.bridgeNodeIdBig) : null; } catch { b = null; }
+    if (b !== null && eligible(b)) return b;
+    const target = asId(targetId);
+    let best = null, bestDist = null;
+    for (const syn of node.synaptome.values()) {
+      if (!eligible(syn.peerId)) continue;
+      const d = syn.peerId ^ target;
+      if (bestDist === null || d < bestDist) { bestDist = d; best = syn.peerId; }
+    }
+    return best;
+  }
+
   _greedyNextHopToward(targetId) {
     if (!this._node?.alive) return null;
     const target = asId(targetId);   // wire→internal id gate
@@ -5651,19 +5730,31 @@ export class AxonaPeer extends DHT {
       }
     }
 
+    // R4: terminal only if this node can serve (see the route_msg handler).
+    const capable = isTerminal ? this._servingCapable() : true;
     const result = await this._deliverRouted(type, payload, {
       fromId:   originId,
       targetId,
       hopCount: 0,
-      isTerminal,
+      isTerminal: isTerminal && capable,
       node:     originNode,
     });
 
     if (result === 'consumed') {
       return { consumed: true, atNode: originNode.id, hops: 0 };
     }
-    if (isTerminal) {
+    if (isTerminal && capable) {
       return { consumed: false, atNode: originNode.id, hops: 0, terminal: true };
+    }
+    if (isTerminal && !capable) {
+      const st = (this._servingCapableStats ??= { calls: 0, capable: 0, incapable: 0, exception: 0 });
+      const fb = this._capableFallbackHop(targetId, new Set([originNode.id]));
+      if (fb === null) {
+        st.noCapableTerminal = (st.noCapableTerminal | 0) + 1;
+        return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true, stopped: 'no-capable-terminal' };
+      }
+      st.forwardedIncapable = (st.forwardedIncapable | 0) + 1;
+      nextHopId = fb; isTerminal = false;
     }
 
     // Lazy channel-open on the FIRST hop (v4.3.2): the forwarding path

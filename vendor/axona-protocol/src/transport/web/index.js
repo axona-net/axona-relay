@@ -168,6 +168,7 @@ export function webTransport({
   // treat graduation as a misjudgement and reconnect normally. A graduated node
   // re-dials the bridge if its bound-peer count later falls below this floor.
   graduationMeshFloor = 3,
+  serveMeshFloor = null,          // R4: bound mesh peers needed to serve; null = graduationMeshFloor
   graduationRecheckMs = 5000,
   // BOUNDED MESH DEGREE (4.95.0). Null/absent ⇒ the mesh keeps a channel to
   // every peer it hears about, which is what every browser and relay wants and
@@ -1483,6 +1484,19 @@ export function webTransport({
    * key on this rather than the routing table's count. 0 ⇒ bridge-only.
    */
   composite.meshBoundCount = () => meshBoundCount();
+  /**
+   * R4 (Routed-Walk-Terminals v0.6): can this node SERVE — hold a root, answer
+   * a lookup, deliver to subscribers? True when the live mesh holds at least
+   * the serve floor of bound peers. The floor is the graduation floor by choice
+   * (the kernel's existing idea of "meshed"); `serveMeshFloor` diverges them
+   * when David wants that. A door-only node (bridge socket, no mesh) answers
+   * false, and so does a tab whose mesh never formed — the two cases that
+   * rooted axona.chat and stranded it on 2026-10-11.
+   */
+  composite.servingCapable = () => {
+    const floor = (Number.isFinite(serveMeshFloor) && serveMeshFloor > 0) ? serveMeshFloor : graduationMeshFloor;
+    return meshBoundCount() >= floor;
+  };
   /**
    * Census of INBOUND mesh frames by kind — what the mesh is actually sending
    * this node, and how fast. `{reset:true}` zeroes the window so a rate can be

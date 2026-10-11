@@ -949,6 +949,17 @@ export class AxonaManager {
   }
 
   _becomeRoot(topicBig, why = 'terminal') {
+    // R4 (Routed-Walk-Terminals v0.6): every root birth passes through here —
+    // sub-terminal, pub-terminal, kill-terminal, metricson-terminal, handoff-
+    // heir. A node that cannot serve births no root; every caller already
+    // treats null as a refused birth (reroute, forward, or stay silent so a
+    // handoff leaver re-homes). The solo-publish exception is withdrawn: a
+    // solo node's subscriber is itself and a local deliver needs no root.
+    if (typeof this.dht?.servingCapable === 'function' && !this.dht.servingCapable()) {
+      this._rootBirthsRefused = (this._rootBirthsRefused | 0) + 1;
+      this._disc(topicBig, 'root-refused-not-capable', { why });
+      return null;
+    }
     this._disc(topicBig, 'became-root', { why });
     return this._rootClaim.become(topicBig, why);
   }

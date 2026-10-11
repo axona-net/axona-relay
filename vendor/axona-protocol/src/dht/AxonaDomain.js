@@ -59,6 +59,14 @@ const DEFAULTS = Object.freeze({
   // forwards onto that path. The measured loop was two nodes trading the frame
   // to MAX_HOPS; eight covers four such pairs. The cap above stays the outer bound.
   PATH_MEMORY:         8,
+  // R4 (Routed-Walk-Terminals v0.6): a node declares itself a routing terminal,
+  // and births a root, only if it can SERVE — the transport's servingCapable()
+  // says so (web composite: meshBoundCount() >= its serve floor, the graduation
+  // floor 3 by choice; bridge node: seated and not neverRoot). A transport with
+  // no such method is the EXCEPTION branch: treated capable, logged once,
+  // counted. This constant is the documented floor the web transport defaults
+  // to; the transport owns the live number.
+  SERVE_MESH_FLOOR:    3,
   EPSILON:             0.05,
   LOOKAHEAD_ALPHA:     5,
   GEO_REGION_BITS:     8,

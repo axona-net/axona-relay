@@ -288,13 +288,18 @@ export const wireHandlersMethods = {
       // instead of a beacon). Timeout/inconclusive → FAIL CLOSED: hold the seat
       // (mySubscriptions is set, so the renewal retries) and never self-root a
       // local minimum. Flag OFF → byte-identical to the prior line.
-      if (this._subTerminalVerify) {
+      // R4: the capability test runs FIRST — a local predicate with no network
+      // cost — and a node that cannot serve never reaches the verify, so the
+      // two oracles cannot disagree. _becomeRoot repeats the test and returns
+      // null; the refused-birth path below then reroutes or records it.
+      const capableHere = !(typeof this.dht?.servingCapable === 'function' && !this.dht.servingCapable());
+      if (capableHere && this._subTerminalVerify) {
         const verdict = await this._verifyTerminalOwnership(topicBig);
         if (verdict.kind === 'closer') { this._deferToRoot(topicBig, T.SUB, payload, verdict.rootHex); return 'consumed'; }
         if (verdict.kind !== 'self') return 'consumed';   // inconclusive → fail closed, renewal retries
         // 'self' → verified local ownership → fall through to self-root
       }
-      role = this._becomeRoot(topicBig, 'sub-terminal');
+      role = capableHere ? this._becomeRoot(topicBig, 'sub-terminal') : null;
     }
     if (!role) {
       // Admission refused (bridge fence) — do not seat here. This used to return

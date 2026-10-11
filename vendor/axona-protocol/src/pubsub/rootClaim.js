@@ -354,6 +354,8 @@ export class RootClaim {
     const m = this.m;
     const viaEmpty = !(Array.isArray(payload.via) && payload.via.length);
     if (!(viaEmpty && meta.isTerminal && !role.isRoot)) return;
+    // R4: a terminal that cannot serve does not take the seat (same test as _becomeRoot).
+    if (typeof m.dht?.servingCapable === 'function' && !m.dht.servingCapable()) return;
     if (this.liveCloserRoot(role.topicId)) return;   // a closer live root is beaconing — don't contest it
     if (this._holdBlocks(role.topicId, 'terminal-promote')) return;   // stepped down: hold the seat (4.102.0)
     this._set(role, true, 'terminal-promote');
