@@ -59,8 +59,7 @@ import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
          TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX,
-         ROLE_IDLE_TTL_MS,
-} from './constants.js';
+         ROLE_IDLE_TTL_MS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -725,6 +724,18 @@ export class AxonaManager {
   }
 
   /** Admission counters for health()/observability. */
+  /** R5: the mesh re-warm's ask count and current backoff, for health. */
+  inspectRewarm() {
+    return {
+      asks: this._meshRewarmAsks | 0,
+      backoffMs: this._meshRewarmBackoffMs ?? MESH_REWARM_COOLDOWN_MS,
+      maxBackoffMs: MESH_REWARM_BACKOFF_MAX_MS,
+      lastAskAt: this._meshRewarmAt || 0,
+      starvedTicks: this._meshStarvedTicks | 0,
+      lastMeshN: this._meshRewarmLastN ?? null,
+    };
+  }
+
   inspectAdmission() {
     return {
       roles: this.axonRoles.size,

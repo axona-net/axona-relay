@@ -111,6 +111,12 @@ export const INGEST_SLICE_MS  = 8;              // ingest CPU per slice; keeps p
 export const MESH_REWARM_MIN         = 3;       // mesh peers below this = starved
 export const MESH_REWARM_TICKS       = 3;       // consecutive starved ticks before acting (~15s: outlasts a blip)
 export const MESH_REWARM_COOLDOWN_MS = 60_000;  // min gap between re-warm attempts (integration takes seconds)
+// R5 (Routed-Walk-Terminals v0.6): the gap DOUBLES after every ask that found
+// the mesh still starved — 1, 2, 4, 8 min … up to this cap — and resets to the
+// cooldown the moment a bound channel appears. A node whose offers never
+// complete asked every minute without bound before this (one Safari tab:
+// 272 asks and 5699 relayed signals in an hour, 2026-10-11).
+export const MESH_REWARM_BACKOFF_MAX_MS = 600_000;
 
 // ── Cache / tree shape / wire sanity ────────────────────────────────────
 export const CACHE_MAX       = 1024;            // messages cached per relay

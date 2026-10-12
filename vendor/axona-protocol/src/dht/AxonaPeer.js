@@ -3982,8 +3982,10 @@ export class AxonaPeer extends DHT {
     // we spent a diagnosis cycle unable to see on prod (roles=0 while rooting,
     // then roles=720 with no way to know it had declared itself full).
     let admission = null;
+    let rewarm = null;   // R5
     if (am && typeof am.inspectAdmission === 'function') {
       try { admission = am.inspectAdmission(); } catch { /* best-effort */ }
+      try { rewarm = am.inspectRewarm?.() ?? null; } catch { /* best-effort */ }   // R5
     }
     // ── transport / routing-truth observability ──────────────────────
     // Web transport exposes boundPeers() (authenticated nodeIds), .mesh
@@ -4038,6 +4040,7 @@ export class AxonaPeer extends DHT {
       axonRolesComplete,   // false = could not read them, NOT "there are none"
       hosting,
       admission,
+      rewarm,              // R5: mesh re-warm asks + backoff
       wireVersion:   this._transport?.wireVersion ?? null,
       // Emit-side lookahead census (4.81.0). Cheap to read and it travels with
       // the rest of health, so a relay's SIGUSR1 dump can carry it without a

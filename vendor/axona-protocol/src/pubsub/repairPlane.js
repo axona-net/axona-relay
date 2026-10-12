@@ -22,7 +22,7 @@ import {
   HANDOFF_ACK_PER_TOPIC_MS, HANDOFF_ACK_MAX_MS,
   ROOT_REPLICATE_FULL_MS, REPLICATE_FULL_BUDGET, INGEST_QUEUE_MAX,
   HELLO_DEADLINE_MS,
-  INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS,
+  INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
   ROUTE_REPORT_TOP,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
@@ -391,16 +391,29 @@ export const repairPlaneMethods = {
     //    hook (sim engines, unit fixtures).
     if (typeof this.dht.reintegrate === 'function' && typeof this.dht.neighbors === 'function') {
       const meshN = (this.dht.neighbors() || []).length;
+      // R5 (Routed-Walk-Terminals v0.6): the ask backs off. The gap doubles
+      // after every ask that found the mesh still starved, up to
+      // MESH_REWARM_BACKOFF_MAX_MS, and resets to the cooldown on ANY bound
+      // channel — a rise in the mesh count since the last tick, starved or
+      // not. A node whose offers never complete therefore asks the bridge
+      // 1, 2, 4, 8 … 10 min apart instead of every minute for ever.
+      const lastN = this._meshRewarmLastN;
+      this._meshRewarmLastN = meshN;
+      if (lastN !== undefined && meshN > lastN) this._meshRewarmBackoffMs = MESH_REWARM_COOLDOWN_MS;
       if (meshN < MESH_REWARM_MIN) {
         this._meshStarvedTicks = (this._meshStarvedTicks || 0) + 1;
-        if (this._meshStarvedTicks >= MESH_REWARM_TICKS && now - (this._meshRewarmAt || 0) >= MESH_REWARM_COOLDOWN_MS) {
+        const gap = this._meshRewarmBackoffMs ?? MESH_REWARM_COOLDOWN_MS;
+        if (this._meshStarvedTicks >= MESH_REWARM_TICKS && now - (this._meshRewarmAt || 0) >= gap) {
           this._meshRewarmAt = now;
           this._meshStarvedTicks = 0;
-          this._log('info', 'mesh-rewarm', { peers: meshN });
+          this._meshRewarmAsks = (this._meshRewarmAsks | 0) + 1;
+          this._meshRewarmBackoffMs = Math.min(gap * 2, MESH_REWARM_BACKOFF_MAX_MS);
+          this._log('info', 'mesh-rewarm', { peers: meshN, asks: this._meshRewarmAsks, nextGapMs: this._meshRewarmBackoffMs });
           Promise.resolve(this.dht.reintegrate()).catch(() => {});
         }
       } else {
         this._meshStarvedTicks = 0;
+        this._meshRewarmBackoffMs = MESH_REWARM_COOLDOWN_MS;
       }
     }
   },

@@ -275,8 +275,10 @@ export const wireHandlersMethods = {
       // inside the delivery window). A node that can't reach anyone has no
       // business electing itself: hold the seat; mySubscriptions is already
       // set, so the renewFastMs renewal re-runs the election once meshed.
-      // Publish-side is deliberately NOT gated — a genuinely solo node still
-      // roots on its own publish and serves its local subscriber.
+      // Publish-side: since R4 (4.110.0) the publish birth IS gated too, in
+      // _becomeRoot — a node that cannot serve roots nothing, and a solo node's
+      // subscriber is itself, which a local deliver reaches without a root.
+      // The meshBare() hold here stays as the SUB-side guard it always was.
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
     let role = this.axonRoles.get(topicBig);
