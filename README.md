@@ -74,6 +74,7 @@ Quit the dashboard with **q** or **Ctrl-C**.
 | `RELAY_PROBE_DIR` | `<checkout>/probe-requests` | where requests are read and results written (anchored on the code, not the cwd) |
 | `RELAY_PROBE_POLL_MS` | `10000` | how often the directory is read |
 | `RELAY_PROBE_LABEL` | — | the sender label written into the rows; unset = the node id's first 12 hex, which the fold relabels from the census |
+| `RELAY_WATCHDOG_MS` | `30000` | 0.155.0: the event-loop watchdog. A worker thread counts the beats the main thread fails to post; after this many ms of silence it writes `event-loop-stalled` to the log, on Windows writes a minidump of the process to `relay-logs/stall-<pid>-<utc>.dmp` (thread stacks, via the `comsvcs.dll` MiniDump export that ships with Windows), and kills the process so the service manager restarts it. Three Windows relays froze inside a native call (2026-10-09 ×2, 2026-10-12 ×1) and read Running for hours; the cause is not yet identified, so the failure is bounded instead. `0` disables. Fence: `test/fence_watchdog.mjs` |
 
 Bridge selection precedence: `BRIDGE_URL` › `RELAY_NETWORK` › default (`prod`).
 

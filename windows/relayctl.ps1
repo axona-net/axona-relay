@@ -74,17 +74,36 @@ function LooseReady([string]$line) {
   if ($state -eq 'open' -or $state -eq 'graduated') { return $true }
   return ($bound -ge 3 -and $open -ge ($bound - 1))
 }
+# 0.155.0: a slot that never reaches a state line is the freeze signature
+# (2026-10-12 slot 2: log ends one second after start, CPU stopped, service
+# Running). Before the gate aborts, keep the evidence: a minidump of THE
+# process the gate waited on — only if it is still the same pid. If the
+# relay's own watchdog (src/watchdog.js) already killed it and the SCM
+# restarted the slot, the pid differs, the watchdog wrote its own dump, and
+# dumping the newcomer would record a healthy process.
+function DumpSlot([int]$i, [int]$pid0) {
+  if ($pid0 -le 0) { return $null }
+  $p = (Inventory).Service[$i]
+  if (-not $p -or [int]$p.ProcessId -ne $pid0) { return $null }
+  $f = Join-Path $LogDir ('svc-{0}-stalled-{1}.dmp' -f $i.ToString('00'), (Get-Date).ToUniversalTime().ToString('yyyyMMddTHHmmssZ'))
+  try {
+    Start-Process -FilePath rundll32.exe -ArgumentList ('C:\Windows\System32\comsvcs.dll, MiniDump {0} {1} full' -f $pid0, $f) -Wait -NoNewWindow
+  } catch { return $null }
+  if (Test-Path $f) { $f } else { $null }
+}
 function AwaitReady([int]$i) {
   $deadline = (Get-Date).AddSeconds($AdvanceCap)
-  $line = $null
+  $line = $null; $pid0 = 0
   while ((Get-Date) -lt $deadline) {
     $svc = Get-Service (SvcName $i)
     if ($svc.Status -ne 'Running') { Start-Sleep 3; continue }
+    if ($pid0 -le 0) { $p = (Inventory).Service[$i]; if ($p) { $pid0 = [int]$p.ProcessId } }
     $line = LastState $i
     if (LooseReady $line) { return $line }
     Start-Sleep 3
   }
-  Fail ("slot {0}: not bridged+bonded within {1}s (last: {2})" -f $i, $AdvanceCap, $(if ($line) { $line } else { 'none' }))
+  $dump = DumpSlot $i $pid0
+  Fail ("slot {0}: not bridged+bonded within {1}s (last: {2}; dump: {3})" -f $i, $AdvanceCap, $(if ($line) { $line } else { 'none' }), $(if ($dump) { $dump } else { 'none' }))
 }
 function AssertKernel([int]$i, [string]$k) {
   if (-not (Select-String -Path (LogPath $i) -SimpleMatch "kernel v$k" -Quiet)) {

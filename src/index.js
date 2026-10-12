@@ -23,6 +23,10 @@
 //                        is RELAY_TOPIC_REGION (the structured-topic anchor).
 //   RELAY_TOPIC_REGION   region for RELAY_TOPICS (default = the relay's own
 //                        region — where the demo/bench/share apps anchor)
+//   RELAY_WATCHDOG_MS    0.155.0: how long the event loop may stop before a
+//                        worker thread kills the process (default 30000; 0 =
+//                        off). A frozen relay becomes a dead one, and the
+//                        service manager restarts it. See src/watchdog.js.
 //   (metrics: demand-driven in the kernel since v4.12.0 — any root publishes
 //    snapshots while a metric topic is subscribed; no relay loop, no env knob)
 //
@@ -33,6 +37,7 @@ import { cleanupWebRTC } from './polyfill.js';
 import { createEphemeralIdentity, createEphemeralAuthor } from './identity.js';
 import { createRelay, startRelay, stopRelay, KERNEL_VERSION, regionName, resolveRegion, regionDescriptor } from './relay.js';
 import { startProbeWorker } from './probe.js';
+import { startWatchdog, watchdogFromEnv, defaultDumpDir } from './watchdog.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, join as joinPath } from 'node:path';
 import { powCalibrate, powDifficulty } from '../vendor/axona-protocol/src/pow/pow.js';
@@ -184,6 +189,18 @@ async function main() {
     regionLabel, regionName, mode,
   });
   activePresent = present;   // process-level error handlers now log to the panel, not over the frame
+
+  // WATCHDOG (0.155.0). Armed before the first connect, because the 2026-10-12
+  // freeze happened one second after start. A worker thread counts the beats
+  // this thread fails to post; after RELAY_WATCHDOG_MS of silence it writes
+  // `event-loop-stalled` to the log, dumps the process on win32, and kills it
+  // so the service manager restarts a relay that would otherwise read Running
+  // for ever. See src/watchdog.js. 0 turns it off.
+  const watchdogMs = watchdogFromEnv();
+  const watchdog = startWatchdog({ stallMs: watchdogMs });
+  present.logLine(watchdog
+    ? `watchdog-armed ${JSON.stringify({ stallMs: watchdog.stallMs, beatMs: watchdog.beatMs, dumpDir: process.platform === 'win32' ? defaultDumpDir() : null })}`
+    : 'watchdog-off {"RELAY_WATCHDOG_MS":"0"}');
   for (const n of cfg.notes) present.logLine(`{gray-fg}geo:{/} ${n}`);
   present.logLine(`{cyan-fg}ephemeral node{/} — fresh id in ${regionLabel} (0x${regionCode}); ` +
     `transport ids are never persisted (re-minted every start)`);

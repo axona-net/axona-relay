@@ -1,6 +1,6 @@
 {
   "name": "axona-relay",
-  "version": "0.154.0",
+  "version": "0.155.0",
   "description": "Headless Axona relay/supernode — a full mesh peer (WebRTC via node-datachannel) with a live console dashboard. A subset of the bridge: it routes, roots pub/sub, and relays signaling, but runs no public server and mints no TURN.",
   "type": "module",
   "bin": {
@@ -19,7 +19,7 @@
     "e2e": "node e2e/run.js",
     "collect": "node pow-collector.js",
     "pubsub:selftest": "node scripts/pubsub-selftest.mjs",
-    "test": "for f in src/*.js; do node --check \"$f\" || exit 1; done && node test/smoke_bootstrap_order.mjs && node scripts/load-smoke.mjs && node test/fence_transport_identity.mjs && node test/smoke_file_transfer.mjs && node test/fence_council_gate.mjs && node test/fence_council_scope.mjs && node test/fence_log_ctx_evidence.mjs && node test/fence_health_dump_capacity.mjs && node test/fence_probe_matrix.mjs && node --test test/mcp_identity_lock.test.mjs && bash test-fleet-cadence.sh"
+    "test": "for f in src/*.js; do node --check \"$f\" || exit 1; done && node test/smoke_bootstrap_order.mjs && node scripts/load-smoke.mjs && node test/fence_transport_identity.mjs && node test/smoke_file_transfer.mjs && node test/fence_council_gate.mjs && node test/fence_council_scope.mjs && node test/fence_log_ctx_evidence.mjs && node test/fence_health_dump_capacity.mjs && node test/fence_probe_matrix.mjs && node test/fence_watchdog.mjs && node --test test/mcp_identity_lock.test.mjs && bash test-fleet-cadence.sh"
   },
   "engines": {
     "node": ">=20"
@@ -27,7 +27,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "blessed": "^0.1.81",
-    "node-datachannel": "^0.33.1",
+    "node-datachannel": "^0.33.4",
     "ws": "^8.18.0",
     "zod": "^4.4.3"
   }
