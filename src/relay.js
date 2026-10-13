@@ -93,8 +93,12 @@ export function armingFromEnv(env = process.env) {
     armedEnvs,
     armMaintain: env.RELAY_SYNAPTOME_MAINTAIN === '1'
       ? { kNear: maintainKNear, intervalMs: 15000, maxPerTick: 3 } : null,
+    // Perimeter v0.3 §2 (relay 0.156.0): ONE K. The gate's kNear is the same
+    // RELAY_SYNAPTOME_KNEAR the maintenance and the fill read; until 0.155.0
+    // the gate was hard-coded at 5 while the env could set the fill to 10, and
+    // the kernel (4.112.0) now refuses that pair at construction.
     armGate: env.RELAY_ADMISSION_GATE === '1'
-      ? { kNear: 5, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } : null,
+      ? { kNear: maintainKNear, sparseFloor: 2, kJoin: 2, laneCooldownMs: 5000, laneWindowMs: 300000 } : null,
     armGuard: env.RELAY_ATTEMPT_GUARD === '1'
       ? { maxAttempts: 4, baseMs: 30000, factor: 2, refillWindowMs: 60000,
           deficitBaseMs: 30000, deficitFactor: 2 } : null,

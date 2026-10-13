@@ -38,6 +38,14 @@ console.log('armed-canary arming fence\n');
     JSON.stringify(all.armPresence) === JSON.stringify({ announceOnStart: true, relayRateMs: 30000 }));
   const one = armingFromEnv({ RELAY_ATTEMPT_GUARD: '1' });
   check('1 flags are independent', one.armedEnvs.length === 1 && one.armGuard !== null && one.armMaintain === null);
+  // Perimeter v0.3 §2 (relay 0.156.0): ONE K. RELAY_SYNAPTOME_KNEAR moves the
+  // gate's kNear with the maintenance's; until 0.155.0 the gate stayed at 5
+  // while the fill could be set to 10, and the kernel (4.112.0) refuses that
+  // pair at construction. Regression: 10 → both 10; absent → both 5; a typo → both 5.
+  const k10 = armingFromEnv({ RELAY_SYNAPTOME_MAINTAIN: '1', RELAY_ADMISSION_GATE: '1', RELAY_ATTEMPT_GUARD: '1', RELAY_SYNAPTOME_KNEAR: '10' });
+  check('1 RELAY_SYNAPTOME_KNEAR=10 sets the gate AND the maintenance to 10 (one K, Perimeter v0.3 §2)', k10.armGate.kNear === 10 && k10.armMaintain.kNear === 10);
+  const kbad = armingFromEnv({ RELAY_SYNAPTOME_MAINTAIN: '1', RELAY_ADMISSION_GATE: '1', RELAY_ATTEMPT_GUARD: '1', RELAY_SYNAPTOME_KNEAR: 'ten' });
+  check('1 a malformed KNEAR leaves BOTH at 5', kbad.armGate.kNear === 5 && kbad.armMaintain.kNear === 5);
 }
 
 // ── 2. the version gate: old vendor + any arming env = refused ────────
