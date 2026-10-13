@@ -368,6 +368,18 @@ export class AxonaPeer extends DHT {
     // dht:presence hook (slice 2) is the guard's refill valve, paced to one
     // refill per identity per window, and any verified record resets the
     // deficit backoff.
+    // Perimeter v0.3 §2 (Aster fd1ff07b): ONE K for every consumer. The gate
+    // protects the kNear nearest and the maintenance/fill nominates the kNear
+    // nearest; two values let the fill nominate ten while the gate protects
+    // five. Refused at construction, in the shape of the arming refusals.
+    if (this._gateCfg && this._maintainCfg && this._gateCfg.kNear !== this._maintainCfg.kNear) {
+      throw new TypeError(
+        `AxonaPeer: admissionGate.kNear (${this._gateCfg.kNear}) !== synaptomeMaintain.kNear (${this._maintainCfg.kNear}) — ` +
+        'one K for the gate, the maintenance and the fill (Perimeter v0.3 §2)');
+    }
+    /** Perimeter counters, surfaced in health().perimeter. */
+    this._perimeterStats = { nearImproves: 0, nearImproveRefused: 0, improveDials: 0, bandProbes: 0, bandNominated: 0 };
+    this._bandProbeAt = new Map();      // band group → fill tick of the last probe
     this._attemptGuard = attemptGuard
       ? new AttemptGuard(typeof attemptGuard === 'object' ? attemptGuard : {})
       : null;
@@ -645,7 +657,12 @@ export class AxonaPeer extends DHT {
     if (transport && typeof transport.setObligedPeers === 'function') {
       try {
         transport.setObligedPeers(() => {
-          try { return this._engine.axonFor(this._node).obligedPeers(); }
+          // Perimeter v0.2 §E (Aster 541a178f): the mesh's two elective close
+          // sites, degree-cap and make-room, read the ONE retention policy —
+          // NEAR, BAND, SERVICE and DUTY — through protectedPeers(), not the
+          // duty set alone (4.97.0–4.111.0 read duties only, so a bridge could
+          // retire one of its nearest peers that the gate would have held).
+          try { return this.protectedPeers(); }
           catch { return null; }   // null = "cannot say", which the caller must
                                    // NOT read as "no obligations"
         });
@@ -1799,15 +1816,23 @@ export class AxonaPeer extends DHT {
     const rep = { cap, admitted, deficit: cap - admitted, inflight, budget, availStop: false, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
     if (rep.deficit <= 0) {                                          // Rule 2: stop at cap
       rep.state = 'at-cap';
+      // Perimeter v0.1 §5–§6: improve an occupied near slot. One bounded near
+      // search; at most one dial, and only for a candidate the gate predicts
+      // it will admit by displacement (strictly closer than the kNear-th held).
+      rep.improve = await this._nearImproveStep(self);
       this._fillReport(rep);
       if (this._deficitBackoff) this._deficitBackoff.reset();
-      return 0;
+      return rep.improve.dialed;
     }
     // 2. NEIGHBOURS — the tick's own near search; its probes' responses nominate
     //    inside findKClosest, and the nearest band is nominated here.
     let nearest = [];
     try { nearest = await this.findKClosest(self, cfg.kNear + 1); } catch { nearest = []; }
     if (Array.isArray(nearest)) for (const id of nearest) { if (this._nominateCandidate(id, 'near')) rep.near++; }
+    // 2b. BANDS (Perimeter v0.1 §5, v0.3 §F): one probe per tick toward the
+    //     sparsest band inside the held span, so near discovery can never
+    //     starve the crossing edges. The probe's answers nominate as 'band'.
+    rep.band = await this._bandDiscoveryStep(self);
     // 3. DIRECTORY
     rep.directory = this._fillDirectoryStep();
     // 4. DIAL — nearest-first out of the cache, each under the reservation.
@@ -1818,7 +1843,14 @@ export class AxonaPeer extends DHT {
     //    released and nothing consumed, and the candidate stays nominated
     //    (R12-2). Either refusal stops the dial phase for this tick.
     const cache = this._fillCache;
-    const ordered = [...cache.keys()].sort((a, b) => ((a ^ self) < (b ^ self) ? -1 : 1));
+    // v0.3 §F: alternate the class served first, tick by tick — near-first on
+    // even ticks, band-first on odd — so neither class starves and an unused
+    // share is borrowed by the other. Within a class, nearest-first as before.
+    const bandFirst = (st.ticks % 2) === 1;
+    const ordered = [...cache.entries()].sort(([a, ra], [b, rb]) => {
+      if (bandFirst) { const ba = ra.src === 'band' ? 0 : 1, bb = rb.src === 'band' ? 0 : 1; if (ba !== bb) return ba - bb; }
+      return ((a ^ self) < (b ^ self) ? -1 : 1);
+    }).map(([id]) => id);
     for (const id of ordered) {
       // R12-4 (Aster 3fac1dce): the per-tick budget bounds ATTEMPTS MADE —
       // dials out AND cancels — not dials alone, or a run of cancellations
@@ -1879,6 +1911,91 @@ export class AxonaPeer extends DHT {
       else this._deficitBackoff.reset();
     }
     return rep.dialed + rep.cancelled;                               // attempts made (dials out + cancels); deferrals and skips are not attempts
+  }
+
+  /**
+   * Perimeter v0.1 §5–§6: the near-improvement step, at cap. Searches the
+   * kNear+1 nearest (the existing bounded iterative search), and dials at
+   * most ONE candidate that is eligible, unheld, within the guard's schedule
+   * and that the gate predicts it will admit by displacement. The dial then
+   * binds, the reconcile offers it, and the gate swaps it in for the farthest
+   * near peer that holds no other reason — make-before-break, since the
+   * channel exists before the victim closes.
+   * @returns {Promise<{searched:boolean, candidates:number, dialed:number, outcome:string|null}>}
+   */
+  async _nearImproveStep(self) {
+    const cfg = this._maintainCfg; const node = this._node; const guard = this._attemptGuard;
+    const out = { searched: false, candidates: 0, dialed: 0, outcome: null };
+    if (!cfg || !guard || !this._gateCfg || !node?.synaptome) return out;
+    let nearest = [];
+    try { nearest = await this.findKClosest(self, cfg.kNear + 1); out.searched = true; } catch { return out; }
+    if (!Array.isArray(nearest)) return out;
+    for (const id of nearest) {
+      if (typeof id !== 'bigint' || id === self || node.synaptome.has(id) || this._isBoundPeer(id)) continue;
+      if (!this._isEligibleCandidate(id) || !this._improveAdmits(id)) continue;
+      out.candidates++;
+      if (guard.inflightCount() >= cfg.pPending || !this._transportMayDial() || !guard.allow(id)) continue;
+      this._perimeterStats.improveDials++;
+      let o = 'failed';
+      try { o = await this._considerCandidate(id, 'near-improve'); } catch { o = 'failed'; }
+      out.dialed = 1; out.outcome = o;
+      this._emitLog?.('info', 'near-improve-dial', { outcome: o, candidates: out.candidates });
+      break;                                                         // one improvement per tick
+    }
+    return out;
+  }
+
+  /**
+   * Perimeter v0.1 §5 / v0.3 §F: the band-discovery step, below cap. Bands
+   * are the gate's distance groups (clz264 >>> 2; higher = closer). Inside
+   * the span this node already holds (from its farthest occupied band to the
+   * nearest), the sparsest band with fewer than sparseFloor peers gets ONE
+   * probe per tick: a find_closest_set toward an id in that band, whose
+   * answers nominate as 'band'. A band probed within the last four ticks is
+   * skipped, so an empty band is not asked every tick. Bands outside the
+   * held span are not probed: at a region prefix the far bands are empty by
+   * construction, and a probe cannot fill what has no population.
+   * @returns {Promise<{band:number|null, probed:boolean, nominated:number}>}
+   */
+  async _bandDiscoveryStep(self) {
+    const out = { band: null, probed: false, nominated: 0 };
+    const node = this._node;
+    if (!this._fillArmed() || !node?.synaptome) return out;
+    const R = this._retentionMap();
+    const groups = this._domain.STRATA_GROUPS;
+    const occupied = [...R.counts.keys()];
+    if (occupied.length === 0) return out;
+    const lo = Math.min(...occupied);
+    let pick = null, pickCount = Infinity;
+    for (let g = lo; g < groups; g++) {
+      const c = R.counts.get(g) ?? 0;
+      if (c >= R.cfg.sparseFloor) continue;
+      const last = this._bandProbeAt.get(g);
+      if (last !== undefined && this._fillStats.ticks - last < 4) continue;
+      if (c < pickCount) { pick = g; pickCount = c; }
+    }
+    if (pick === null) return out;
+    out.band = pick;
+    // A target in band `pick`: flip the bit whose leading-zero count lands in
+    // [4·pick, 4·pick+3] (we use 4·pick+2), keep the rest of self. clz264 is
+    // over 264 bits (66 hex digits), so bit 263 is the top.
+    const bit = 263n - BigInt(4 * pick + 2);
+    if (bit < 0n) return out;
+    const target = self ^ (1n << bit);
+    this._bandProbeAt.set(pick, this._fillStats.ticks);
+    this._perimeterStats.bandProbes++;
+    out.probed = true;
+    let found = [];
+    try { found = await this.findKClosest(target, 2); } catch { found = []; }
+    if (Array.isArray(found)) {
+      for (const id of found) {
+        if (typeof id !== 'bigint' || id === self) continue;
+        if (R.groupOf(id) !== pick) continue;                          // only a node IN the band fills the band
+        if (this._nominateCandidate(id, 'band')) { out.nominated++; this._perimeterStats.bandNominated++; }
+      }
+    }
+    if (out.probed) this._emitLog?.('info', 'band-probe', { band: pick, held: pickCount, nominated: out.nominated });
+    return out;
   }
 
   /**
@@ -2638,6 +2755,7 @@ export class AxonaPeer extends DHT {
     }
     if (d.how === 'gate-swap') {
       const node = this._node;
+      if (d.near) { this._perimeterStats.nearImproves++; this._emitLog?.('info', 'near-improve', { victim: toHex(d.victimKey) }); }
       node.synaptome.delete(d.victimKey);
       node.connections?.delete(d.victimKey);
       try { const p = node.transport?.closeConnection?.(d.victimKey); p?.catch?.(() => { /* best-effort */ }); }
@@ -2647,6 +2765,123 @@ export class AxonaPeer extends DHT {
     }
     this._seedInsert(sponsor, 'gate-admit');
     return true;
+  }
+
+  // ── Perimeter v0.1 §2 / v0.2 §B,E / v0.3 (Aster 388fda2d, 541a178f,
+  // fd1ff07b): ONE RETENTION POLICY. Every peer in the table is held for zero
+  // or more REASONS, re-derived from current state at every ask (no tags, no
+  // leases, no grandfathering):
+  //   NEAR    — among the kNear XOR-nearest admitted peers, and not SUSPECT.
+  //             SUSPECT = the transport reports the channel stale (open,
+  //             nothing received for heartbeat.staleMs). A stale near peer
+  //             keeps its channel and its ledger charge (v0.2 §B: SUSPECT
+  //             never releases a token); it loses only the NEAR reason, so
+  //             the near set reads short and discovery runs.
+  //   BAND    — its distance band holds sparseFloor or fewer admitted peers:
+  //             the finger structure that crosses subtrees.
+  //   SERVICE — the bridge's node, when this node holds it: the one SERVICE
+  //             case the design names today.
+  //   DUTY    — AxonaManager.obligationsOf names a duty (the duty gate).
+  // The four ELECTIVE close sites consult this one policy: the gate's swap
+  // victim and refused-grace here (NEAR/BAND/SERVICE as protection, DUTY as
+  // mayRetire), and the mesh's degree-cap and make-room through
+  // protectedPeers(), installed as the transport's obliged-peers reader at
+  // start. Resource-release closes (dispose, reset, bind-timeout,
+  // attempt-replaced, retry, provisional-cap, negotiation-timeout and the
+  // involuntary reasons) consult nothing: they release their own incarnation.
+  _retentionCfg() {
+    const g = this._gateCfg, m = this._maintainCfg;
+    return { kNear: g?.kNear ?? m?.kNear ?? 5, sparseFloor: g?.sparseFloor ?? 2 };
+  }
+  /** Readable table entries [{ key, big, s }]; an unreadable key is skipped (never counted, never a victim). */
+  _tableEntries() {
+    const syn = this._node?.synaptome; const out = [];
+    if (!syn) return out;
+    for (const [key, s] of syn) {
+      let big = null;
+      if (typeof key === 'bigint') big = key;
+      else if (typeof key === 'string' && isHexId(key)) { try { big = fromHex(key); } catch { big = null; } }
+      if (big !== null) out.push({ key, big, s });
+    }
+    return out;
+  }
+  /** SUSPECT: the transport says the channel is stale. A transport with no reader says no. */
+  _isStalePeer(big) {
+    const t = this._node?.transport;
+    if (typeof t?.isStale !== 'function') return false;
+    try { return t.isStale(big) === true; } catch { return false; }
+  }
+  /**
+   * The reasons of every readable table entry, computed once per ask.
+   * `extra` ranks a CANDIDATE into the near set for the displacement decision
+   * (v0.1 §6): with it present the farthest current near peer may fall out
+   * of NEAR. `nearCeil` is the kNear-th nearest HELD distance (without the
+   * candidate), null when fewer than kNear non-stale peers are held.
+   * @returns {{ map: Map<any, {near,band,service,duty,any}>, counts: Map, groupOf: Function, cfg: object, nearCeil: bigint|null }}
+   */
+  _retentionMap(extra = null) {
+    const node = this._node; const domain = this._domain; const cfg = this._retentionCfg();
+    const selfId = node.id; const groups = domain.STRATA_GROUPS;
+    const groupOf = (big) => Math.min(groups - 1, clz264(selfId ^ big) >>> 2);
+    const entries = this._tableEntries();
+    const counts = new Map();
+    for (const e of entries) { const g = groupOf(e.big); counts.set(g, (counts.get(g) ?? 0) + 1); }
+    const byD = (a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+    const held = entries.filter((e) => !this._isStalePeer(e.big)).map((e) => ({ key: e.key, d: selfId ^ e.big })).sort(byD);
+    const nearCeil = held.length >= cfg.kNear ? held[cfg.kNear - 1].d : null;
+    const ranked = (extra !== null) ? [...held, { key: null, d: selfId ^ extra }].sort(byD) : held;
+    const nearKeys = new Set(ranked.slice(0, cfg.kNear).map((r) => r.key).filter((k) => k !== null));
+    let bridge = null;
+    try { const b = node.transport?.bridgeNodeIdBig; bridge = (b != null) ? asId(b) : null; } catch { bridge = null; }
+    let am = this._axonaManager ?? null;
+    if (!am) { try { am = this._engine?.axonFor?.(this._node) ?? null; } catch { am = null; } }
+    const out = new Map();
+    for (const e of entries) {
+      const near = nearKeys.has(e.key);
+      const band = (counts.get(groupOf(e.big)) ?? 0) <= cfg.sparseFloor;
+      const service = bridge !== null && e.big === bridge;
+      let duty = false;
+      if (am && typeof am.obligationsOf === 'function') {
+        try { duty = am.obligationsOf(toHex(e.big).toLowerCase()).length > 0; } catch { duty = true; }   // cannot say → held
+      }
+      out.set(e.key, { near, band, service, duty, any: near || band || service || duty });
+    }
+    return { map: out, counts, groupOf, cfg, nearCeil };
+  }
+  /** The reasons this node holds `id` for (Perimeter §2); all false when unheld. */
+  retentionOf(id) {
+    const big = asId(id);
+    for (const [key, r] of this._retentionMap().map) {
+      const kb = (typeof key === 'bigint') ? key : fromHex(key);
+      if (kb === big) return { ...r };
+    }
+    return { near: false, band: false, service: false, duty: false, any: false };
+  }
+  /** Lowercase hex of every peer held by ANY reason: the mesh's protection reader. null = cannot say. */
+  protectedPeers() {
+    const out = new Set();
+    try {
+      for (const [key, r] of this._retentionMap().map) {
+        if (r.any) out.add(((typeof key === 'bigint') ? toHex(key) : key).toLowerCase());
+      }
+    } catch { return null; }
+    return out;
+  }
+  /** Perimeter v0.1 §6: at cap, a dial is covered when the gate predicts admission by near displacement. */
+  _improveAdmits(peerId) {
+    if (!this._gateCfg) return false;
+    try { const d = this.gatePreflight(peerId); return d.admit === true && d.how === 'gate-swap' && d.near === true; }
+    catch { return false; }
+  }
+  /** Health: the perimeter's live shape plus the counters. */
+  perimeterStats() {
+    let held = 0, near = 0, stale = 0, band = 0, service = 0, duty = 0;
+    try {
+      const R = this._retentionMap();
+      for (const [, r] of R.map) { held++; if (r.near) near++; if (r.band) band++; if (r.service) service++; if (r.duty) duty++; }
+      for (const e of this._tableEntries()) if (this._isStalePeer(e.big)) stale++;
+    } catch { /* best-effort */ }
+    return { kNear: this._retentionCfg().kNear, held, near, stale, band, service, duty, ...this._perimeterStats };
   }
 
   /** The gate's pure decision. See _admitOrImprove / gatePreflight. */
@@ -2714,30 +2949,39 @@ export class AxonaPeer extends DHT {
       counts.set(g, (counts.get(g) ?? 0) + 1);
     }
 
-    // Condition-based protection, re-verified now (no leases, no grandfathering).
-    const byDist = [...entries].sort((a, b) => {
-      const da = selfId ^ a.big, db = selfId ^ b.big;
-      return da < db ? -1 : da > db ? 1 : 0;
-    });
-    const protectedKeys = new Set(byDist.slice(0, cfg.kNear).map(e => e.key));   // last-hop quota
-    for (const e of entries) {
-      if ((counts.get(groupOf(e.big)) ?? 0) <= cfg.sparseFloor) protectedKeys.add(e.key);  // sparse-band floor
-    }
+    // Perimeter v0.2 §E / v0.3 §4: the ONE retention policy, re-derived now
+    // (no leases, no grandfathering), with the sponsor ranked INTO the near
+    // set. NEAR DISPLACEMENT (v0.1 §6, "a closer node pushes one off"): a
+    // sponsor strictly closer than the kNear-th nearest held peer takes a
+    // NEAR slot; the farthest current near peer then keeps its channel only
+    // by another reason. Strictly closer is monotone — the kNear-th distance
+    // can only fall, so no oscillation margin is needed and the displaced
+    // peer, being farther, can never displace back (v0.3 §8: for a fixed
+    // population; under churn a tendency, not a bound).
+    const R = this._retentionMap(sponsor);
+    const sponsorDist = selfId ^ sponsor;
+    const nearImprove = R.nearCeil !== null && sponsorDist < R.nearCeil;
+    const protectedKeys = new Set();
+    for (const [key, r] of R.map) if (r.near || r.band || r.service) protectedKeys.add(key);
 
-    // Victim: lowest-vitality evictable edge in the densest band that clears
-    // the anti-oscillation margin (see boundary semantics above).
+    // Victim: lowest-vitality evictable edge in the densest band. A band
+    // swap clears the anti-oscillation margin (boundary semantics above); a
+    // near improvement does not need one.
     const candCount = counts.get(groupOf(sponsor)) ?? 0;
     let victimKey = null, victimVit = Infinity, victimCount = -1;
     for (const e of entries) {
       if (protectedKeys.has(e.key)) continue;
       const c = counts.get(groupOf(e.big)) ?? 0;
-      if (c < candCount + 2) continue;                                  // under the margin: refuse this pairing
+      if (!nearImprove && c < candCount + 2) continue;                  // under the margin: refuse this pairing
       const v = this._vitality(e.s);
       if (c > victimCount || (c === victimCount && v < victimVit)) {
         victimKey = e.key; victimVit = v; victimCount = c;
       }
     }
-    if (victimKey === null) return { admit: false, why: 'no-swap' };    // refuse: no admissible swap
+    if (victimKey === null) {
+      if (nearImprove) this._perimeterStats.nearImproveRefused++;
+      return { admit: false, why: nearImprove ? 'no-swap-near' : 'no-swap' };   // refuse: no admissible swap
+    }
 
     // Row 4: the duty gate. A voluntary close of a peer this node owes
     // something to is refused and reported; the swap is void.
@@ -2746,7 +2990,7 @@ export class AxonaPeer extends DHT {
       this._emitLog?.('info', 'swap-blocked', { victim: toHex(victimKey), duty: gate.duty });
       return { admit: false, why: 'duty', duty: gate.duty };
     }
-    return { admit: true, how: 'gate-swap', victimKey };
+    return { admit: true, how: 'gate-swap', victimKey, near: nearImprove };
   }
 
   /**
@@ -4047,6 +4291,7 @@ export class AxonaPeer extends DHT {
       // second mechanism.
       lookahead:     (() => { try { return this.lookaheadStats(); } catch { return null; } })(),
       servingCapable: (() => { try { return { ...(this._servingCapableStats ?? { calls: 0, capable: 0, incapable: 0, exception: 0 }), now: this._servingCapable() }; } catch { return null; } })(),   // R4
+      perimeter:     (() => { try { return this.perimeterStats(); } catch { return null; } })(),   // Perimeter v0.1–v0.3
       started:       this._started === true,
       transport,
       meshDegraded,
@@ -5295,7 +5540,7 @@ export class AxonaPeer extends DHT {
       // availability here: the token is RELEASED (no count), nothing
       // consumed, the caller keeps the nomination. Legacy (unarmed) paths
       // unchanged.
-      if (this._fillArmed() && this._fillAvailability(true) <= 0) {
+      if (this._fillArmed() && this._fillAvailability(true) <= 0 && !this._improveAdmits(peerId)) {   // Perimeter v0.1 §6: a predicted displacement is covered
         this._verifyProbes = Math.max(0, (this._verifyProbes ?? 1) - 1);
         this._attemptGuard?.release?.(peerId, k);
         this._dialDeferredDeficit = (this._dialDeferredDeficit ?? 0) + 1;
@@ -5331,7 +5576,7 @@ export class AxonaPeer extends DHT {
       // dial the consume has already run and the open was the attempt, so a
       // failed open falls through to end(false) below when the identity is
       // still eligible (the re-read above released it otherwise), as before.
-      if (!openIsTheDial && this._fillArmed() && this._fillAvailability(true) <= 0) {
+      if (!openIsTheDial && this._fillArmed() && this._fillAvailability(true) <= 0 && !this._improveAdmits(peerId)) {
         this._attemptGuard?.release?.(peerId, k);
         this._dialDeferredDeficit = (this._dialDeferredDeficit ?? 0) + 1;
         return 'deferred-deficit';

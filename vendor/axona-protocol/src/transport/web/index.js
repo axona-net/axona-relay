@@ -1609,6 +1609,20 @@ export function webTransport({
   };
 
   /**
+   * Perimeter v0.2 §B: is this peer's channel SUSPECT (open, nothing received
+   * for heartbeat.staleMs)? Read by AxonaPeer's retention policy to drop the
+   * NEAR reason without touching the channel. Takes the nodeId (BigInt);
+   * false for an unknown or non-mesh peer.
+   */
+  composite.isStale = (nodeId) => {
+    try {
+      if (typeof nodeId !== 'bigint') return false;
+      const meshId = webrtc.meshIdFor(nodeId);
+      return meshId != null && mesh.isStale(meshId) === true;
+    } catch { return false; }
+  };
+
+  /**
    * Row 12: the DIRECTORY sample. Every bridge `peer-list` frame is handed to
    * these handlers (hex nodeIds, as the frame carries them) in addition to the
    * mesh's own bootstrap dialing of it, which is unchanged. The kernel

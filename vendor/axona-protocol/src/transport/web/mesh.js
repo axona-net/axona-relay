@@ -601,6 +601,16 @@ export class MeshManager {
   }
 
   /**
+   * SUSPECT (Perimeter v0.2 §B): the channel is open but nothing has been
+   * received for longer than heartbeat.staleMs. Routing confidence only —
+   * the channel stays charged in the ledger and is closed only by the
+   * heartbeat's own dead eviction (pong-timeout), never by this reading.
+   */
+  isStale(peerId) {
+    return this._peers.get(peerId)?.state === 'stale';
+  }
+
+  /**
    * Whether we hold ANY peer state for `peerId` — including an in-progress
    * negotiation (new / signaling / datachannel-opening), not just an open
    * channel.  connectViaRelay uses this so a repeated connect request (peer
