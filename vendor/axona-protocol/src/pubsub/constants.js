@@ -243,11 +243,26 @@ export const SATURATION_PRESSURE = 0.6;
 // LATENCY; a missed replication costs DURABILITY. Measuring latency work as debt
 // would re-introduce the false-positive risk this table exists to remove. That is
 // a judgement, not a measurement — flagged as such to the council 2026-07-30.
+// THE ROOT DEADLINE IS THREE PERIODS, NOT ONE (4.113.0; council 11a8c5d5,
+// 2026-10-13). Until 4.112.0 ROOT's deadline was ROOT_REPLICATE_FULL_MS itself,
+// the same 60 s at which the push re-arms (repairPlane: `age >= ROOT_REPLICATE_
+// FULL_MS` fires the push). So on every node holding a root the ROOT age cycled
+// 0 → 60 s each minute, the pressure 0 → 1.0, crossing SATURATION_PRESSURE 0.6
+// at 36 s: a root serviced ON SCHEDULE read saturated for the last 24 s of
+// every minute, refused new roles and HANDOFF for that window, and its bridge
+// reported "degraded" (east 0.874 and west 0.589 in one read, two phases of one
+// cycle). Every other row measures a 60 s renewal against DROP_MS 180 s, three
+// to one; ROOT measured 60 against 60. Now ROOT uses the same ratio: a push on
+// schedule (60 s, plus one 5 s tick) peaks at 65/180 = 0.36; saturation (0.6)
+// means a push 48 s late, most of a period; overdue (1.0) means two pushes
+// missed. The push cadence itself is unchanged.
+export const ROOT_FULL_DEADLINE_MS = 3 * ROOT_REPLICATE_FULL_MS;   // 180 s
+
 export const OBLIGATIONS = Object.freeze({
   ROOT: Object.freeze({
     what:     'replicate full state to the K-closest cohort',
     stamp:    'lastFullAt',              // role.sync.lastFullAt
-    deadline: ROOT_REPLICATE_FULL_MS,    // 60s — the root's own re-arm interval
+    deadline: ROOT_FULL_DEADLINE_MS,     // 180s — three push periods (4.113.0); was the period itself
     why:      'a missed full push costs DURABILITY: the cohort holds a stale copy',
   }),
   CHILD: Object.freeze({
