@@ -380,6 +380,14 @@ export class AxonaPeer extends DHT {
     /** Perimeter counters, surfaced in health().perimeter. */
     this._perimeterStats = { nearImproves: 0, nearImproveRefused: 0, improveDials: 0, bandProbes: 0, bandNominated: 0 };
     this._bandProbeAt = new Map();      // band group → fill tick of the last probe
+    // TWO POOLS (G6 of the two-pool packet, axona-docs ca52384). Promotion
+    // I→M is a transaction; while it runs the identity is PROMOTION_PENDING
+    // (id → epoch ms the window ends) and exempt from elective I eviction.
+    // The window is bounded by the profile's promoteMs; an entry past its
+    // bound is dropped on the next read as a deficit. Counters surface in
+    // health().degree.
+    this._promotionPending = new Map();
+    this._poolStats = { promoted: 0, promotionDeficit: 0, promotionExpired: 0, incomingKept: 0, rejectsDeferred: 0, transfersDeferred: 0, promotionInconsistent: 0 };
     this._attemptGuard = attemptGuard
       ? new AttemptGuard(typeof attemptGuard === 'object' ? attemptGuard : {})
       : null;
@@ -753,6 +761,17 @@ export class AxonaPeer extends DHT {
           // only for the channel incarnation the attempt started (R8-2): an
           // old channel's deadline after a newer dial ends nothing, and the
           // mark below is not advanced for it either.
+          // G5: a CAPACITY REJECT from the far end is a deferral, not a
+          // failure of the identity: the token is RELEASED (no attempt
+          // counted, no mark advanced) and the candidate stays eligible.
+          if (reason === 'rejected' && !open) {
+            let rej = null;
+            try { rej = transport.lastRejectFor?.(peerBig) ?? null; } catch { rej = null; }
+            this._poolStats.rejectsDeferred++;
+            try { this._attemptGuard?.release?.(peerBig); } catch { /* bookkeeping only */ }
+            this._emitLog?.('info', 'negotiation-rejected-deferred', { peer: toHex(peerBig), reason: rej?.reason ?? null });
+            return;
+          }
           let ended = true;
           try { ended = this._attemptGuard ? this._attemptGuard.end(peerBig, open, Date.now(), undefined, inc ?? undefined) : true; } catch { ended = true; }
           if (this._attemptGuard && !ended && this._attemptGuard.inflightOf?.(peerBig)) {
@@ -1156,13 +1175,12 @@ export class AxonaPeer extends DHT {
         if (viaOk) { nextHopId = viaId; LS.viaHonoured++; } else { LS.viaUnavailable++; }
       }
       if (nextHopId === null) {
+        // G3: greedy over the usable set (M ∪ I; R3's path exclusion applied
+        // inside the iterator).
         let bestDist = meId ^ targetBig;
-        for (const syn of node.synaptome.values()) {
-          if (deadSet && deadSet.has(syn.peerId)) continue;
-          if (connOk && !connOk(syn.peerId)) continue;
-          if (exclude.has(syn.peerId)) continue;          // R3
-          const d = syn.peerId ^ targetBig;
-          if (d < bestDist) { bestDist = d; nextHopId = syn.peerId; }
+        for (const { id } of this._usablePeers({ exclude })) {
+          const d = id ^ targetBig;
+          if (d < bestDist) { bestDist = d; nextHopId = id; }
         }
       }
 
@@ -1713,7 +1731,9 @@ export class AxonaPeer extends DHT {
     if (!this._fillArmed()) return false;
     const node = this._node;
     if (typeof id !== 'bigint' || !node?.synaptome || id === node.id) return false;
-    if (node.synaptome.has(id) || this._isBoundPeer(id)) return false;
+    // G6: a BOUND peer is never a candidate — unless its channel is class I,
+    // in which case the "dial" is a promotion and it may be nominated.
+    if (node.synaptome.has(id) || (this._isBoundPeer(id) && this._classOf(id) !== 'I')) return false;
     if (this._fillCache.has(id)) return false;                      // dup: no-op
     if (!this._isEligibleCandidate(id)) { this._fillStats.nominateIneligible++; return false; }
     if (this._fillCache.size >= this._maintainCfg.kCache) { this._fillStats.nominateRefusedFull++; return false; }
@@ -1731,9 +1751,203 @@ export class AxonaPeer extends DHT {
   _fillAvailability(excludeOwn = false) {
     const node = this._node; const guard = this._attemptGuard;
     if (!node?.synaptome) return 0;
-    const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
+    const cap = this._capM();
     const inflight = guard ? guard.inflightCount() - (excludeOwn ? 1 : 0) : 0;
     return (cap - node.synaptome.size) - Math.max(0, inflight);
+  }
+
+  // ── TWO POOLS (axona-docs ca52384): the profile, the M cap, the classes ──
+
+  /** G4: the two-pool profile the transport is armed with, or null (not armed). */
+  _poolProfile() {
+    const t = this._node?.transport;
+    if (typeof t?.poolProfile !== 'function') return null;
+    try { const p = t.poolProfile(); return (p && p.armed === true) ? p : null; } catch { return null; }
+  }
+  /**
+   * G4: THE ONE M CAP. The engine's `_maxSynaptome` where an engine or the
+   * bridge's arming set it, else the profile's M, else the domain's
+   * MAX_SYNAPTOME. A profile that disagrees with an engine-set cap is an
+   * inconsistency, refused loudly (one source for each number, v0.3 §2).
+   */
+  _capM() {
+    const node = this._node;
+    const p = this._poolProfile();
+    const engineCap = node?._maxSynaptome;
+    if (p && engineCap != null && Number.isFinite(engineCap) && engineCap !== p.M) {
+      throw new TypeError(`AxonaPeer: pool profile M (${p.M}) !== node._maxSynaptome (${engineCap}) — one cap, one source`);
+    }
+    return engineCap ?? p?.M ?? this._domain.MAX_SYNAPTOME;
+  }
+  /** G1: the class the transport reserved `id`'s channel in: 'M' | 'I' | null. */
+  _classOf(id) {
+    const t = this._node?.transport;
+    if (typeof t?.classOf !== 'function') return null;
+    try { return t.classOf(id) ?? null; } catch { return null; }
+  }
+  /** G6: PROMOTION_PENDING ids whose window has not ended; expired ones are dropped as deficits. */
+  _promotionPendingIds(now = Date.now()) {
+    const out = new Set();
+    for (const [id, until] of this._promotionPending) {
+      if (now > until) { this._promotionPending.delete(id); this._poolStats.promotionExpired++; this._emitLog?.('info', 'promotion-expired', { peer: toHex(id) }); continue; }
+      out.add(id);
+    }
+    return out;
+  }
+  /**
+   * G6: PROMOTE an INCOMING bound peer into the managed table. One
+   * transaction: the gate decides (room in M, or a victim that passes
+   * mayRetire and the surviving-coverage rule), the ledger moves the channel's
+   * class, the table takes the entry. While it runs the identity is
+   * PROMOTION_PENDING. Ends in exactly one of: promoted; deficit (M full or
+   * duty-saturated — the channel stays I, nothing closes); or a lawful
+   * refusal of the reclass by the ledger (counted as a deficit too).
+   * @returns {boolean} true when the peer entered the table as M
+   */
+  _promote(sponsor) {
+    const node = this._node; const t = node?.transport;
+    const p = this._poolProfile();
+    const until = Date.now() + (p?.promoteMs ?? 30_000);
+    this._promotionPending.set(sponsor, until);
+    try {
+      const d = this._gateDecision(sponsor);
+      if (!d.admit) {
+        this._poolStats.promotionDeficit++;
+        this._emitLog?.('info', 'promotion-deficit', { peer: toHex(sponsor), why: d.why, duty: d.duty ?? null });
+        return false;
+      }
+      const ask = (opts) => { let rc = { ok: true, deferred: false }; if (typeof t?.reclass === 'function') { try { rc = t.reclass(sponsor, 'M', opts) ?? rc; } catch (err) { rc = { ok: false, deferred: false, why: `threw:${err?.message}` }; } } return rc; };
+      if (d.how !== 'gate-swap') {
+        // Room in M: the reclass is asked BEFORE the table commits, so a
+        // refused reclass leaves the table untouched.
+        const rc = ask({});
+        if (rc.ok === false) {
+          this._poolStats.promotionDeficit++;
+          this._emitLog?.('info', 'promotion-deficit', { peer: toHex(sponsor), why: rc.why ?? 'reclass-refused' });
+          return false;
+        }
+        const ok = this._gateCommit(sponsor, d);
+        if (ok) { this._poolStats.promoted++; this._emitLog?.('info', 'promoted', { peer: toHex(sponsor), how: d.how, victim: null }); }
+        return ok;
+      }
+      // A LAWFUL REPLACEMENT at M full (Aster b583c31c P2): M is full BY the
+      // victim, so a reclass asked first can only refuse. The commit runs
+      // first — the victim leaves the table and its close is issued — and
+      // the reclass is asked as a CAPACITY TRANSFER naming the victim: the
+      // ledger moves the class now if M has room, or DEFERS the move to the
+      // victim's confirmed close and applies it there. Nothing is charged
+      // twice: the victim keeps its M charge until the transport confirms,
+      // and the sponsor stays charged as I until the transfer lands.
+      const victim = d.victimKey;
+      const ok = this._gateCommit(sponsor, d);
+      if (!ok) { this._poolStats.promotionDeficit++; return false; }
+      const victimBig = (typeof victim === 'bigint') ? victim : (isHexId(victim) ? fromHex(victim) : null);
+      const rc = ask({ after: victimBig });
+      if (rc.ok === true) {
+        this._poolStats.promoted++;
+        this._emitLog?.('info', 'promoted', { peer: toHex(sponsor), how: d.how, victim: toHex(victimBig) });
+      } else if (rc.deferred === true) {
+        this._poolStats.promoted++; this._poolStats.transfersDeferred++;
+        this._emitLog?.('info', 'promotion-transfer-deferred', { peer: toHex(sponsor), victim: toHex(victimBig) });
+      } else {
+        // The table holds the entry and the ledger refused the move with no
+        // close to wait for: an inconsistency, counted and logged, never
+        // hidden. (A victim whose channel carries no class — armed mid-life —
+        // is the case that reaches here.)
+        this._poolStats.promotionInconsistent++;
+        this._emitLog?.('warn', 'promotion-reclass-refused-after-commit', { peer: toHex(sponsor), victim: toHex(victimBig), why: rc.why ?? null });
+      }
+      return true;
+    } finally {
+      this._promotionPending.delete(sponsor);
+    }
+  }
+  /**
+   * G3: THE USABLE SET — one iterator for every selector and for the degree
+   * health reports. M entries are the table's; I entries are the transport's
+   * bound peers whose channel is class I and that are not in the table.
+   * Every entry is deduplicated by id and filtered the same way: not dead,
+   * transport-connected, not on the walk's path. SUSPECT (the transport
+   * says stale) is filtered for I always, and for M only when the pools
+   * are armed — an unarmed node routes exactly as 4.113.0 did.
+   * @param {{ exclude?: Set<bigint>|null }} [opts]
+   * @returns {Array<{ id: bigint, cls: 'M'|'I', syn: object|null }>}
+   */
+  _usablePeers({ exclude = null } = {}) {
+    const node = this._node; const out = [];
+    if (!node?.synaptome) return out;
+    const t = node.transport;
+    const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
+    const dead = node._deadPeers;
+    const armed = this._poolProfile() !== null;
+    const seen = new Set();
+    const usable = (id, filterStale) => {
+      if (id === node.id || seen.has(id)) return false;
+      if (exclude && exclude.has(id)) return false;
+      if (dead && dead.has(id)) return false;
+      if (connOk && !connOk(id)) return false;
+      if (filterStale && this._isStalePeer(id)) return false;
+      return true;
+    };
+    for (const syn of node.synaptome.values()) {
+      const id = syn.peerId;
+      if (typeof id !== 'bigint') continue;
+      if (!usable(id, armed)) { seen.add(id); continue; }
+      seen.add(id); out.push({ id, cls: 'M', syn });
+    }
+    if (typeof t?.classOf === 'function' && typeof t?.boundPeers === 'function') {
+      let bound = [];
+      try { bound = t.boundPeers() ?? []; } catch { bound = []; }
+      for (const id of bound) {
+        if (typeof id !== 'bigint' || seen.has(id) || node.synaptome.has(id)) continue;
+        if (this._classOf(id) !== 'I') continue;
+        if (!usable(id, true)) { seen.add(id); continue; }
+        seen.add(id); out.push({ id, cls: 'I', syn: null });
+      }
+    }
+    return out;
+  }
+  /**
+   * G6, the legacy table inserts (packet inventory A9: _addByVitality and
+   * _evictAndReplace). On the web transport their openConnection is
+   * BOUND-ONLY — it builds no PeerConnection, so no allocation can happen
+   * there; the channel already exists and is charged in its class. What CAN
+   * happen is a TABLE entry for a channel of class I without a reclass, so
+   * the table and the ledger would disagree. Armed, an I-class channel must
+   * be reclassed to M before the entry lands; a refused reclass is a
+   * promotion deficit and the entry does not land. Unarmed: always allowed.
+   */
+  _legacyInsertAllowed(id, source) {
+    if (this._poolProfile() === null || this._classOf(id) !== 'I') return true;
+    const t = this._node?.transport;
+    let rc = { ok: false, why: 'no-reclass' };
+    if (typeof t?.reclass === 'function') { try { rc = t.reclass(id, 'M') ?? rc; } catch (err) { rc = { ok: false, why: `threw:${err?.message}` }; } }
+    if (rc.ok === false) {
+      this._poolStats.promotionDeficit++;
+      this._emitLog?.('info', 'promotion-deficit', { peer: toHex(id), why: rc.why ?? 'reclass-refused', source });
+      return false;
+    }
+    this._poolStats.promoted++;
+    this._emitLog?.('info', 'promoted', { peer: toHex(id), how: source });
+    return true;
+  }
+  /** G3: degree as the selectors see it, for health(). */
+  _degreeReport() {
+    const node = this._node; const p = this._poolProfile();
+    let I = 0;
+    const t = node?.transport;
+    if (typeof t?.classOf === 'function' && typeof t?.boundPeers === 'function') {
+      try { for (const id of t.boundPeers() ?? []) if (!node.synaptome?.has(id) && this._classOf(id) === 'I') I++; } catch { /* best-effort */ }
+    }
+    let usable = null;
+    try { usable = this._usablePeers().length; } catch { usable = null; }
+    return {
+      armed: p !== null,
+      profile: p ? { M: p.M, I: p.I, H: p.H, serveFloor: p.serveFloor, promoteMs: p.promoteMs } : null,
+      M: node?.synaptome?.size ?? 0, I, usable,
+      promotionPending: this._promotionPendingIds().size,
+      ...this._poolStats,
+    };
   }
 
   /** The channel-token half of the reservation: may the transport allocate an outbound channel now? */
@@ -1800,7 +2014,7 @@ export class AxonaPeer extends DHT {
     // unchanged: the sweep ends by age, a late signal for a swept token is
     // ignored by the guard as before.
     try { guard.sweep?.(); } catch { /* bookkeeping only */ }
-    const cap = node._maxSynaptome ?? this._domain.MAX_SYNAPTOME;
+    const cap = this._capM();
     const admitted = node.synaptome.size;
     const inflight = guard.inflightCount();
     // INTEGRATION (the Rule 2 pin; Aster 2e8142a5 R2-I1): dialing past the
@@ -2571,6 +2785,14 @@ export class AxonaPeer extends DHT {
     // not combined with the gate. Flag-off falls through to the legacy flow
     // below, byte-identical.
     if (this._gateCfg) {
+      // G6: with the pools ARMED, a bound peer whose channel is class I is
+      // not an unclassified candidate the gate refuses and closes after
+      // grace — it is lawfully I. Offering it to the table is a PROMOTION:
+      // one transaction, and on refusal the channel is KEPT as I.
+      if (this._poolProfile() !== null && this._classOf(sponsor) === 'I') {
+        if (!this._promote(sponsor)) this._poolStats.incomingKept++;
+        return;
+      }
       const admitted = this._admitOrImprove(sponsor);
       if (!admitted) {
         // Refused at cap with no admissible swap: close the just-bound
@@ -2864,6 +3086,9 @@ export class AxonaPeer extends DHT {
       for (const [key, r] of this._retentionMap().map) {
         if (r.any) out.add(((typeof key === 'bigint') ? toHex(key) : key).toLowerCase());
       }
+      // G6: a PROMOTION_PENDING identity is exempt from elective eviction for
+      // the bounded window of its transaction.
+      for (const id of this._promotionPendingIds()) out.add(toHex(id).toLowerCase());
     } catch { return null; }
     return out;
   }
@@ -2890,7 +3115,7 @@ export class AxonaPeer extends DHT {
     const domain = this._domain;
     const cfg = this._gateCfg;
     const syn = node.synaptome;
-    const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
+    const cap = this._capM();
 
     if (syn.size < cap) {
       // Join lane (slice 3): with kJoin > 0 the table's LAST kJoin slots are
@@ -4275,9 +4500,12 @@ export class AxonaPeer extends DHT {
       }
     }
 
+    let degree = null;   // G3: M / I / usable from the ONE iterator the selectors read
+    try { degree = this._degreeReport(); } catch { degree = null; }
     return {
       nodeId:        this._nodeIdHex(),
       synaptomeSize: this._node?.synaptome?.size ?? 0,
+      degree,
       peers:         this.peers(),
       subscriptions: this._subscriptions.size,
       axonRoles,
@@ -5036,10 +5264,9 @@ export class AxonaPeer extends DHT {
     if (b !== null && eligible(b)) return b;
     const target = asId(targetId);
     let best = null, bestDist = null;
-    for (const syn of node.synaptome.values()) {
-      if (!eligible(syn.peerId)) continue;
-      const d = syn.peerId ^ target;
-      if (bestDist === null || d < bestDist) { bestDist = d; best = syn.peerId; }
+    for (const { id } of this._usablePeers({ exclude })) {   // G3: M ∪ I
+      const d = id ^ target;
+      if (bestDist === null || d < bestDist) { bestDist = d; best = id; }
     }
     return best;
   }
@@ -5054,16 +5281,13 @@ export class AxonaPeer extends DHT {
     // one hop short.  Skipping unconnected synapses lets routing pick the
     // next-best LIVE hop and route around the dead node — essential for
     // bridgeless peer-relay right after the central bridge drops.
-    const t = this._node.transport;
-    const connOk = (typeof t?.isConnected === 'function') ? t.isConnected.bind(t) : null;
-    const dead   = this._node._deadPeers;
+    // G3: the usable set — M ∪ I, deduplicated, one filter (dead, connected,
+    // and SUSPECT for I; for M too when the pools are armed).
     let bestPeerId = null;
     let bestDist   = this._node.id ^ target;
-    for (const syn of this._node.synaptome.values()) {
-      if (dead && dead.has(syn.peerId)) continue;
-      if (connOk && !connOk(syn.peerId)) continue;
-      const d = syn.peerId ^ target;
-      if (d < bestDist) { bestDist = d; bestPeerId = syn.peerId; }
+    for (const { id } of this._usablePeers()) {
+      const d = id ^ target;
+      if (d < bestDist) { bestDist = d; bestPeerId = id; }
     }
     return bestPeerId;
   }
@@ -5131,9 +5355,22 @@ export class AxonaPeer extends DHT {
     const onPath = (id) => !!(exclude && exclude.has(id));
     const eligible = (id) => id !== node.id && !onPath(id) && !(dead && dead.has(id)) && !(connOk && !connOk(id));
 
-    // 1. The free pass. incomingSynapses are reverse channels — adjacent, no
-    //    network cost. The nearest eligible one closer than self is the answer.
+    // 1. The free pass. Adjacent reverse channels cost no network: G3 reads
+    //    the INCOMING pool (class-I bound peers, the usable filter applied)
+    //    first — in production that is the only reverse set that exists —
+    //    and then incomingSynapses, the simulator engines' reverse index,
+    //    which no kernel path populates. The nearest eligible one closer
+    //    than self is the answer.
     let incomingBest = null, incomingDist = myDist;
+    // (A bare stub `this` without the iterator — the lookahead fences drive
+    // this method with one — reads as an unarmed node: no I set.)
+    const usable = (typeof this._usablePeers === 'function') ? this._usablePeers({ exclude }) : null;
+    for (const { id, cls } of usable ?? []) {
+      if (cls !== 'I') continue;
+      const d = id ^ target;
+      if (d < myDist) LS.incomingCandidateLinks++;
+      if (d < incomingDist) { incomingDist = d; incomingBest = id; }
+    }
     for (const syn of node.incomingSynapses.values()) {
       const d = syn.peerId ^ target;
       if (d < myDist) LS.incomingCandidateLinks++;
@@ -5144,15 +5381,23 @@ export class AxonaPeer extends DHT {
       return { first: incomingBest, via: null };
     }
 
-    // 2. Filter parity with greedy (route_msg handler and _greedyNextHopToward).
+    // 2. Filter parity with greedy (route_msg handler and _greedyNextHopToward):
+    //    the probe set is the FULL usable union — the usable M set (the same
+    //    iterator; skip counters kept for the census) plus every usable I
+    //    peer (Aster b583c31c P1: an incoming peer that is not itself closer
+    //    can still name a closer second hop, so it is probed like any other
+    //    adjacent peer).
+    const usableM = usable ? new Set(usable.filter((u) => u.cls === 'M').map((u) => u.id)) : null;
     const probeTargets = [];
     for (const syn of node.synaptome.values()) {
       const id = syn.peerId;
       if (dead && dead.has(id))        { LS.probesSkippedDead++;        continue; }
       if (connOk && !connOk(id))       { LS.probesSkippedUnconnected++; continue; }
       if (onPath(id))                  { LS.probesSkippedOnPath++;      continue; }
+      if (usableM && !usableM.has(id)) { LS.probesSkippedUnconnected++; continue; }   // SUSPECT under armed pools
       probeTargets.push(id);
     }
+    if (usable) for (const u of usable) if (u.cls === 'I') probeTargets.push(u.id);
     if (probeTargets.length === 0) { LS.answeredNull++; return null; }
     LS.probingCalls++;
     LS.probesEmitted += probeTargets.length;
@@ -5647,7 +5892,7 @@ export class AxonaPeer extends DHT {
   async _addByVitality(newSyn) {
     const node   = this._node;
     const domain = this._domain;
-    const cap = node._maxSynaptome ?? domain.MAX_SYNAPTOME;
+    const cap = this._capM();
 
     if (node.synaptome.size >= cap) {
       this._vitalitySwapSkipped = (this._vitalitySwapSkipped || 0) + 1;
@@ -5659,6 +5904,7 @@ export class AxonaPeer extends DHT {
 
     const opened = await node.transport.openConnection(newSyn.peerId);
     if (!opened) return false;
+    if (!this._legacyInsertAllowed(newSyn.peerId, 'vitality')) return false;   // G6: an I channel enters the table only by reclass
 
     const measuredLat = node.transport.getLatency(newSyn.peerId);
     newSyn.latency = (measuredLat >= 0) ? measuredLat : 200;
@@ -5773,6 +6019,7 @@ export class AxonaPeer extends DHT {
 
     const opened = await node.transport.openConnection(candidate.id);
     if (!opened) return null;
+    if (!this._legacyInsertAllowed(candidate.id, 'evictReplace')) return null;   // G6
 
     const weights = [];
     for (const s of node.synaptome.values()) weights.push(s.weight);
@@ -6346,6 +6593,14 @@ export class AxonaPeer extends DHT {
       if ((s.peerId ^ targetKey) >= currentDist) continue;
       if (dead.has(s.peerId)) continue;
       candidates.push(s);
+    }
+    // G3: the INCOMING pool joins the candidate set as the reverse index
+    // does, shaped like one of its entries (no trained weight).
+    for (const u of this._usablePeers()) {
+      if (u.cls !== 'I') continue;
+      if ((u.id ^ targetKey) >= currentDist) continue;
+      const stratum = clz264(node.id ^ u.id);
+      candidates.push({ peerId: u.id, latency: 50, weight: 0.1, stratum });
     }
 
     if (deadSynapses.length > 0) {

@@ -64,7 +64,21 @@ export const LEDGER_DEFAULTS = Object.freeze({
   pPending: 8,
   closeEscalateMs: 10_000,
   enforce: false,
+  // G1 (two-pool packet, axona-docs ca52384): a reservation not consumed by
+  // an allocation within this long is released by the sweep. Equal to the
+  // mesh's NEGOTIATION_DEADLINE_MS by construction: nothing outlives the
+  // negotiation it was taken for.
+  reserveTtlMs: 30_000,
+  // TWO POOLS (G1/G4). `pools` is a profile from pool_profile.js or null.
+  // null = NOT ARMED: the direction-only predicate above, no class on any
+  // record, byte-identical to 4.113.0. A profile arms the class bounds:
+  //   charged(M) + reserved(M) ≤ M, charged(I) + reserved(I) ≤ I,
+  //   charged(all) + reserved(all) ≤ H.
+  pools: null,
 });
+
+/** Channel classes (v1.1 §1): peer-intent classes assigned at reservation. */
+export const CLS = Object.freeze({ M: 'M', I: 'I' });
 
 export class ChannelLedger {
   /**
@@ -93,6 +107,20 @@ export class ChannelLedger {
     this.pPending = num(o.pPending, LEDGER_DEFAULTS.pPending, 1);
     this.closeEscalateMs = num(o.closeEscalateMs, LEDGER_DEFAULTS.closeEscalateMs, 0);   // 0 = escalation off
     this.enforce  = o.enforce === true;
+    this.reserveTtlMs = num(o.reserveTtlMs, LEDGER_DEFAULTS.reserveTtlMs, 0);
+    // G1/G4: the profile arms the class bounds and REPLACES pPending and
+    // cInbound with its own (one source for each number, v0.3 §2's rule).
+    this.pools = (o.pools && typeof o.pools === 'object' && o.pools.armed === true) ? o.pools : null;
+    if (this.pools) {
+      this.pPending = num(this.pools.pPending, this.pPending, 1);
+      this.cInbound = Math.max(1, num(this.pools.cInbound, this.cInbound, 0));
+      // H is the physical bound the profile names; cPhys follows it so the
+      // legacy 'phys' row and the pool row agree.
+      this.cPhys = num(this.pools.H, this.cPhys, 1);
+    }
+    /** token → { token, cls, dir, attempt, generation, at, seq }: reservations not yet consumed. */
+    this._res = new Map();
+    this._resSeq = 0;
     this._onEscalate = typeof o.onEscalate === 'function' ? o.onEscalate : null;
     this._now     = typeof o.now === 'function' ? o.now : Date.now;
     this._log     = typeof o.log === 'function' ? o.log : () => {};
@@ -119,7 +147,172 @@ export class ChannelLedger {
     this._stats = {
       allocated: 0, refusedOut: 0, refusedIn: 0, wouldRefuseOut: 0, wouldRefuseIn: 0,
       closeEscalated: 0, staleEvent: 0, goneTotal: 0,
+      // G1: reservations
+      reserved: 0, reservationsConsumed: 0, reservationsReleased: 0, reservationsExpired: 0,
+      refusedM: 0, refusedI: 0, wouldRefuseM: 0, wouldRefuseI: 0, reclassed: 0, reclassRefused: 0,
+      allocUnreserved: 0, reclassDeferred: 0, reclassApplied: 0,
     };
+    /** G6 capacity transfer: t → { cls, after } — a reclass waiting for channel `after` to be GONE. */
+    this._pendingReclass = new Map();
+  }
+
+  // ── G1: classes and reservations ──────────────────────────────────
+
+  /** Is the two-pool contract armed on this ledger? */
+  get armed() { return this.pools !== null; }
+
+  /** Live channels charged in class `cls` ('M' | 'I'); null counts the unclassified. */
+  chargedOf(cls) {
+    let n = 0;
+    for (const c of this._chan.values()) if (LIVE.has(c.state) && c.cls === cls) n++;
+    return n;
+  }
+  /** Reservations not yet consumed in class `cls`. */
+  reservedOf(cls) {
+    let n = 0;
+    for (const r of this._res.values()) if (r.cls === cls) n++;
+    return n;
+  }
+  reservedAll() { return this._res.size; }
+  /** Reservations not yet consumed in direction `dir` (the legacy rows read these). */
+  reservedDirOf(dir) {
+    let n = 0;
+    for (const r of this._res.values()) if (r.dir === dir) n++;
+    return n;
+  }
+
+  /** Release every reservation older than reserveTtlMs. Called by reserve() and by the owner's sweep. */
+  sweepReservations(now = this._now()) {
+    if (this.reserveTtlMs <= 0) return 0;
+    let n = 0;
+    for (const [t, r] of this._res) {
+      if (now - r.at > this.reserveTtlMs) { this._res.delete(t); n++; this._stats.reservationsExpired++; }
+    }
+    if (n) this._log('reservations-expired', { n, remaining: this._res.size });
+    return n;
+  }
+
+  /**
+   * G1: RESERVE before anything physical exists. The same bounds mayAllocate
+   * reads (phys / inbound / pending) plus, when armed, the class bounds. With
+   * `enforce` false a would-be refusal is counted and a token is still
+   * issued, so the fleet can be measured by class before any bound is
+   * believed. A token is consumed by allocate(), released by release(), or
+   * expires after reserveTtlMs.
+   *
+   * @param {{ cls?: 'M'|'I'|null, dir: 'in'|'out', attempt?: string|null, generation?: string|null }} req
+   * @returns {{ ok: boolean, token: string|null, why: string|null }}
+   */
+  reserve({ cls = null, dir, attempt = null, generation = null } = {}) {
+    this.sweepReservations();
+    const d = dir === 'in' ? 'in' : 'out';
+    let why = null;
+    // The rows, in order: the physical bound, the class bound (armed only),
+    // then the direction rows (unbound inbound negotiations, outbound
+    // attempts). Reservations count beside charges on every row, so two
+    // reservers in one macrotask see each other.
+    const resAll = this._res.size;
+    let k = null;
+    if (this.armed) k = (cls === CLS.M || cls === CLS.I) ? cls : (d === 'in' ? CLS.I : CLS.M);
+    if (this.chanAll() + resAll >= this.cPhys) why = 'phys';
+    else if (k !== null && this.chargedOf(k) + this.reservedOf(k) >= this.pools[k]) why = `pool-${k}`;
+    else if (d === 'in' && this.chanInboundUnbound() + this.reservedDirOf('in') >= this.cInbound) why = 'inbound';
+    else if (d === 'out' && this.chanOutboundPending() + this.reservedDirOf('out') >= this.pPending) why = 'pending';
+    if (why !== null) {
+      if (this.enforce) {
+        if (d === 'in') this._stats.refusedIn++; else this._stats.refusedOut++;
+        if (k === CLS.M) this._stats.refusedM++; else if (k === CLS.I) this._stats.refusedI++;
+        this._log('reserve-refused', { cls: k, dir: d, why, all: this.chanAll(), reserved: resAll, chargedM: this.chargedOf(CLS.M), chargedI: this.chargedOf(CLS.I) });
+        return { ok: false, token: null, why };
+      }
+      if (d === 'in') this._stats.wouldRefuseIn++; else this._stats.wouldRefuseOut++;
+      if (k === CLS.M) this._stats.wouldRefuseM++; else if (k === CLS.I) this._stats.wouldRefuseI++;
+    }
+    const token = `r${++this._resSeq}`;
+    this._res.set(token, { token, cls: k, dir: d, attempt, generation, at: this._now(), seq: this._resSeq });
+    this._stats.reserved++;
+    return { ok: true, token, why };   // why non-null = counted, not refused
+  }
+
+  /** Release an unconsumed reservation. Idempotent; a consumed or unknown token is a stale event. */
+  release(token) {
+    if (token == null) return false;
+    if (!this._res.delete(token)) { this._stats.staleEvent++; return false; }
+    this._stats.reservationsReleased++;
+    return true;
+  }
+
+  /** For tests and the owner: the reservation record for a token, or null. */
+  reservation(token) { return this._res.get(token) ?? null; }
+
+  /**
+   * G6: move a live channel to class `cls` (promotion I→M, demotion M→I)
+   * without a second allocation. Refused (enforce on) when the target class
+   * is full; counted when enforce is off.
+   * @returns {{ ok: boolean, why: string|null, prev: string|null }}
+   */
+  reclass(t, cls, { after = null } = {}) {
+    const c = this._chan.get(t);
+    if (!c || !LIVE.has(c.state)) { this._stats.staleEvent++; return { ok: false, why: 'no-channel', prev: null, deferred: false }; }
+    const k = (cls === CLS.M || cls === CLS.I) ? cls : null;
+    if (k === null) return { ok: false, why: 'bad-class', prev: c.cls, deferred: false };
+    const prev = c.cls;
+    if (prev === k) return { ok: true, why: null, prev, deferred: false };
+    let why = null;
+    if (this.armed && this.chargedOf(k) + this.reservedOf(k) >= this.pools[k]) why = `pool-${k}`;
+    if (why !== null && this.enforce) {
+      // CAPACITY TRANSFER (Aster b583c31c P2): the class is full because a
+      // channel this move replaces (`after`) is still charged until the
+      // transport confirms its close. The move is DEFERRED to that
+      // confirmation — gone(after) applies it — and nothing is charged twice
+      // meanwhile. With no such channel named, or one already gone, refuse.
+      const a = after != null ? this._chan.get(after) : null;
+      if (a && LIVE.has(a.state) && a.cls === k && a.t !== t) {
+        this._pendingReclass.set(t, { cls: k, after });
+        this._stats.reclassDeferred++;
+        this._log('reclass-deferred', { t, from: prev, to: k, after });
+        return { ok: false, why, prev, deferred: true };
+      }
+      this._stats.reclassRefused++;
+      this._log('reclass-refused', { t, from: prev, to: k, why });
+      return { ok: false, why, prev, deferred: false };
+    }
+    c.cls = k;
+    this._stats.reclassed++;
+    this._log('reclass', { t, from: prev, to: k, counted: why });
+    return { ok: true, why, prev, deferred: false };
+  }
+  /** The pending transfer for channel `t`, or null. */
+  pendingReclass(t) { return this._pendingReclass.get(t) ?? null; }
+  /** Apply every transfer that waited on `goneT`, in order, while the class has room. */
+  _applyPendingReclass(goneT) {
+    for (const [t, p] of [...this._pendingReclass]) {
+      if (p.after !== goneT) continue;
+      this._pendingReclass.delete(t);
+      const c = this._chan.get(t);
+      if (!c || !LIVE.has(c.state)) { this._stats.staleEvent++; continue; }
+      if (this.armed && this.chargedOf(p.cls) + this.reservedOf(p.cls) >= this.pools[p.cls]) {
+        this._stats.reclassRefused++;
+        this._log('reclass-deferred-refused', { t, to: p.cls, after: goneT });
+        continue;
+      }
+      const prev = c.cls; c.cls = p.cls;
+      this._stats.reclassed++; this._stats.reclassApplied++;
+      this._log('reclass-applied', { t, from: prev, to: p.cls, after: goneT });
+    }
+  }
+
+  /** The class of the live channel serving `meshId`, or null (unclassified / none). */
+  classOf(meshId) {
+    const t = this._tByMeshId.get(meshId);
+    const c = t ? this._chan.get(t) : null;
+    return c ? (c.cls ?? null) : null;
+  }
+  /** The class of the channel the bound identity `nodeId` (hex) points at, or null. */
+  classOfNode(nodeId) {
+    const p = this._peer.get(nodeId);
+    const c = p?.t ? this._chan.get(p.t) : null;
+    return c ? (c.cls ?? null) : null;
   }
 
   // ── counts ─────────────────────────────────────────────────────────
@@ -191,10 +384,28 @@ export class ChannelLedger {
    * @param {string} meshId
    * @param {'in'|'out'} dir
    */
-  allocate(t, meshId, dir) {
+  allocate(t, meshId, dir, reservation = null) {
     if (this._chan.has(t)) { this._stats.staleEvent++; return this._chan.get(t); }
+    // G1: a reservation is CONSUMED here, in the same synchronous step the
+    // PC is built; the channel takes its class. No reservation (a legacy
+    // caller, or an unarmed ledger) → unclassified.
+    let cls = null, consumed = false;
+    if (reservation != null) {
+      const r = this._res.get(reservation);
+      if (r) { this._res.delete(reservation); this._stats.reservationsConsumed++; cls = r.cls; consumed = true; }
+      else this._stats.staleEvent++;
+    }
+    // ARMED ALLOCATION FAILS CLOSED (Aster b583c31c P1): with the pools
+    // armed a channel with no consumed reservation is never recorded as an
+    // unclassified charge. Nothing is charged, null is returned, and the
+    // caller must not build the PC (mesh._attachPc refuses before this).
+    if (this.armed && !consumed) {
+      this._stats.allocUnreserved++;
+      this._log('alloc-unreserved-refused', { t, meshId, dir, reservation: reservation ?? null });
+      return null;
+    }
     const rec = {
-      t, meshId, dir: dir === 'in' ? 'in' : 'out', state: CHAN.ALLOCATED,
+      t, meshId, dir: dir === 'in' ? 'in' : 'out', cls, state: CHAN.ALLOCATED,
       since: this._now(), negotiatingAt: 0, openedAt: 0, closingAt: 0, goneAt: 0,
       reason: null, nodeId: null, escalateTimer: null, seq: ++this._seq,
     };
@@ -341,6 +552,8 @@ export class ChannelLedger {
     this._stats.goneTotal++;
     this._chan.delete(t);   // GONE records are not retained; the token is never reused
     this._settlePeer(nodeId, t);
+    this._pendingReclass.delete(t);   // a channel that is gone has no transfer of its own left
+    this._applyPendingReclass(t);     // G6: the transfers that waited on this close
     c.prompted = prompted;
     return c;
   }
@@ -361,8 +574,15 @@ export class ChannelLedger {
     }
     let peersPointing = 0;
     for (const p of this._peer.values()) if (p.t != null) peersPointing++;
+    const byClass = {
+      M: { charged: this.chargedOf(CLS.M), reserved: this.reservedOf(CLS.M) },
+      I: { charged: this.chargedOf(CLS.I), reserved: this.reservedOf(CLS.I) },
+      none: { charged: this.chargedOf(null), reserved: 0 },
+    };
     return {
       bounds: { cPhys: this.cPhys, cInbound: this.cInbound, pPending: this.pPending, enforce: this.enforce },
+      pools: this.pools ? { M: this.pools.M, I: this.pools.I, H: this.pools.H } : null,
+      byClass, reservations: this._res.size, reclassPending: this._pendingReclass.size,
       all: this.chanAll(), byState,
       inboundUnbound: this.chanInboundUnbound(), outboundPending: this.chanOutboundPending(),
       unboundOpen, boundPeers: this._peer.size, peersPointing,

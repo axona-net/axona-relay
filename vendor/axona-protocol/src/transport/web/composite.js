@@ -433,7 +433,12 @@ export class CompositeTransport extends Transport {
     if (typeof t.mayDial         === 'function') this.mayDial         = ()     => t.mayDial();
     if (typeof t.canAllocate     === 'function') this.canAllocate     = (dir)  => t.canAllocate(dir);
     if (typeof t.allocRefusedFor === 'function') this.allocRefusedFor = (peer) => t.allocRefusedFor(peer);
-    this._log('dialer-set', { mayDial: typeof t.mayDial === 'function', canAllocate: typeof t.canAllocate === 'function', allocRefusedFor: typeof t.allocRefusedFor === 'function' });
+    // G1/G6: the pool surfaces live with the dialer (the one transport that
+    // holds the ledger); absent on a transport without them, as mayDial is.
+    if (typeof t.classOf     === 'function') this.classOf     = (id)      => t.classOf(id);
+    if (typeof t.reclass     === 'function') this.reclass     = (id, cls, opts) => t.reclass(id, cls, opts);
+    if (typeof t.poolProfile === 'function') this.poolProfile = ()        => t.poolProfile();
+    this._log('dialer-set', { mayDial: typeof t.mayDial === 'function', canAllocate: typeof t.canAllocate === 'function', allocRefusedFor: typeof t.allocRefusedFor === 'function', pools: typeof t.poolProfile === 'function' });
   }
 
   /** The one sub-transport that dials, or null. */

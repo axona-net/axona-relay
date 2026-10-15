@@ -287,6 +287,12 @@ export class WebRTCTransport extends Transport {
     // route for the nodeId.  A deduped-duplicate loser must not unbind the
     // surviving winner (which now owns the nodeId under a different meshId).
     if (nodeId !== undefined && this._meshIdByNodeId.get(nodeId) === meshId) {
+      // G6 capacity transfer: the channel a promotion replaces is unbound
+      // here before its close is confirmed; its last meshId is kept so the
+      // reclass that waits on that close can still name it. Bounded.
+      const last = (this._lastMeshIdByNodeId ??= new Map());
+      last.set(nodeId, meshId);
+      if (last.size > 256) { const k = last.keys().next().value; last.delete(k); }
       this._meshIdByNodeId.delete(nodeId);
     }
   }
@@ -335,6 +341,31 @@ export class WebRTCTransport extends Transport {
   /** True if this transport owns a binding for `nodeId`. */
   ownsPeer(nodeId) {
     return this._meshIdByNodeId.has(nodeId);
+  }
+
+  // ─── G1/G6: pool classes, by bound identity ─────────────────────────
+
+  /** The class the bound peer's channel was reserved in: 'M' | 'I' | null. */
+  classOf(nodeId) {
+    const meshId = this._meshIdByNodeId.get(nodeId);
+    if (!meshId || typeof this._mesh?.classOf !== 'function') return null;
+    try { return this._mesh.classOf(meshId); } catch { return null; }
+  }
+  /** G6: move the bound peer's channel to class `cls` (promotion I→M, demotion M→I). */
+  reclass(nodeId, cls, { after = null } = {}) {
+    const meshId = this._meshIdByNodeId.get(nodeId);
+    if (!meshId) return { ok: false, why: 'unbound', prev: null, deferred: false };
+    if (typeof this._mesh?.reclass !== 'function') return { ok: false, why: 'no-mesh', prev: null, deferred: false };
+    // `after`: the nodeId whose channel this move replaces (G6 capacity
+    // transfer); read before its binding is dropped by the close, or from
+    // the last binding the mesh still knows.
+    let afterMeshId = null;
+    if (after != null) { try { afterMeshId = this._meshIdByNodeId.get(after) ?? this._lastMeshIdByNodeId?.get(after) ?? null; } catch { afterMeshId = null; } }
+    try { return this._mesh.reclass(meshId, cls, { afterMeshId }); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null, deferred: false }; }
+  }
+  /** The two-pool profile the mesh is armed with, or null. */
+  poolProfile() {
+    try { return this._mesh?.poolProfile?.() ?? null; } catch { return null; }
   }
 
   // ─── Channel pool ────────────────────────────────────────────────────

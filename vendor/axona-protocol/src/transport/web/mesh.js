@@ -162,7 +162,13 @@ const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 const NEGOTIATION_DEADLINE_MS = 30000;
 /** Row 13: _retire reasons on a never-opened channel that mean the attempt
  *  FAILED (as opposed to being retried or the mesh going away). */
-const NEGOTIATION_FAILED_REASONS = new Set(['negotiation-timeout', 'pc-closed', 'peer-left', 'disconnect']);
+const NEGOTIATION_FAILED_REASONS = new Set(['negotiation-timeout', 'pc-closed', 'peer-left', 'disconnect', 'rejected', 'retry-refused']);
+// G2 (two-pool packet, axona-docs ca52384): replacements of an UNBOUND
+// negotiation on one key are bounded. Past this many within the key's
+// negotiation window the key SHEDS further attempts (refused on the wire
+// with reason 'shed'), so deterministic replacement cannot be a signalling
+// sink (Aster bc4fe433 §3).
+const ATTEMPT_REPLACE_MAX = 3;
 // One reaper interval drives EVERY per-peer liveness decision (see _reapTick):
 // while never-opened it enforces NEGOTIATION_DEADLINE_MS; once open it folds the
 // heartbeat death (heartbeat.deadMs), send-fail (SEND_FAIL_LIMIT) and stale-
@@ -332,8 +338,19 @@ export class MeshManager {
     // bridge id) a missing id is dropped, so a negotiated door session never
     // runs with the check off.
     this._attemptSeq    = 0;
-    this.attemptStats   = { stale: 0, missing: 0, replaced: 0, ignoredOnOpen: 0 };
+    this.attemptStats   = { stale: 0, missing: 0, replaced: 0, ignoredOnOpen: 0,
+      // G2/G5: replacements shed past ATTEMPT_REPLACE_MAX; reject frames sent,
+      // received and applied, and received but stale (wrong attempt / no state).
+      shed: 0, rejectSent: 0, rejectRecv: 0, rejectStale: 0 };
     this._attemptPolicy = null;   // { requireFor(peerId) → boolean } or null
+    // G2: replacement count per key within the negotiation window
+    // (peerId → { n, at }); read against NEGOTIATION_DEADLINE_MS.
+    this._replaceCounts = new Map();
+    // G1/G4: the two-pool profile the ledger is armed with, or null.
+    this._pools = this._ledger?.pools ?? null;
+    // G5: this process's generation on the wire — the per-run tag every
+    // incarnation and attempt id already carries.
+    this._generation = this._incRun;
     // DEGREE POLICY (§ Make room, § Capacity): a bridge marks door channels
     // PROVISIONAL until their identity binds. The degree pass counts and
     // retires only non-provisional channels; provisional ones are bounded by
@@ -837,6 +854,7 @@ export class MeshManager {
       rttMs:       this.getLatency(st.peerId),
       inCooldown:  this._retiredRecently.has(st.peerId),
       isProtected: !!this._degreeProtected(st.peerId, passId),
+      cls:         this.classOf(st.peerId),   // G6: I before M (ingress fairness before coverage)
     })), { now, minUptimeMs: this._degreeMinUptime });
     if (!pick) return;
 
@@ -903,6 +921,7 @@ export class MeshManager {
       provisional: this.provisionalCount(), provisionalRefused: this._provisionalRefused,
       bindTimeouts: this._bindTimeouts, makeRoomRetired: this._makeRoomRetired,
       attempts: { ...this.attemptStats },
+      pools: this._pools ? { M: this._pools.M, I: this._pools.I, H: this._pools.H } : null,   // G4
     };
   }
 
@@ -952,24 +971,54 @@ export class MeshManager {
         //  · a NEW attempt for a key holding an unbound negotiation → that
         //    negotiation is replaced (its frames are stale from here on);
         //  · no id and not required (legacy) → today's path, unchanged.
+        let replacing = false;
         if (payload.attempt == null) {
           if (this._attemptPolicy?.requireFor(from)) { this.attemptStats.missing++; this._log('signal-missing-attempt', { from, kind: 'sdp-offer' }); return; }
         } else if (existing && existing.attempt !== payload.attempt) {
           if (existing.openedAt > 0) { this.attemptStats.ignoredOnOpen++; this._log('offer-on-open-ignored', { from, attempt: payload.attempt, current: existing.attempt }); return; }
+          replacing = true;
+        }
+        // G2: the crossed-offer decision runs BEFORE any retire. Until the
+        // two-pool packet the old attempt was retired first and the
+        // replacement asked the ledger second, so a refusal at cap left the
+        // key with neither (a1bc5e0b). Now: bound the replacements, RESERVE
+        // the replacement, and only then retire the old attempt; a refused
+        // reservation keeps the old attempt and answers the offer with a
+        // reject frame (G5). Row 3 is unchanged for a first offer: an
+        // inbound offer that needs a NEW PC asks the ledger first; counted
+        // with enforce off, refused with enforce on.
+        const needsPc = !existing?.pc || replacing;
+        let reservation = null;
+        if (needsPc) {
+          if (replacing) {
+            const rc = this._replaceCountFor(from);
+            if (rc >= ATTEMPT_REPLACE_MAX) {
+              this.attemptStats.shed++;
+              this._log('offer-shed', { from, attempt: payload.attempt, current: existing.attempt, replacements: rc });
+              this._sendReject(from, payload.attempt, 'shed');
+              return;
+            }
+          }
+          if (this._ledger) {
+            const r = this._ledger.reserve({ cls: 'I', dir: 'in', attempt: payload.attempt ?? null, generation: this._generation });
+            if (!r.ok) {
+              this._log('offer-refused', { from, why: r.why, replacing, ledger: this._ledger.stats() });
+              this._sendReject(from, payload.attempt, r.why);
+              return;   // the key keeps whatever it held
+            }
+            reservation = r.token;
+          }
+        }
+        if (replacing) {
           this.attemptStats.replaced++;
+          this._bumpReplaceCount(from);
           this._log('attempt-replaced', { from, attempt: payload.attempt, previous: existing.attempt });
           this._retire(from, 'attempt-replaced', { notifyLost: false });
           existing = undefined;
         }
-        // Row 3: an inbound offer that would need a NEW PC asks the ledger
-        // first; counted with enforce off, refused (offer ignored, nothing
-        // built, nothing sent) with enforce on.
-        if (!existing?.pc && this._ledger && !this._ledger.mayAllocate('in').ok) {
-          this._log('offer-refused', { from, ledger: this._ledger.stats() });
-          return;
-        }
         const state = existing ?? this._initResponderState(from);
         if (payload.attempt != null) state.attempt = payload.attempt;
+        if (reservation != null) { state.reservation = reservation; state.cls = this._pools ? 'I' : null; }
         await this._handleOffer(state, payload.sdp);
       } else if (payload.kind === 'sdp-answer') {
         const peer = this._peers.get(from);
@@ -981,6 +1030,23 @@ export class MeshManager {
         await peer.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
         if (this._peers.get(from) !== peer) return;   // continuation: the attempt ended while we awaited
         await this._flushPendingCandidates(peer);
+      } else if (payload.kind === 'sdp-reject') {
+        // G5: the responder refused our offer for capacity. Binds to the
+        // attempt it names: only the OFFERER's current, never-opened attempt
+        // with that id is ended, as a failed negotiation with reason
+        // 'rejected' (the guard token ends through onNegotiationFailed, and
+        // the kernel treats a capacity reject as a deferral, not a mark).
+        // Anything else — unknown key, an open channel, a stale or missing
+        // attempt — is dropped and counted. A legacy responder never sends
+        // this frame; its silence still ends at the negotiation deadline.
+        const peer = this._peers.get(from);
+        const stale = !peer || peer.role !== 'offerer' || peer.openedAt > 0
+          || payload.attempt == null || payload.attempt !== peer.attempt;
+        if (stale) { this.attemptStats.rejectStale++; this._log('reject-stale', { from, attempt: payload.attempt ?? null, current: peer?.attempt ?? null, reason: payload.reason ?? null }); return; }
+        this.attemptStats.rejectRecv++;
+        this._lastReject = { peerId: from, reason: payload.reason ?? null, generation: payload.generation ?? null };
+        this._log('offer-rejected', { peerId: from, inc: peer.inc, attempt: peer.attempt, reason: payload.reason ?? null, generation: payload.generation ?? null });
+        this._retire(from, 'rejected');
       } else if (payload.kind === 'ice') {
         const peer = this._peers.get(from);
         if (!peer) {
@@ -1040,6 +1106,8 @@ export class MeshManager {
       pathPollTimer: null,
       inc: null,              // set per RTCPeerConnection in _attachPc
       attempt: null,          // socket-is-bootstrap v0.5: this negotiation's attempt id (wire-carried)
+      cls: null,              // G1: the class this channel was reserved in ('M' | 'I' | null)
+      reservation: null,      // G1: the ledger token held between reserve() and _attachPc's allocate()
       bindTimer: null,        // bind deadline (provisional policy's, or the every-channel one)
       boundAt: 0,             // epoch ms the handshake bound an identity on this channel (ledgerBind); 0 = unbound
     };
@@ -1048,6 +1116,69 @@ export class MeshManager {
   // ── Socket-is-bootstrap v0.5: attempt ids and the degree policy ──────
 
   _mintAttempt() { return `${this._incRun}-${++this._attemptSeq}`; }
+
+  // ── G2/G5: bounded replacement and the reject frame ──────────────────
+
+  /** Replacements seen on `peerId` within the last NEGOTIATION_DEADLINE_MS. */
+  _replaceCountFor(peerId) {
+    const e = this._replaceCounts.get(peerId);
+    if (!e) return 0;
+    if (Date.now() - e.at > NEGOTIATION_DEADLINE_MS) { this._replaceCounts.delete(peerId); return 0; }
+    return e.n;
+  }
+  _bumpReplaceCount(peerId) {
+    const n = this._replaceCountFor(peerId) + 1;
+    this._replaceCounts.set(peerId, { n, at: Date.now() });
+    if (this._replaceCounts.size > 1000) {
+      const now = Date.now();
+      for (const [k, e] of this._replaceCounts) if (now - e.at > NEGOTIATION_DEADLINE_MS) this._replaceCounts.delete(k);
+    }
+    return n;
+  }
+  /**
+   * G5: answer a refused offer on the wire. Sent only to an offerer that
+   * carries an attempt id (a legacy peer gets today's silence and the
+   * bounded timeout). The frame binds the attempt and this generation.
+   */
+  _sendReject(to, attempt, reason) {
+    if (attempt == null) return false;
+    this.attemptStats.rejectSent++;
+    try { this._sendSignal(to, { kind: 'sdp-reject', v: 1, attempt, generation: this._generation, reason: reason ?? 'refused' }); }
+    catch (err) { this._log('reject-send-failed', { to, err: err?.message }); return false; }
+    return true;
+  }
+  /** G5: the last reject this mesh received, read once by the synchronous caller. */
+  lastRejectFor(peerId) {
+    const r = this._lastReject;
+    if (!r || r.peerId !== peerId) return null;
+    this._lastReject = null;
+    return r;
+  }
+
+  // ── G1/G6: classes on the wire's channels ────────────────────────────
+
+  /** The two-pool profile this mesh's ledger is armed with, or null. */
+  poolProfile() { return this._pools; }
+  /** The class the channel serving `meshId` was reserved in: 'M' | 'I' | null. */
+  classOf(meshId) { return this._ledger ? this._ledger.classOf(meshId) : null; }
+  /** G6: move the live channel serving `meshId` to class `cls`; the ledger's answer. */
+  reclass(meshId, cls, { afterMeshId = null } = {}) {
+    if (!this._ledger) return { ok: false, why: 'no-ledger', prev: null, deferred: false };
+    const t = this._ledger.tokenFor(meshId);
+    if (!t) return { ok: false, why: 'no-channel', prev: null, deferred: false };
+    // G6 capacity transfer: the channel being replaced may already be
+    // CLOSING (its token retired from the current map), so it is found
+    // across live records by meshId.
+    let after = null;
+    if (afterMeshId != null) {
+      after = this._ledger.tokenFor(afterMeshId);
+      if (!after) for (const c of this._ledger._chan.values()) if (c.meshId === afterMeshId) { after = c.t; break; }
+    }
+    const r = this._ledger.reclass(t, cls, { after });
+    const st = this._peers.get(meshId);
+    if (r.ok && st) st.cls = cls;
+    return r;
+  }
 
   /** @param {{requireFor:(peerId:string)=>boolean}|null} policy */
   setAttemptPolicy(policy) {
@@ -1128,6 +1259,7 @@ export class MeshManager {
       rttMs:       this.getLatency(st.peerId),
       inCooldown:  this._retiredRecently.has(st.peerId),
       isProtected: !!this._degreeProtected(st.peerId, passId),
+      cls:         this.classOf(st.peerId),   // G6
     })), { now, minUptimeMs: this._degreeMinUptime });
     if (!pick) return null;
     if (dryRun) return pick.id;
@@ -1153,14 +1285,25 @@ export class MeshManager {
 
   /** Build a PC for either role and wire its common event handlers. */
   _attachPc(state) {
+    // ARMED ALLOCATION FAILS CLOSED (Aster b583c31c P1): with the pools
+    // armed no PeerConnection is built for a state that holds no
+    // reservation. The state is retired and nothing physical exists.
+    if (this._ledger?.armed && state.reservation == null) {
+      this._log('attach-unreserved-refused', { peerId: state.peerId, role: state.role });
+      this._retire(state.peerId, 'attach-unreserved', { notifyLost: false });
+      return;
+    }
     const pc = new RTCPeerConnection(this._iceConfig());
     state.pc = pc;
     state.inc = `${this._incRun}.${++this._incSeq}`;
     try { pc.axonaInc = state.inc; } catch { /* non-extensible PC: log-only */ }
     state.state = 'signaling';
     // Row 3: the channel record is ALLOCATED the moment the PC exists, keyed
-    // by the same incarnation tag the log lines carry.
-    this._ledger?.allocate(state.inc, state.peerId, state.role === 'offerer' ? 'out' : 'in');
+    // by the same incarnation tag the log lines carry. G1: the reservation
+    // taken before this point is CONSUMED here and the channel takes its
+    // class; a state with no reservation allocates unclassified (legacy).
+    this._ledger?.allocate(state.inc, state.peerId, state.role === 'offerer' ? 'out' : 'in', state.reservation);
+    state.reservation = null;
 
     pc.onicecandidate = (ev) => {
       if (!ev.candidate) return;
@@ -1282,11 +1425,16 @@ export class MeshManager {
     }, 10_000);
   }
 
-  async _initiateTo(peerId) {
+  async _initiateTo(peerId, { cls = null } = {}) {
     // Row 3: ask the ledger BEFORE the PC exists. With enforce off (the
     // default) this only counts; with enforce on a refusal builds nothing.
+    // G1: the ask is a RESERVATION in a class (M for a dial this node chose,
+    // unless the caller names another), consumed by _attachPc in the same
+    // synchronous step.
+    const attempt = this._mintAttempt();   // socket-is-bootstrap v0.5: one id per attempt, carried on the wire
+    let reservation = null;
     if (this._ledger) {
-      const may = this._ledger.mayAllocate('out');
+      const may = this._ledger.reserve({ cls: cls ?? 'M', dir: 'out', attempt, generation: this._generation });
       if (!may.ok) {
         this._log('initiate-refused', { peerId, why: may.why, ledger: this._ledger.stats() });
         // Row 12 (R12-2): the refusal is readable by the synchronous caller
@@ -1295,10 +1443,13 @@ export class MeshManager {
         this._lastAllocRefusal = { peerId, why: may.why };
         return;
       }
+      reservation = may.token;
     }
-    this._log('initiate', { peerId });
+    this._log('initiate', { peerId, cls: this._pools ? (cls ?? 'M') : null });
     const state = this._newPeerState(peerId, 'offerer');
-    state.attempt = this._mintAttempt();   // socket-is-bootstrap v0.5: one id per attempt, carried on the wire
+    state.attempt = attempt;
+    state.cls = this._pools ? (cls ?? 'M') : null;
+    state.reservation = reservation;
     this._peers.set(peerId, state);
     this._armReaper(state);
     this._attachPc(state);
@@ -1790,8 +1941,22 @@ export class MeshManager {
       // Retire the failed PC but KEEP the absolute deadline (so the fresh
       // negotiation honours the original window) and DON'T fire onPeerLost
       // (we're immediately re-initiating), then re-offer.
+      // G1/G2: the retry is a NEW incarnation of the same attempt's intent.
+      // It takes a fresh reservation in the same class; the old PC stays
+      // charged until the transport confirms its close (v1.1 §2: duplicate
+      // incarnations consume separate physical slots until closed). A
+      // refused reservation ends the attempt here as 'retry-refused' (row
+      // 13: a failed negotiation, so the guard token ends).
       this._retire(state.peerId, 'retry', { keepDeadline: true, notifyLost: false });
-      this._initiateTo(state.peerId);
+      this._initiateTo(state.peerId, { cls: state.cls });
+      if (!this._peers.has(state.peerId)) {
+        this._log('retry-refused', { peerId: state.peerId, inc: state.inc, cls: state.cls });
+        for (const cb of this._negotiationFailedListeners) {
+          try { cb(state.peerId, 'retry-refused', state.inc ?? null); }
+          catch (err) { this._log('negotiation-failed-listener-threw', { peerId: state.peerId, err: err.message }); }
+        }
+        this._negotiationDeadline.delete(state.peerId);
+      }
     }, RETRY_AFTER_MS);
   }
 
@@ -1839,6 +2004,9 @@ export class MeshManager {
     if (state.retryTimer)    clearTimeout (state.retryTimer);
     if (state.pathPollTimer) clearInterval(state.pathPollTimer);
     if (state.bindTimer)     clearTimeout (state.bindTimer);
+    // G1: a reservation never consumed (a state retired between reserve and
+    // _attachPc) is released; it was never a charge.
+    if (state.reservation != null) { this._ledger?.release(state.reservation); state.reservation = null; }
     // Row 3: CLOSING before the close is issued; the peer pointer clears in
     // the same step. Capacity waits for the transport's 'closed' (gone) or
     // the ledger's escalation. A state that never got a PC has no record.

@@ -33,6 +33,7 @@
 
 import { makeProtectionResolver } from './mesh_degree.js';
 import { MeshManager }       from './mesh.js';
+import { makePoolProfile, PoolProfileError } from './pool_profile.js';
 import { MeshAuth }          from './mesh-auth.js';
 import { WebRTCTransport }   from './webrtc.js';
 import { BridgeTransport, BRIDGE_CONN_ID_EXPORT as BRIDGE_CONN_ID } from './bridge.js';
@@ -188,6 +189,14 @@ export function webTransport({
   // design's first values; an object overrides them (`enforce: true` turns
   // the predicate into a refusal); `false` = off. See channel_ledger.js.
   meshLedger = null,
+  // TWO POOLS (G4 of the two-pool packet, axona-docs ca52384). `null`
+  // (default) = NOT ARMED: one admitted table, the ledger's direction-only
+  // predicate, no class on any channel — byte-identical to 4.113.0. An
+  // object is validated by makePoolProfile (it throws on an infeasible
+  // profile, nothing is trimmed) and arms the class bounds M / I / H on the
+  // ledger, the M cap in the kernel, and the class surfaces the kernel reads
+  // (classOf, reclass, poolProfile). See pool_profile.js.
+  meshPools = null,
   // Peer-relayed signaling (bridgeless connect).  When true (the default as of
   // kernel v2.19.0, after the end-to-end verification in Peer-Relayed-Signaling
   // §8d), sendSignal prefers routing SDP/ICE through the mesh (via an AxonaPeer
@@ -473,6 +482,12 @@ export function webTransport({
   let webrtcRef = null;
   /** Row 12: kernel handlers for the bridge `peer-list` sample (composite.onPeerList). */
   const peerListHandlers = new Set();
+  // G4: the profile is built (and refused) HERE, before the mesh or any cap
+  // consumer exists; a ledger turned off cannot carry pools.
+  const poolProfile = meshPools ? makePoolProfile(meshPools) : null;
+  if (poolProfile && meshLedger === false) throw new PoolProfileError('meshLedger', 'the pools need the channel ledger; meshLedger: false cannot carry them');
+  const ledgerOpt = (meshLedger === false) ? false
+    : { ...(meshLedger && typeof meshLedger === 'object' ? meshLedger : {}), ...(poolProfile ? { pools: poolProfile } : {}) };
   const mesh = new MeshManager({
     // THE KEYSPACE REGION COMES FROM THE AUTHENTICATED nodeId, NOT THE
     // SIGNALLING ID (4.96.0 — this was wrong in 4.95.0 and the cap could never
@@ -498,7 +513,7 @@ export function webTransport({
     // Late-bound on purpose: the WebRTCTransport is constructed AFTER this
     // manager (it takes the manager as an argument), so the resolver closes
     // over a reference filled in below.
-    ledger: meshLedger,
+    ledger: ledgerOpt,
     bindDeadlineMs: meshBindDeadlineMs,
     degree: meshDegree
       ? {
@@ -1366,7 +1381,7 @@ export function webTransport({
   //   we hold no binding for, using the nodeId as the meshId.  The offer's
   //   SDP/ICE then rides the relay sink above.  No-op when meshRelay is off,
   //   when we already own a binding/channel to the target, or for self.
-  composite.connectViaRelay = (toHex) => {
+  composite.connectViaRelay = (toHex, { cls = null } = {}) => {
     if (!meshRelay) { log('relay-connect-disabled', { to: toHex }); return false; }
     if (typeof toHex !== 'string' || !isHexId(toHex)) return false;
     if (toHex === localNodeIdHex) return false;
@@ -1383,13 +1398,18 @@ export function webTransport({
     // gossip-introduced fake peerIds can't drive unbounded RTCPeerConnection
     // setup. The watchdog reaps stuck never-opened negotiations, so the cap
     // self-frees; a throttled connect retries on the next discovery tick.
-    const pending = mesh.pendingNegotiations();
-    if (pending >= MAX_PENDING_RELAY_NEGOTIATIONS) {
-      log('relay-connect-throttled', { to: toHex, pending });
-      return null;   // row 12 (R12-2): capacity refused, nothing started — the dialer defers, consuming nothing
+    // G1: with the pools ARMED the ledger's M reservation (pPending, M, H)
+    // is the one bound on in-flight dials; this second counter is not read,
+    // so one quantity has one bound (packet §1d item 2).
+    if (!poolProfile) {
+      const pending = mesh.pendingNegotiations();
+      if (pending >= MAX_PENDING_RELAY_NEGOTIATIONS) {
+        log('relay-connect-throttled', { to: toHex, pending });
+        return null;   // row 12 (R12-2): capacity refused, nothing started — the dialer defers, consuming nothing
+      }
     }
-    log('relay-connect-initiate', { to: toHex });
-    mesh._initiateTo(toHex);
+    log('relay-connect-initiate', { to: toHex, cls: poolProfile ? (cls ?? 'M') : null });
+    mesh._initiateTo(toHex, { cls });
     // Row 8: return the incarnation of the negotiation just started (the
     // state exists synchronously after _initiateTo), so the dialer can
     // correlate the channel's terminal event with its guard token. `true`
@@ -1606,6 +1626,14 @@ export function webTransport({
   composite.mayDial = () => {
     try { return mesh.canAllocate ? mesh.canAllocate('out') !== false : true; }
     catch { return true; }
+  };
+  // G1/G6: the pool surfaces the kernel reads (null / absent when unarmed).
+  composite.poolProfile = () => poolProfile;
+  composite.classOf = (nodeId) => { try { return webrtc.classOf(nodeId); } catch { return null; } };
+  composite.reclass = (nodeId, cls, opts) => { try { return webrtc.reclass(nodeId, cls, opts); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null, deferred: false }; } };
+  // G5: the reason the far end refused our last offer to `nodeId`, read once.
+  composite.lastRejectFor = (nodeId) => {
+    try { const hex = (typeof nodeId === 'bigint') ? toHex(nodeId) : String(nodeId); return mesh.lastRejectFor(hex); } catch { return null; }
   };
 
   /**

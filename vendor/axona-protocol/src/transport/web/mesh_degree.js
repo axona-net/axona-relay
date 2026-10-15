@@ -46,6 +46,7 @@
  * @property {number|null} rttMs  smoothed round-trip, or null if unknown
  * @property {boolean} inCooldown retired too recently to be chosen again
  * @property {boolean} isProtected caller says this channel carries an obligation
+ * @property {('M'|'I'|null)} [cls] G6: the channel's pool class, when the node is armed
  */
 
 /**
@@ -79,7 +80,14 @@ export function selectMeshRetire(candidates, { now, minUptimeMs }) {
   // preferred over a guess — the same "known beats unknown" rule the WebSocket
   // side applies to meshBound).
   const rttKey = (c) => (c.rttMs == null ? -1 : c.rttMs);
+  // G6 (two-pool packet): when candidates carry a class, an INCOMING channel
+  // is released before a MANAGED one — ingress is refilled by whoever next
+  // selects us, coverage is not. Unclassified sorts between. With no class on
+  // any candidate (an unarmed node) the order is exactly the pre-pool one.
+  const anyCls = eligible.some((c) => c.cls === 'M' || c.cls === 'I');
+  const clsRank = (c) => (c.cls === 'I' ? 0 : c.cls === 'M' ? 2 : 1);
   const sorted = [...eligible].sort((a, b) => {
+    if (anyCls) { const cd = clsRank(a) - clsRank(b); if (cd !== 0) return cd; }
     const rd = (regionCount.get(b.region) || 0) - (regionCount.get(a.region) || 0);
     if (rd !== 0) return rd;
     const ad = a.openedAt - b.openedAt;            // older first
@@ -89,7 +97,7 @@ export function selectMeshRetire(candidates, { now, minUptimeMs }) {
 
   for (const c of sorted) {
     if ((regionCount.get(c.region) || 0) > 1) {
-      return { id: c.id, region: c.region, ageMs: now - c.openedAt, rttMs: c.rttMs, basis: 'age' };
+      return { id: c.id, region: c.region, ageMs: now - c.openedAt, rttMs: c.rttMs, basis: 'age', cls: c.cls ?? null };
     }
   }
   return null;
