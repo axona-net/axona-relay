@@ -4,7 +4,7 @@
 // feasible profile reaches the transport and reads back armed with enforce
 // off; an infeasible one is refused by the kernel before any socket exists.
 // Mutant: let poolsFromEnv return {} for a malformed string → check 3 fails.
-import { poolsFromEnv } from '../src/relay.js';
+import { poolsFromEnv, ledgerFromEnv } from '../src/relay.js';
 import { webTransport } from '../vendor/axona-protocol/src/transport/web/index.js';
 
 let passed = 0, failed = 0;
@@ -27,6 +27,11 @@ check('4 optional fields ride along', poolsFromEnv({ RELAY_MESH_POOLS: 'M=6,I=6,
   check('6 an infeasible profile is refused by the kernel before any socket exists', threw && /pool profile: H/.test(threw.message), String(threw));
   const u = webTransport({ bridgeUrl: 'ws://127.0.0.1:1', identity: { id: 'ab'.repeat(33) }, meshPools: poolsFromEnv({}), autoHandshake: false, log: () => {} });
   check('7 without the variable the transport is not armed', (u.poolProfile?.() ?? null) === null);
+  // ENFORCEMENT (0.160.0)
+  check('8 RELAY_LEDGER_ENFORCE=1 → { enforce: true }; anything else → null (the kernel default, false)', ledgerFromEnv({ RELAY_LEDGER_ENFORCE: '1' })?.enforce === true && ledgerFromEnv({}) === null && ledgerFromEnv({ RELAY_LEDGER_ENFORCE: 'yes' }) === null);
+  const e = webTransport({ bridgeUrl: 'ws://127.0.0.1:1', identity: { id: 'ab'.repeat(33) }, meshPools: poolsFromEnv({ RELAY_MESH_POOLS: 'M=50,I=50,H=100' }), meshLedger: ledgerFromEnv({ RELAY_LEDGER_ENFORCE: '1' }), autoHandshake: false, log: () => {} });
+  const st = e.channelLedgerStats?.();
+  check('9 armed + enforce: the ledger reads enforce true with the profile\'s bounds (H as cPhys, pPending 8, cInbound 4) — it refuses from here on', st?.bounds?.enforce === true && st.bounds.cPhys === 100 && st.bounds.pPending === 8 && st.bounds.cInbound === 4 && st.pools?.M === 50, JSON.stringify(st?.bounds));
 }
 console.log(`\nfence_mesh_pools_env: ${passed} passed, ${failed} failed`);
 process.exit(failed ? 1 : 0);

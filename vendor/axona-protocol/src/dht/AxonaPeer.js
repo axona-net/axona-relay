@@ -2876,6 +2876,14 @@ export class AxonaPeer extends DHT {
       return;
     }
 
+    // G6 (4.114.1): the GATE-OFF seed is a legacy table insert too. Read on
+    // the armed fleet 2026-10-15 23:0xZ: a relay without the admission gate
+    // seated every accepted (class I) channel in its table with no reclass,
+    // so the ledger read I while the table counted it managed, and
+    // health().degree read I 0 / promoted 0. Armed, an I-class channel is
+    // reclassed to M before the entry lands, or the entry does not land.
+    if (!this._legacyInsertAllowed(sponsor, 'seed')) return;
+
     // Engine-managed path: if the engine exposes addSynapse, use it
     // so its bookkeeping (stratum, decay, anneal pool) stays consistent.
     const engine = this._engine;

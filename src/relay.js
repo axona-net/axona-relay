@@ -136,6 +136,19 @@ export function poolsFromEnv(env = process.env) {
   return out;
 }
 
+/**
+ * ENFORCEMENT (relay 0.160.0; David 2026-10-15 "Release and turn on
+ * enforcement"). RELAY_LEDGER_ENFORCE=1 hands the kernel `meshLedger:
+ * { enforce: true }`: the channel ledger's bounds — with the pools armed,
+ * M / I / H and the pPending / cInbound rows — REFUSE instead of counting.
+ * Anything else → null: the kernel's default, enforce false. Independent of
+ * RELAY_MESH_POOLS by design: enforcement without a profile enforces the
+ * ledger's legacy direction rows (cPhys 66 / cInbound 4 / pPending 8).
+ */
+export function ledgerFromEnv(env = process.env) {
+  return env.RELAY_LEDGER_ENFORCE === '1' ? { enforce: true } : null;
+}
+
 export function assertArmingSupported(kernelVersion, armedEnvs) {
   if (!armedEnvs || armedEnvs.length === 0) return;
   // Floor = the PIN, exactly (Vega 523839be): 4.67.0 predates the _laneSeen
@@ -227,12 +240,16 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
     // armed). The kernel validates it (makePoolProfile) and refuses an
     // infeasible one here, before any socket exists.
     meshPools:     poolsFromEnv(process.env),
+    // ENFORCEMENT (0.160.0): RELAY_LEDGER_ENFORCE=1 → the ledger refuses.
+    meshLedger:    ledgerFromEnv(process.env),
     WebSocketImpl,
     log: (event, ctx) => onLog('debug', event, ctx),
   });
   {
     const p = (typeof transport.poolProfile === 'function') ? transport.poolProfile() : null;
-    onLog('info', 'pools', p ? { armed: true, M: p.M, I: p.I, H: p.H, pPending: p.pPending, cInbound: p.cInbound, serveFloor: p.serveFloor, enforce: false } : { armed: false });
+    let enforce = false;
+    try { enforce = transport.channelLedgerStats?.()?.bounds?.enforce === true; } catch { enforce = false; }
+    onLog('info', 'pools', p ? { armed: true, M: p.M, I: p.I, H: p.H, pPending: p.pPending, cInbound: p.cInbound, serveFloor: p.serveFloor, enforce } : { armed: false, enforce });
   }
 
   const node = new NeuronNode({
