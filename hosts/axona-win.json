@@ -23,7 +23,8 @@
       "RELAY_REGION": "eagle",
       "BRIDGE_URL": "wss://bridge.axona.net",
       "RELAY_TUI": "0",
-      "SUB_TERMINAL_VERIFY": "1"
+      "SUB_TERMINAL_VERIFY": "1",
+      "RELAY_MESH_POOLS": "M=50,I=50,H=100"
     }
   },
   "services": {
@@ -37,5 +38,5 @@
     "start": "delayed-auto",
     "failure_actions": "restart 10s, 30s, 60s; counter resets daily"
   },
-  "controller": "windows\\relayctl.ps1 — install | status | start | stop | roll | cutover | uninstall"
+  "controller": "windows\\relayctl.ps1 \u2014 install | status | start | stop | roll | cutover | uninstall"
 }

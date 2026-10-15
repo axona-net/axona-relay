@@ -107,6 +107,35 @@ export function armingFromEnv(env = process.env) {
   };
 }
 
+/**
+ * TWO POOLS (relay 0.159.0; kernel 4.114.0 pool_profile.js; David 2026-10-15
+ * "Let's arm the full mesh"). RELAY_MESH_POOLS carries the profile the relay
+ * hands the kernel as `meshPools`, written as `M=50,I=50,H=100` with optional
+ * `pPending=`, `cInbound=`, `serveFloor=`, `promoteMs=`, `hostBudget=`,
+ * `doorSockets=`. Absent or empty → null: NOT ARMED, byte-identical to a relay
+ * without the variable. Malformed → refused at start (a relay that cannot
+ * read its own profile must not join the network guessing one). Feasibility
+ * (M + I ≤ H and the rest) is the kernel's makePoolProfile, which throws
+ * inside webTransport. Enforcement is NOT here: the ledger's `enforce` stays
+ * false, so an armed relay counts would-be refusals by class and refuses nothing.
+ */
+export function poolsFromEnv(env = process.env) {
+  const raw = env.RELAY_MESH_POOLS;
+  if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+  const out = {};
+  for (const part of String(raw).split(',')) {
+    const m = /^\s*([A-Za-z]+)\s*=\s*(-?\d+)\s*$/.exec(part);
+    if (!m) throw new Error(`arming refused: RELAY_MESH_POOLS ${JSON.stringify(raw)} is not a comma list of NAME=integer (got ${JSON.stringify(part)})`);
+    const key = m[1];
+    if (!['M', 'I', 'H', 'pPending', 'cInbound', 'serveFloor', 'promoteMs', 'hostBudget', 'doorSockets'].includes(key)) {
+      throw new Error(`arming refused: RELAY_MESH_POOLS names ${JSON.stringify(key)}, which the profile does not have`);
+    }
+    out[key] = Number.parseInt(m[2], 10);
+  }
+  if (out.M === undefined || out.I === undefined) throw new Error(`arming refused: RELAY_MESH_POOLS ${JSON.stringify(raw)} must name M and I`);
+  return out;
+}
+
 export function assertArmingSupported(kernelVersion, armedEnvs) {
   if (!armedEnvs || armedEnvs.length === 0) return;
   // Floor = the PIN, exactly (Vega 523839be): 4.67.0 predates the _laneSeen
@@ -194,9 +223,17 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
     // byte-identical to normal operation.
     meshRelay:     !(process.env.MESH_RELAY === '0'),
     reconnect:     true,           // a relay should self-heal the bridge link
+    // TWO POOLS (0.159.0): the profile from RELAY_MESH_POOLS, or null (not
+    // armed). The kernel validates it (makePoolProfile) and refuses an
+    // infeasible one here, before any socket exists.
+    meshPools:     poolsFromEnv(process.env),
     WebSocketImpl,
     log: (event, ctx) => onLog('debug', event, ctx),
   });
+  {
+    const p = (typeof transport.poolProfile === 'function') ? transport.poolProfile() : null;
+    onLog('info', 'pools', p ? { armed: true, M: p.M, I: p.I, H: p.H, pPending: p.pPending, cInbound: p.cInbound, serveFloor: p.serveFloor, enforce: false } : { armed: false });
+  }
 
   const node = new NeuronNode({
     id:  BigInt('0x' + identity.id),

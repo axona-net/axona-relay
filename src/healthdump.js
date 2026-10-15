@@ -56,6 +56,9 @@ export function buildHealthDump(h) {
   return {
     peers: Array.isArray(h?.peers) ? h.peers.length : (h?.synaptomeSize ?? null),
     synaptome: h?.synaptomeSize ?? null,
+    // TWO POOLS (0.159.0): the kernel's degree report — armed, profile, M, I,
+    // usable, promotion counters — carried whole; null on a kernel without it.
+    degree: h?.degree ?? null,
     subscriptions: h?.subscriptions ?? null,   // this node's OWN subs — NOT seated downstream
     roles: roles.length,
     // false = the kernel could not READ its roles, which is not the same fact
