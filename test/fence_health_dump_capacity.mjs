@@ -209,5 +209,22 @@ console.log('H. empty is not the same fact as unreadable');
      'the two are distinguishable ONLY by the flag — which is why it exists');
 }
 
+console.log('G. the counters (0.161.0): ledger stats and mesh attempts ride along, or read null');
+{
+  const ledger = { bounds: { cPhys: 100, cInbound: 4, pPending: 8, enforce: true }, pools: { M: 50, I: 50, H: 100 },
+    byClass: { M: { charged: 41, reserved: 0 }, I: { charged: 2, reserved: 1 }, none: { charged: 0, reserved: 0 } },
+    reservations: 1, reclassPending: 0, refusedM: 3, refusedI: 7, wouldRefuseM: 0, wouldRefuseI: 0, refusedIn: 7, refusedOut: 3, reclassDeferred: 1, reclassApplied: 1, allocUnreserved: 0 };
+  const mesh = { cap: 0, open: 43, attempts: { stale: 0, missing: 0, replaced: 2, ignoredOnOpen: 0, shed: 0, rejectSent: 7, rejectRecv: 3, rejectStale: 0 } };
+  const d = buildHealthDump(full, { ledger, mesh });
+  ok(d.ledger === ledger, 'the ledger stats object is carried whole');
+  ok(d.ledger.refusedI === 7 && d.ledger.byClass.I.charged === 2 && d.ledger.bounds.enforce === true, 'by-class and refusal counters are readable from the dump');
+  ok(d.meshAttempts === mesh.attempts && d.meshAttempts.rejectSent === 7, 'the mesh attempt counters ride under meshAttempts');
+  const none = buildHealthDump(full);
+  ok(none.ledger === null && none.meshAttempts === null, 'with nothing handed in both read null, never undefined');
+  const partial = buildHealthDump(full, { ledger: null, mesh: { cap: 0 } });
+  ok(partial.ledger === null && partial.meshAttempts === null, 'a mesh object without attempts reads null; a null ledger reads null');
+  ok(none.peers === d.peers && none.roles === d.roles, 'the rest of the dump is unchanged by the extra');
+}
+
 console.log(`\n${fail === 0 ? '✓' : '✗'} ${pass}/${pass + fail}`);
 process.exit(fail === 0 ? 0 : 1);

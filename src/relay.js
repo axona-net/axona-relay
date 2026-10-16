@@ -145,6 +145,14 @@ export function poolsFromEnv(env = process.env) {
  * RELAY_MESH_POOLS by design: enforcement without a profile enforces the
  * ledger's legacy direction rows (cPhys 66 / cInbound 4 / pPending 8).
  */
+/** Mesh events a host must be able to read without a debug log: refusals, rejects, sheds, deferred transfers. */
+export const MESH_INFO_EVENTS = new Set([
+  'offer-refused', 'initiate-refused', 'offer-shed', 'offer-rejected', 'retry-refused',
+  'reserve-refused', 'alloc-refused', 'alloc-unreserved-refused', 'attach-unreserved-refused',
+  'reclass-refused', 'reclass-deferred', 'reclass-applied', 'reclass-deferred-refused',
+  'mesh-degree-retire', 'mesh-make-room-retire',
+]);
+
 export function ledgerFromEnv(env = process.env) {
   return env.RELAY_LEDGER_ENFORCE === '1' ? { enforce: true } : null;
 }
@@ -243,7 +251,13 @@ export function createRelay({ bridgeUrl, identity, region, onLog = () => {},
     // ENFORCEMENT (0.160.0): RELAY_LEDGER_ENFORCE=1 → the ledger refuses.
     meshLedger:    ledgerFromEnv(process.env),
     WebSocketImpl,
-    log: (event, ctx) => onLog('debug', event, ctx),
+    // THE REFUSAL EVENTS ARE INFO (0.161.0). Every mesh event used to log at
+    // debug, which the relay's info log drops, so on 2026-10-16 a refusal in
+    // region 128 could not be read from any relay host while the suite missed
+    // the same eleven topics run after run. The events that say "this node
+    // refused or was refused" now reach the info log; everything else stays
+    // debug.
+    log: (event, ctx) => onLog(MESH_INFO_EVENTS.has(event) ? 'info' : 'debug', event, ctx),
   });
   {
     const p = (typeof transport.poolProfile === 'function') ? transport.poolProfile() : null;

@@ -300,7 +300,13 @@ async function main() {
       // no subscribers and no messages" at all — relays serve no /diag, so
       // before this the answer existed on the two bridges and nowhere else.
       // On an older kernel those three print null and nothing else changes.
-      onLog('info', 'health-dump', buildHealthDump(h));
+      // THE COUNTERS (0.161.0): the channel ledger's stats and the mesh's
+      // attempt/reject counters live on the transport, not in health(). Each
+      // read is guarded on its own so a throw in one loses nothing else.
+      let ledger = null, mesh = null;
+      try { ledger = transport?.channelLedgerStats?.() ?? null; } catch { ledger = null; }
+      try { mesh = transport?.mesh?.degreeStats?.() ?? null; } catch { mesh = null; }
+      onLog('info', 'health-dump', buildHealthDump(h, { ledger, mesh }));
     } catch (e) {
       try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ }
     }

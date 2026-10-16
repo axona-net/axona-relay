@@ -27,8 +27,21 @@
  * @param {any} h  the object returned by peer.health()
  * @returns {object} the health-dump payload
  */
-export function buildHealthDump(h) {
+export function buildHealthDump(h, extra = null) {
   const roles = Array.isArray(h?.axonRoles) ? h.axonRoles : [];
+  // THE COUNTERS (0.161.0; David 2026-10-16 "Build relay 0.161.0 with the
+  // counters"). The kernel's health() carries the degree report but not the
+  // channel ledger's stats or the mesh's attempt counters, which live on the
+  // transport. The caller reads them there and hands them in; absent (an
+  // older transport, a throw) they print null and nothing else changes.
+  //   ledger: channel_ledger stats() — bounds (enforce), pools, byClass
+  //           {M,I,none}.{charged,reserved}, reservations, reclassPending,
+  //           refusedM/I, wouldRefuseM/I, refusedIn/Out, reclassDeferred/Applied,
+  //           allocUnreserved, byState, oldestClosingMs …
+  //   meshAttempts: mesh degreeStats().attempts — stale, missing, replaced,
+  //           ignoredOnOpen, shed, rejectSent, rejectRecv, rejectStale
+  const ledger = (extra && typeof extra.ledger === 'object') ? extra.ledger : null;
+  const meshAttempts = (extra && extra.mesh && typeof extra.mesh === 'object' && extra.mesh.attempts && typeof extra.mesh.attempts === 'object') ? extra.mesh.attempts : null;
 
   // CAPACITY — the reason a starved relay reads as healthy without it.
   //
@@ -59,6 +72,8 @@ export function buildHealthDump(h) {
     // TWO POOLS (0.159.0): the kernel's degree report — armed, profile, M, I,
     // usable, promotion counters — carried whole; null on a kernel without it.
     degree: h?.degree ?? null,
+    ledger,          // 0.161.0: the channel ledger's counters, or null
+    meshAttempts,    // 0.161.0: the mesh's attempt/reject counters, or null
     subscriptions: h?.subscriptions ?? null,   // this node's OWN subs — NOT seated downstream
     roles: roles.length,
     // false = the kernel could not READ its roles, which is not the same fact
