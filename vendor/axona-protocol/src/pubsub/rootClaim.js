@@ -60,6 +60,24 @@ export function roleNature(role) {
 }
 
 /** A relay's per-topic state (root or non-root child relay). */
+// dual-root packet 4(d) (axona-docs 14a6bd8): per-role merge state. Allocated
+// lazily; a node that is not merge-capable never touches it.
+export function makeMergeState() {
+  return {
+    releaseToken: null,     // minted by the merge's step 5; _set consumes it on the ROOT→non-ROOT flip
+    nextCandidate: null,    // the last refused flip {why, ctx, at}: what the machine reconciles toward
+    candidate: null,        // accepted winner record {id, epoch, source, at} (d4 arms the hold toward it)
+    gate: null,             // (d2) the cut: {winner, winnerEpoch, corr, at} while this role forwards writes
+    gateFwd: new Map(),     // (d2) gateFwd nonce -> {at, type, corr}: forwards whose return must not be stamped
+    corr: null,             // (d3) the live exchange's correlation id
+    pendingDelegation: new Map(), // (d1) ADOPT nonce -> {subs:[hex], at}: subscribers delegated but unacked
+    pins: new Set(),        // (d3) msgIds exempt from cap eviction and expiry: W's baseline + manifest for a round's life; L's export after the flip
+    reserve: null,          // (d3, W) {entries, bytes} left for W's own writes during a round; null = no round
+    completing: null,       // (d3, L) {corr, winner, winnerEpoch, loserEpoch, hash} after the committed flip until MERGE_CLOSED; rides every SUB
+    acceptedWinner: null,   // (d4, L) {id, epoch, at, exp}: the hold toward W regardless of closeness
+  };
+}
+
 export function makeRole(topicId, isRoot, createdAt = null) {
   return {
     topicId,                         // bigint
@@ -110,10 +128,29 @@ export function makeRole(topicId, isRoot, createdAt = null) {
                                      // accidentally missing. See OBLIGATIONS in constants.js.
       probeTries: 0,                 // empty-self-root cohort pulls fired (4.24.0; quenches at EMPTY_ROOT_PROBE_MAX)
       probeAt: 0,                    // _now() of the last cohort pull (rate-limits the refreshTick re-probe)
+      // dual-root packet (a) (axona-docs 14a6bd8): a try whose every pull resolved
+      // consumed:false is DEFERRED, not counted — the 2026-10-17 Windows relay spent
+      // its three tries inside the 20 s after its restart while its routed sends
+      // were failing 6–12 per tick, then never probed again. Deferred tries re-arm
+      // from the sweep once the node can route (servingCapable) or after
+      // 4 × EMPTY_ROOT_PROBE_INTERVAL_MS, at most EMPTY_ROOT_PROBE_MAX deferrals.
+      probeDeferred: false,          // the last try reached nobody; the sweep re-arms it
+      probeDeferrals: 0,             // deferred tries so far (bounded by EMPTY_ROOT_PROBE_MAX)
+      probeDeferredAt: 0,            // _now() of the last deferral
+      probeInflight: false,          // a try is awaiting its verdicts; the sweep does not stack another
+      openMerges: new Map(),         // (d3, L) corr -> {winner, winnerEpoch, loserEpoch, state, snapshot, manifest, lastCursorSent, offeredAt, boundAt, tB, timing}
+      openPulls: new Map(),          // (d3, W) corr -> {loser, loserEpoch, cursor, framesIn, held, sent, startedAt, timing, state, manifest, header, tS}
       pulledLw: new Map(),           // subHex -> lowest lw already PULLUP'd from that child (4.22.1:
                                      // a refused pull — e.g. the child's oldest is tombstoned here —
                                      // must not re-fire on every renewal; re-arm only if lw DECREASES)
     },
+    // dual-root packet 4(d): the merge machine's per-role state; null until the
+    // first candidate, gate, pin or token touches it (makeMergeState()).
+    merge: null,
+    // dual-root packet 4(d): the cut generation. Incremented by the cut in the
+    // same synchronous run that sets the gate; never decremented. Commit paths
+    // capture it before their first await and re-check it at the mutation.
+    gen: 0,
     replicas: new Map(),             // (when ROOT) backupHex -> { at }  nodes holding a warm copy of our cache
     backupOf: null,                  // (when BACKUP) hex of the root replicating to us; null if we're not a backup
     lastReplicaAt: 0,                // (when BACKUP) _now() of the last replica push from our root (staleness → presume root gone)
@@ -211,9 +248,71 @@ export class RootClaim {
 
   // ────────────────────────── the transition function ──────────────────────────
 
+  // ── Part 3 of the dual-root packet (axona-docs 14a6bd8): ONE election relation ──
+  // A claim is (id, epoch). Between two live claims the HIGHER epoch wins; at
+  // equal epoch the XOR-closer to the topic wins. Lexicographic, so total and
+  // pairwise consistent: for any two live claims exactly one wins, from either
+  // side's view. The yield predicate at rootElection.js (`supersedesMine ||
+  // closer`) is two yields and no winner — a closer node at a lower epoch yields
+  // to a farther one at a higher epoch, which yields back on closeness — and a
+  // merge run on it crosses offers forever. Tombstoned claims are OUT before the
+  // comparison (the caller's job: tombstones order rejection, this orders
+  // adoption). Epoch before closeness keeps E4; closeness alone re-elects a
+  // stale incarnation whenever it is nearer.
+  //
+  // UNVERSIONED (epoch 0) on EITHER side → closeness alone, the kernel's
+  // standing mixed-version rule (rootElection.js: "the whole rule whenever
+  // either side is unversioned"). The paths that do not learn the winner's
+  // epoch — verify, defer, handoff — pass null and are read as 0. Among
+  // VERSIONED claims the relation is a total order (antisymmetric,
+  // transitive); with an unversioned claim in a triple it is pairwise
+  // antisymmetric only, which is why an unversioned node is never a merge
+  // participant (the legacy fallback, packet 4(d)).
+  static claimWins(topicBig, a, b) {
+    const ea = Number.isInteger(a?.epoch) ? a.epoch : 0;
+    const eb = Number.isInteger(b?.epoch) ? b.epoch : 0;
+    if (ea > 0 && eb > 0 && ea !== eb) return ea > eb;
+    return (idBig(a.id) ^ topicBig) < (idBig(b.id) ^ topicBig);
+  }
+  /** Does the claim {id, epoch} win over THIS node's claim on the topic? */
+  wins(topicBig, claim) {
+    const role = this.m.axonRoles.get(topicBig);
+    const mine = { id: idHex(this.m.nodeId), epoch: role?.isRoot ? (role.epoch | 0) : 0 };
+    return RootClaim.claimWins(topicBig, claim, mine);
+  }
+
+  // CUSTODY (Part 3): a role holds custody while it holds a body or an active
+  // tombstone. A root with custody sheds its claim only through the merge
+  // machine's step 5, which mints the release token the flip below demands.
+  hasCustody(role) {
+    if (!role) return false;
+    if (role.cache && role.cache.length) return true;
+    try { return (this.m._activeDels?.(role) || []).length > 0; } catch { return false; }
+  }
+
   // The ONLY place role.isRoot changes. One structured log per flip.
+  //
+  // RETURNS {committed, reason} (dual-root packet 4(d), "the transition is a
+  // transaction"). Every caller branches on it: a refused flip runs none of
+  // the side effects that used to follow it unread — demote() pinned upstream,
+  // armed the hold and sent the SUB; adoptChild() pinned upstream; _onAdopt
+  // then accepted delegated subscribers. The refusal: on a MERGE-CAPABLE node,
+  // a ROOT→non-ROOT flip of a role WITH CUSTODY is refused unless ctx carries
+  // the release token the merge's step 5 minted. That one gate covers every
+  // path that sheds a claim, including ADOPT, which never calls demote().
+  // A node that is not merge-capable flips as 4.114.1 did.
   _set(role, isRoot, why, ctx = {}) {
-    if (role.isRoot === isRoot) return;
+    if (role.isRoot === isRoot) return { committed: true, reason: 'noop' };
+    if (!isRoot && this.m._mergeCapable && this.hasCustody(role)) {
+      const tok = role.merge?.releaseToken;
+      if (!tok || ctx.releaseToken !== tok) {
+        if (!role.merge) role.merge = makeMergeState();
+        role.merge.nextCandidate = { why, ctx: { ...ctx }, at: this.m._now() };
+        this.m._log('info', 'custody-refused', { topic: idHex(role.topicId).slice(0, 12), why, to: ctx.to ?? null, cache: role.cache.length });
+        return { committed: false, reason: 'custody' };
+      }
+      role.merge.releaseToken = null;                          // consumed by this one flip
+    }
     // Root INCARNATION mint (v0.3): every entry to the ROOT nature takes the
     // next epoch for this seat. Minted BEFORE the flip so the announce that
     // follows any promotion carries the new incarnation, never a stale one.
@@ -238,8 +337,9 @@ export class RootClaim {
     // transition already names.
     const seatedSubs = role.subscribers?.size ?? 0;
     const seatedKids = role.children?.size ?? 0;
+    const { releaseToken: _rt, ...logCtx } = ctx;               // the token is not a log field
     this.m._log('info', 'root-transition',
-      { topic: idHex(role.topicId).slice(0, 12), isRoot, why, subs: seatedSubs, kids: seatedKids, ...ctx });
+      { topic: idHex(role.topicId).slice(0, 12), isRoot, why, subs: seatedSubs, kids: seatedKids, ...logCtx });
     // SUBSCRIBER-LIST REPLICATION: on PROMOTION, re-adopt the principal's inherited
     // subscribers into the fanout and replay the cache to each, so the orphaned
     // readers are served immediately instead of waiting ~9s to re-subscribe (the
@@ -271,6 +371,7 @@ export class RootClaim {
       }
       role._inheritedMetricsOn = 0;
     }
+    return { committed: true, reason: why };
   }
 
   // ── BACKUP nature transitions (v4.26.0, Phase 7) ──────────────────────────
@@ -371,13 +472,17 @@ export class RootClaim {
   // downstream child) or our subtree starves; every demotion is paired with a
   // confirming subscribe (the one-sided-link lesson: root subs=0, cache>0).
   // Returns false when there was no live root claim to yield (no-op).
-  demote(topicBig, toHex, why) {
+  demote(topicBig, toHex, why, ctx = null) {
     const m = this.m;
     const role = m.axonRoles.get(topicBig);
     if (!role || !role.isRoot) return false;
     let to; try { to = idBig(toHex); } catch { return false; }
     if (to === m.nodeId) return false;               // never "demote toward self"
-    this._set(role, false, why, { to: toHex.slice(0, 10) });
+    // TRANSACTION (dual-root packet 4(d)): a refused flip runs nothing below —
+    // no upstream, no hold, no SUB — and returns false. The caller that holds
+    // custody is told by _set's log; the merge machine takes it from there.
+    const flip = this._set(role, false, why, { to: toHex.slice(0, 10), ...(ctx || {}) });
+    if (!flip.committed) return false;
     m._upstream.set(topicBig, [lc(toHex)]);
     // Step-down hold (4.102.0): having yielded to a STRICTLY CLOSER named root,
     // do not retake the seat by self-promotion until the hold expires. Only a
@@ -387,7 +492,12 @@ export class RootClaim {
     // (smoke_root_reconcile phase 5). The keyspace-closest node may always
     // reclaim; the hold binds only the node that the keyspace says should not
     // own the topic.
-    if ((to ^ topicBig) < (m.nodeId ^ topicBig)) {
+    // THE ACCEPTED-WINNER HOLD (dual-root packet 4(d), v0.10): a merge-capable
+    // loser that shed its claim at step 5 holds toward W WHETHER OR NOT W IS
+    // CLOSER — under epoch-first election a closer loser at a lower epoch would
+    // otherwise re-promote on the next bare request, mint knownEpoch + 1 and
+    // outrank the live winner at once. `ctx.holdAlways` is set only by step 5.
+    if (ctx?.holdAlways || (to ^ topicBig) < (m.nodeId ^ topicBig)) {
       m._stepDownHold?.set(topicBig, { to: lc(toHex), at: m._now(), lastLog: 0 });
     }
     m._sendSubscribe(topicBig);
@@ -403,6 +513,13 @@ export class RootClaim {
     if (!h) return null;
     if (!(m._stepDownHoldMs > 0) || m._now() - h.at >= m._stepDownHoldMs) {
       m._stepDownHold.delete(topicBig);
+      // The accepted-winner record expires WITH the hold (dual-root 4(d)): no
+      // beacon from W refreshed it, so this node may promote on the next request.
+      const role = m.axonRoles.get(topicBig);
+      if (role?.merge?.acceptedWinner && role.merge.acceptedWinner.id === h.to) {
+        role.merge.acceptedWinner = null;
+        m._log('info', 'merge-record-expired', { topic: idHex(topicBig).slice(0, 12), winner: h.to.slice(0, 10) });
+      }
       m._log('info', 'root-hold-expired', {
         topic: idHex(topicBig).slice(0, 12), to: h.to.slice(0, 10), heldS: Math.round((m._now() - h.at) / 1000),
       });
@@ -424,6 +541,12 @@ export class RootClaim {
     const m = this.m;
     const h = this.holdFor(topicBig);
     if (!h) return null;
+    // The accepted winner IS the target while its record is valid (dual-root
+    // 4(d)): the keyspace terminus is this node, the owner is W, and a bare
+    // request here is redirected to W by name for the record's life. The
+    // forward's own verdict and the re-entry ledger bound a dead W.
+    const aw = m.axonRoles.get(topicBig)?.merge?.acceptedWinner;
+    if (aw && aw.id === h.to && aw.exp > m._now()) return h.to;
     if (m._isReachableId(h.to)) return h.to;
     const c = this.liveCloserRoot(topicBig, { requireReachable });
     return (c && lc(c) === h.to) ? h.to : null;
@@ -487,7 +610,12 @@ export class RootClaim {
       m.axonRoles.set(topicBig, role);
       m._log('info', 'relay-formed', { topic: idHex(topicBig).slice(0, 12) });
     }
-    this._set(role, false, 'adopted-child', { to: parentHex.slice(0, 10) });
+    // TRANSACTION (dual-root packet 4(d)): ADOPT never called demote(), so the
+    // custody gate at _set is the only thing between a delegating parent and a
+    // root with custody; a refused flip pins no upstream and returns null, and
+    // _onAdopt answers the parent with a refusal instead of accepting its subs.
+    const flip = this._set(role, false, 'adopted-child', { to: parentHex.slice(0, 10) });
+    if (!flip.committed) return null;
     m._upstream.set(topicBig, [lc(parentHex)]);
     return role;
   }
@@ -505,7 +633,7 @@ export class RootClaim {
       m._rootBeacons.delete(topicBig);
     }
     const closer = this.liveCloserRoot(topicBig);
-    if (closer && closer !== leaverHex) this.demote(topicBig, closer, 'handoff-better-heir');
+    if (closer && closer !== leaverHex) this.m._mergeCandidate(topicBig, closer, null, 'handoff-better-heir');
   }
 }
 

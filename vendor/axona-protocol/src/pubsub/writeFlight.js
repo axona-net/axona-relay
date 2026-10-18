@@ -72,12 +72,21 @@ export const writeFlightMethods = {
   // per-flight; `attemptId` is per-entry (Aster R10), inheritable across a
   // promotion so the chain stays one attempt (the `attemptId` arg — D2 threads
   // the API-boundary value here; passing null mints one).
-  _flightOpen(topicBig, rootHex, type, payload, attemptId = null) {
+  //
+  // `expectedEpoch` (dual-root packet 4(d), the epoch authority): when given
+  // (an integer ≥ 1, the merge's bound winnerEpoch) the flight's key is
+  // (topic, root, expectedEpoch), its epoch field is that value and never 0,
+  // and the beacon record is NOT consulted at open or at complete — so a
+  // missing or stale beacon cannot make the flight accept an ack at any
+  // epoch. Without it the flight takes its epoch from the beacon record, or
+  // 0 (unversioned), as before.
+  _flightOpen(topicBig, rootHex, type, payload, attemptId = null, expectedEpoch = null) {
     const msgId = writeMsgId(type, payload);
     if (!msgId) return null;                              // malformed write — verification refuses it downstream
     if (!this._writeFlights) this._writeFlights = new Map();
-    const rec = this._rootBeacons.get(topicBig);
-    const epoch = (rec && Number.isInteger(rec.epoch)) ? rec.epoch : 0;
+    let epoch;
+    if (Number.isInteger(expectedEpoch) && expectedEpoch >= 1) epoch = expectedEpoch;
+    else { const rec = this._rootBeacons.get(topicBig); epoch = (rec && Number.isInteger(rec.epoch)) ? rec.epoch : 0; }
     const key = flightKey(topicBig, rootHex, epoch);
     let f = this._writeFlights.get(key);
     if (!f) {
@@ -120,8 +129,12 @@ export const writeFlightMethods = {
       }
       if (f.epoch !== 0 && ackEpoch !== f.epoch) {
         this._log('info', 'write-flight-ack-epoch-mismatch', { key: key.slice(0, 20), got: ackEpoch, want: f.epoch });
+        if (f.merge) this._mergeWinnerReminted(f, ackEpoch);   // the winner re-minted after the bind: abort the round (dual-root 4(d))
         continue;
       }
+      // A merge flight's ack after its round ended closes the entry and
+      // changes nothing about this node's claim (dual-root 4(d)).
+      if (f.merge && !this._mergeFlightLive(f)) this._log('info', 'merge-late-ack', { key: key.slice(0, 20), corr: f.merge.corr.slice(0, 8) });
       f.entries.delete(ck);
       if (f.entries.size === 0) this._writeFlights.delete(key);
       this._log('debug', 'write-flight-complete', { key: key.slice(0, 20), via: 'ingest-ack' });
@@ -165,6 +178,10 @@ export const writeFlightMethods = {
     for (const [key, f] of [...this._writeFlights]) {
       if (now < f.deadline) continue;
       if (f.stage === 'await-ack' || f.stage === 'retrying') {
+        // A merge flight that passed INGEST_ACK_MS with no ack from the winner
+        // ends its round (dual-root 4(d)); the flight itself runs the shipped
+        // receipt-bound recovery below as any write flight does.
+        if (f.merge && f.stage === 'await-ack' && f.rounds === 0) this._mergeFlightSilent(f);
         if (f.rounds >= FLIGHT_MAX_ROUNDS) { this._flightEvict(key, f); continue; }
         f.stage = 'probing';
         f.rounds += 1;
@@ -244,6 +261,14 @@ export const writeFlightMethods = {
       topic: idHex(f.topicBig).slice(0, 12), root: f.rootHex.slice(0, 12), epoch: f.epoch,
       detail: 'no correlated receipt within the flight budget — incarnation tombstoned',
     });
+    // A tombstone for the accepted winner's claim clears the record and the
+    // hold at once (dual-root 4(d)): the loser may promote on the next request.
+    const evRole = this.axonRoles.get(f.topicBig);
+    if (evRole?.merge?.acceptedWinner?.id === f.rootHex && evRole.merge.acceptedWinner.epoch <= f.epoch) {
+      evRole.merge.acceptedWinner = null;
+      const h = this._stepDownHold?.get(f.topicBig); if (h && h.to === f.rootHex) this._stepDownHold.delete(f.topicBig);
+      this._log('info', 'merge-record-cleared', { topic: idHex(f.topicBig).slice(0, 12), winner: f.rootHex.slice(0, 10), why: 'root-evicted' });
+    }
     // Retry-promote: the closest LIVE candidate gets the write via-pinned;
     // its own terminal machinery roots, ingests, and acks. Same closest-live
     // rule as everywhere; the tombstone keeps the corpse out of the pool.

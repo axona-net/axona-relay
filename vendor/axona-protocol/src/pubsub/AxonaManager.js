@@ -45,7 +45,7 @@
 // fan-out, root sets, the old recruit/adopt/promote/dissolve + msgsync/kill-sync.
 // =====================================================================
 
-import { RootClaim, roleNature } from './rootClaim.js';
+import { RootClaim, roleNature, makeMergeState } from './rootClaim.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { RoleScopedDurability } from './durability.js';
@@ -59,7 +59,8 @@ import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          MAX_ROLES, ROLE_GRACE_MS, ROLE_ADMIT_PER_TICK,
          HELLO_DEADLINE_MS, SATURATION_PRESSURE, ROOT_REPLICATE_FULL_MS,
          TICK_LAG_WINDOW, OBLIGATIONS, ROUTE_FAIL_TRACK_MAX,
-         ROLE_IDLE_TTL_MS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS } from './constants.js';
+         ROLE_IDLE_TTL_MS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
+         MERGE_CAPABLE_DEFAULT } from './constants.js';
 import { topicStoreMethods }   from './topicStore.js';
 import { rootElectionMethods } from './rootElection.js';
 import { repairPlaneMethods }  from './repairPlane.js';
@@ -67,6 +68,7 @@ import { wireHandlersMethods }  from './wireHandlers.js';
 import { syncEngineMethods }    from './syncEngine.js';
 import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
+import { mergeMachineMethods }  from './mergeMachine.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 import { shadowEnabled } from '../registry/index.js';
 import { envNum, envStr } from '../utils/env.js';
@@ -109,6 +111,7 @@ export class AxonaManager {
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
+    mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-OFF; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
   } = {}) {
     if (!dht || typeof dht.routeMessage !== 'function' || typeof dht.getSelfId !== 'function'
@@ -311,6 +314,14 @@ export class AxonaManager {
     // 0 disables. Topic -> { to, at, lastLog }.
     this._stepDownHoldMs  = envNum('STEPDOWN_HOLD_MS', 300_000);
     this._stepDownHold    = new Map();
+    // DUAL-ROOT RECONCILIATION (axona-docs 14a6bd8; David "build it" 2026-10-17).
+    // OFF by default. An unarmed node behaves as 4.114.1: every path that sheds
+    // a root claim demotes directly. Armed (option `mergeCapable` or env
+    // MERGE_CAPABLE=1), a root WITH CUSTODY (a body or an active tombstone)
+    // sheds its claim only through the merge machine, and the flip at _set is
+    // refused without the release token the machine mints. Release and arming
+    // are separate words from David; neither is this option's default.
+    this._mergeCapable    = !!(mergeCapable ?? envNum('MERGE_CAPABLE', MERGE_CAPABLE_DEFAULT));
     this._rolesReapedIdle = 0;
     this._rolesReapedDead = 0;   // subscriber-less AND message-less: reaped on sight
     this._pending         = new Map();  // pull corrId -> { resolve, timer }
@@ -326,6 +337,9 @@ export class AxonaManager {
     // The root-claim state machine: every isRoot transition + its guards
     // (claim / defer / demote / handoff decision table) live in rootClaim.js.
     this._rootClaim = new RootClaim(this, { beaconMs: BEACON_MS });
+    // Monotonic clock for the merge's bind-anchored deadlines (dual-root 4(d)):
+    // the wall clock (`now`) can jump; this one cannot. Fences override it.
+    this._mono = () => (globalThis.performance && typeof globalThis.performance.now === 'function') ? globalThis.performance.now() : Date.now();
 
     this._registerHandlers();
   }
@@ -783,8 +797,48 @@ export class AxonaManager {
   // time. PUB and KILL moved to _forwardToRoot (v4.59.0) — their looser gate
   // means the named root may be a guess, and a guess must not move state.
   _deferToRoot(topicBig, type, payload, rootHex) {
-    this._rootClaim.demote(topicBig, rootHex, 'defer-terminal');
+    this._mergeCandidate(topicBig, rootHex, null, 'defer-terminal');
     this._send(type, { ...payload, via: [rootHex] });
+  }
+
+  // ── DUAL-ROOT RECONCILIATION: the ONE entry every claim-shedding path takes ──
+  // (axona-docs 14a6bd8 Part 4(d); David "build it" 2026-10-17.) Before this,
+  // five sites called rootClaim.demote() directly — the beacon yield, the verify,
+  // the defer-confirmed verdict, the SUB defer and the handoff heir check — and a
+  // root holding eleven entries yielded on any of them with the entries behind
+  // it, to be carried by whichever path happened next. Now every site names its
+  // candidate here:
+  //   · not merge-capable, or this role holds no custody → demote directly,
+  //     exactly as 4.114.1 (the flip at _set commits; nothing else changes);
+  //   · merge-capable AND custody → the claim is NOT shed here. The winner is
+  //     recorded on role.merge.candidate under the election relation
+  //     (claimWins: epoch desc, XOR asc; a candidate that does not win over
+  //     this node's claim is dropped), `merge-candidate` is logged, and the
+  //     merge machine (d3) runs the exchange from that record. demote() is
+  //     reached only from its step 5, carrying the release token.
+  // `winnerEpoch` is the candidate's epoch when the path knows it (the beacon
+  // yield does); null means "unversioned", which the relation treats as 0.
+  _mergeCandidate(topicBig, winnerHex, winnerEpoch, source) {
+    const role = this.axonRoles.get(topicBig);
+    if (!this._mergeCapable || !role || !role.isRoot || !this._rootClaim.hasCustody(role)) {
+      return this._rootClaim.demote(topicBig, winnerHex, source);
+    }
+    const w = lc(winnerHex);
+    if (w === lc(idHex(this.nodeId))) return false;
+    const claim = { id: w, epoch: Number.isInteger(winnerEpoch) ? winnerEpoch : 0 };
+    if (!this._rootClaim.wins(topicBig, claim)) {
+      this._log('info', 'merge-candidate-loses', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, myEpoch: role.epoch | 0 });
+      return false;
+    }
+    if (!role.merge) role.merge = makeMergeState();
+    const prev = role.merge.candidate;
+    // A standing candidate is replaced only by one that wins over IT: two
+    // paths naming two winners in one tick converge on the relation's answer.
+    if (prev && !RootClaim.claimWins(topicBig, claim, prev)) return false;
+    role.merge.candidate = { ...claim, source, at: this._now() };
+    this._log('info', 'merge-candidate', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, cache: role.cache.length, replaced: !!prev });
+    this._mergeOffer(topicBig, role);                       // step 1 of the exchange (d3): OFFER toward the recorded winner
+    return false;
   }
 
   // Synchronous terminal-ownership verification (council-ratified, David 2026-08-30).
@@ -937,7 +991,7 @@ export class AxonaManager {
       }
       if (v === 'consumed') {
         if (!dispatchAttributedTo(r, rootHex)) return;     // consumed elsewhere / unattributed → fail closed
-        this._rootClaim.demote(topicBig, rootHex, 'defer-confirmed');
+        this._mergeCandidate(topicBig, rootHex, null, 'defer-confirmed');
         return;
       }
       if (v !== 'failed') return;                          // unsupported → no evidence → nothing moves
@@ -1315,11 +1369,19 @@ export class AxonaManager {
     // so it is the only one that can act on a failure. See _unpinIfWaypointDead.
     const sent = this._send(T.SUB, {
       topicId: idHex(topicBig), via, subscriberId: idHex(this.nodeId),
-      since: this._sinceFor(topicBig),
+      // THE SINCE-ALL REPLAY (dual-root 4(d) step 5): the first merge-bearing SUB
+      // asks for everything, so the demoted loser converges to the winner's
+      // state as its child — a child's ordinary since is its own high water, and
+      // the winner's older unique history sits below it. One shot, then ordinary.
+      since: role?.merge?.completing?.sinceAll ? 0 : this._sinceFor(topicBig),
       hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
       lw: role ? this._lowWater(role) : 0,    // …and its OLDEST stamp, so a root missing the pre-transition half pulls it
       latest,
+      // COMPLETION IS CORRELATED (dual-root 4(d)): while this loser is completing a
+      // handover, every SUB carries the merge block; an ordinary renewal completes nothing.
+      ...(role?.merge?.completing ? { merge: { corr: role.merge.completing.corr, winner: role.merge.completing.winner, winnerEpoch: role.merge.completing.winnerEpoch, loserEpoch: role.merge.completing.loserEpoch, hash: role.merge.completing.hash } } : {}),
     });
+    if (role?.merge?.completing?.sinceAll) role.merge.completing.sinceAll = false;
     // D0 / M4 COMPLETION STAMP. The renewal obligation (CHILD / BACKUP / HOLDER /
     // APP_SUB in OBLIGATIONS) is discharged HERE — after the SUB is on the wire,
     // not when the tick decided to try. Placed in _emitSubscribe rather than at
@@ -1789,6 +1851,7 @@ Object.assign(
   syncEngineMethods,     // Phase 8: the ONE repair/durability sync operation + policy table
   writeFlightMethods,    // E3 (Dead-Root Eviction v0.3): ingest-ack write completion, receipt probe, evict + retry-promote
   tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
+  mergeMachineMethods,   // dual-root reconciliation 4(d) (axona-docs 14a6bd8): the cut, the gate, the forward to the winner — behind mergeCapable
 );
 
 export default AxonaManager;

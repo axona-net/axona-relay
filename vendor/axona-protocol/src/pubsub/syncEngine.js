@@ -117,26 +117,50 @@ export const syncEngineMethods = {
   // The per-pair quench ledger is consulted HERE (not at call sites): a
   // SPLIT_UNION pull is one-shot per (child, lw) and re-arms only when the
   // child's lw decreases. Returns true iff the pull was sent.
-  _syncPull(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null } = {}) {
+  // Returns true (sent) / false (quenched by the SPLIT_UNION ledger) — the
+  // synchronous contract smoke_sync_engine pins. A caller that needs the
+  // route's VERDICT uses _syncPullAwait below.
+  _syncPull(targetBig, topicBig, policyName, opts = {}) {
+    return this._syncPullAwait(targetBig, topicBig, policyName, opts) !== false;
+  },
+  // Same send; returns the ROUTE'S PROMISE (dual-root packet (a)) or false
+  // when quenched. The promise resolves to the verdict routing already
+  // produces ({consumed, …}, or undefined from a non-reporting adapter) and
+  // never rejects (_route contains that). The empty-root probe awaits it so a
+  // try that reached nobody is not counted as a try.
+  _syncPullAwait(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null } = {}) {
     if (policyName === 'SPLIT_UNION') {
       const peerHex = lc(idHex(targetBig));
       const prev = role.sync.pulledLw.get(peerHex);
       if (!(prev === undefined || lw < prev)) return false;
       role.sync.pulledLw.set(peerHex, lw);
     }
-    this._route(targetBig, T.PULLUP, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
-    return true;
+    return this._emitPullUp(targetBig, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
+  },
+  // THE ONE PULLUP EMISSION SITE and THE ONE REPLAYUP EMISSION SITE
+  // (smoke_emission_sites pins each verb to one `_route` in this engine). The
+  // merge machine (dual-root 4(d)) emits its corr-bearing pulls and frames
+  // through these two, never through its own route call.
+  _emitPullUp(targetBig, payload) {
+    return this._route(targetBig, T.PULLUP, payload);
+  },
+  _emitReplayUp(targetBig, payload) {
+    return this._route(targetBig, T.REPLAYUP, payload);
   },
 
   // Answer a PULLUP: replay my cache delta (and active tombstones) UP to the
   // asking parent. The only REPLAYUP emission site.
   _syncAnswerPull(payload) {
     const role = this.axonRoles.get(idBig(payload.topicId));
-    if (!role || !role.cache.length) return;
+    if (!role) return;
+    // A TOMBSTONE-ONLY role transfers its dels (dual-root packet 4(d)): the
+    // old `!role.cache.length` return answered nothing for a role whose
+    // whole state is deletions, and a puller then resurrected the killed body.
+    if (!role.cache.length && !this._activeDels(role).length) return;
     const sinceHw = Number.isFinite(payload.sinceHw) ? payload.sinceHw : 0;
     const { msgs, dels } = this._syncDelta(role, sinceHw);
     if ((msgs.length || dels.length) && isHexId(lc(payload.parentId))) {
-      this._route(idBig(payload.parentId), T.REPLAYUP, { topicId: idHex(role.topicId), msgs, dels });
+      this._emitReplayUp(idBig(payload.parentId), { topicId: idHex(role.topicId), msgs, dels });
     }
   },
 
@@ -200,11 +224,28 @@ export const syncEngineMethods = {
       // cohort spray, and depart — dropping the last copy. We now hold no role
       // and send no ack, so the leaver's unacked path re-homes the topic.
       let role = this.axonRoles.get(topicBig);
+      // A WHOLE transfer at a GATED heir is refused before anything is applied
+      // (dual-root packet 4(d)): no del, no body, NO HANDOFFACK — the silence
+      // the leaver already understands (it retries another heir and cohort-
+      // sprays). A short ack would be wrong: held = sent = 0 on a tombstone-
+      // only transfer reads as success at the leaver.
+      if (role?.merge?.gate) {
+        this._log('warn', 'handoff-refused-gated', { topic: String(payload.topicId).slice(0, 12), from: typeof payload.from === 'string' ? payload.from.slice(0, 12) : null, corr: role.merge.gate.corr.slice(0, 8) });
+        return;
+      }
       if (!role && !this.admitPushedRole(topicBig)) return;   // refuse: stay silent, leaver retries
       if (!role) role = this._becomeRoot(topicBig, 'handoff-heir');
       if (!role) return;                 // hard refusal (bridge) — no role, no ack, leaver re-homes
-      await this._applyDels(role, topicBig, payload.dels);
-      const tally = await this._ingestStampedBatch(role, payload.msgs);
+      const cut = this._cutCapture(role);                      // THE CUT: before the first await (dual-root 4(d))
+      const delsOk = await this._applyDels(role, topicBig, payload.dels, cut);
+      const tally = delsOk ? await this._ingestStampedBatch(role, payload.msgs, cut)
+                           : { sent: Array.isArray(payload.msgs) ? payload.msgs.length : 0, held: 0, rejected: Array.isArray(payload.msgs) ? payload.msgs.length : 0, refused: true };
+      if (tally.refused) {
+        // Refused at the cut mid-transfer: the whole transfer is refused, NO
+        // HANDOFFACK (the leaver retries elsewhere), nothing further applied.
+        this._log('warn', 'handoff-refused-cut', { topic: String(payload.topicId).slice(0, 12), from: typeof payload.from === 'string' ? payload.from.slice(0, 12) : null, sent: tally.sent, held: tally.held });
+        return;
+      }
       // Departure rules — purge the leaver's ghost beacon, never defer back to
       // the leaver, yield only to a strictly-closer live root (rootClaim).
       const leaver = typeof payload.from === 'string' ? lc(payload.from) : null;
@@ -219,9 +260,16 @@ export const syncEngineMethods = {
             { topicId: payload.topicId, held: tally.held, sent: tally.sent });
         } catch { /* best-effort */ }
       }
-      // Diagnostic (#362, #402): ingest + ack confirmation for the leaver's retry loop.
-      this._log(tally.rejected ? 'warn' : 'debug', 'handoff-ingested',
-        { topic: String(payload.topicId).slice(0, 12), sent: tally.sent, held: tally.held, rejected: tally.rejected, acked: !!(leaver && isHexId(leaver)) });
+      // RECORD, not diagnostic (dual-root packet Part 5.1, axona-docs 14a6bd8):
+      // this line is the only record a host keeps of a handoff landing. At
+      // debug it was absent from every relay log on six hosts when eleven
+      // #council entries arrived at the Windows relay on 2026-10-17 03:04Z,
+      // and the carrier of that merge stayed a hypothesis. Info, always; the
+      // leaver is named by prefix so the carrier can be matched to its leave.
+      this._log(tally.rejected ? 'warn' : 'info', 'handoff-ingested',
+        { topic: String(payload.topicId).slice(0, 12), from: leaver ? leaver.slice(0, 12) : null, policy: 'HANDOFF',
+          sent: tally.sent, held: tally.held, rejected: tally.rejected, dels: Array.isArray(payload.dels) ? payload.dels.length : 0,
+          acked: !!(leaver && isHexId(leaver)) });
       return;
     }
 
@@ -230,8 +278,8 @@ export const syncEngineMethods = {
       if (mine?.isRoot) {
         // UNION_AT_ROOT — the cohort anti-entropy contract: co-hosting roots
         // converge to the union of cache+tombstones. We keep our claim.
-        await this._applyDels(mine, topicBig, payload.dels);
-        await this._ingestStampedBatch(mine, payload.msgs);
+        const cut = this._cutCapture(mine);
+        if (await this._applyDels(mine, topicBig, payload.dels, cut)) await this._ingestStampedBatch(mine, payload.msgs, cut);
         return;
       }
       if (!this._rootReplicas) return;                  // backup duty disabled on this node
@@ -241,8 +289,8 @@ export const syncEngineMethods = {
       let role = this.axonRoles.get(topicBig);
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
       this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
-      await this._applyDels(role, topicBig, payload.dels);
-      await this._ingestStampedBatch(role, payload.msgs);
+      const cut = this._cutCapture(role);
+      if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
       // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a
       // promoted backup can re-adopt them into its fanout + replay (rootClaim._set).
       // STORED, not applied — a backup serves nobody until it becomes root.
@@ -274,8 +322,8 @@ export const syncEngineMethods = {
     // REPLAY_UP — stamped history I asked for; only meaningful if the role lives.
     const role = this.axonRoles.get(topicBig);
     if (!role) return;
-    await this._applyDels(role, topicBig, payload.dels);
-    await this._ingestStampedBatch(role, payload.msgs);
+    const cut = this._cutCapture(role);                      // THE CUT: before the first await (dual-root 4(d))
+    if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
   },
 };
 

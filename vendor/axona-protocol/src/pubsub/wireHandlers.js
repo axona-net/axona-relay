@@ -10,7 +10,7 @@
 import {
   T, RENEW_MS, RENEW_FAST_MS, RENEW_BACKOFF, DROP_MS, ROOT_CLAIM_MS,
   ROOT_REPLICAS, BACKUP_EVICT_MS, CACHE_MAX, CACHE_BYTES, MAX_DIRECT,
-  DELEGATE_BATCH, MAX_VIA, VIA_HOP_BUDGET, TTL_MS, APP_DEDUP_MAX,
+  DELEGATE_BATCH, MAX_VIA, VIA_HOP_BUDGET, TTL_MS, APP_DEDUP_MAX, ADOPT_ACK_MS,
   PENDING_PUB_TTL_MS, PENDING_PUB_MAX_TRIES, COLD_BURST_TRIES,
   COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES, COLD_BURST_SLOW_INTERVAL_MS,
   COLD_PEER_THRESHOLD, FIRST_PUBLISH_RESEND_MS, REPLAY_CHUNK_BYTES,
@@ -28,6 +28,7 @@ const randomNonce = () => {
   return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
 };
 import { verifyEnvelope, checkFreshness } from './envelope.js';
+import { makeMergeState } from './rootClaim.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
@@ -55,6 +56,10 @@ export const wireHandlersMethods = {
     registerFrame(this.dht, T.PUB,          this._onPub.bind(this),          { registry: this._frameDoor });
     registerFrame(this.dht, T.DELIVER,      this._onDeliver.bind(this),      { registry: this._frameDoor });
     registerFrame(this.dht, T.ADOPT,        this._onAdopt.bind(this),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPTACK,     this._onAdoptAck.bind(this),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_OFFER,  this._onMergeOffer.bind(this),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYACK,    this._onReplayAck.bind(this),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_CLOSED, this._onMergeClosed.bind(this),  { registry: this._frameDoor });
     registerFrame(this.dht, T.PULLUP,       this._onPullUp.bind(this),       { registry: this._frameDoor });
     registerFrame(this.dht, T.HANDOFFACK,   this._onHandoffAck.bind(this),   { registry: this._frameDoor });
     registerFrame(this.dht, T.REPLAYUP,     this._onReplayUp.bind(this),     { registry: this._frameDoor });
@@ -340,11 +345,19 @@ export const wireHandlersMethods = {
     //    roots, zero-delivery runs, leave() drains pinned at timeout). Remember
     //    the lw already pulled per child; re-arm only if its lw DECREASES
     //    (a deeper split — genuinely new history).
+    // HANDOVER COMPLETION (dual-root 4(d)): only a SUB carrying the merge block
+    // that matches an acked pull on all five fields completes; everything else
+    // is an ordinary renewal here.
+    if (payload.merge && typeof payload.merge === 'object') this._mergeCompleteOnSub(role, subHex, payload);
     const myHw = this._highWater(role);
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });
     } else if (Number.isFinite(payload.lw) && payload.lw > 0 && role.cache.length && payload.lw < this._lowWater(role)) {
-      this._syncPull(idBig(subHex), topicBig, 'SPLIT_UNION', { sinceHw: 0, lw: payload.lw, role });
+      const sent = this._syncPull(idBig(subHex), topicBig, 'SPLIT_UNION', { sinceHw: 0, lw: payload.lw, role });
+      // RECORD (dual-root packet Part 5.1): the other path by which a split
+      // history reaches a root. Named so a merge can be attributed to HANDOFF
+      // or to this pull from a log, instead of argued from the count of entries.
+      if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
     this._accept(role, subHex, since, !!payload.latest);
     return 'consumed';
@@ -409,9 +422,16 @@ export const wireHandlersMethods = {
   _promoteChild(role) {
     // Any leaf may be promoted to a child relay — region is not an eligibility
     // predicate (it is only a placement hint folded into the id).
+    // A subscriber already in a PENDING delegation is not a leaf to promote or
+    // to hand off again: it is seated here only until its child's ADOPTACK.
+    // Without this exclusion the next over-capacity SUB promoted a pending
+    // subscriber as a second child and re-delegated the rest of its batch —
+    // smoke_pubsub_sweep measured a 91-wide root on the first build.
+    const pending = new Set();
+    for (const pd of role.merge?.pendingDelegation?.values() ?? []) for (const sh of pd.subs) pending.add(sh);
     const leaves = [];
     for (const s of role.subscribers.keys()) {
-      if (role.children.has(s)) continue;
+      if (role.children.has(s) || pending.has(s)) continue;
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -421,29 +441,96 @@ export const wireHandlersMethods = {
     for (let i = 1; i < leaves.length && batch.length < DELEGATE_BATCH; i++) {
       batch.push({ subscriberId: leaves[i], since: role.subscribers.get(leaves[i]).since });
     }
-    for (const b of batch) role.subscribers.delete(b.subscriberId);
-    this._delegateTo(leaf, role, batch);
-    this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length });
+    // PENDING DELEGATION (dual-root packet 4(d), Aster's "adopt during merge"):
+    // the batch is NOT deleted from role.subscribers here. It moves to
+    // role.merge.pendingDelegation under the ADOPT's nonce and this node KEEPS
+    // SERVING those subscribers until the child's ADOPTACK names them accepted.
+    // Before this the parent deleted them at the send; a child whose adoptChild
+    // was refused (a root with custody) — or that never heard the ADOPT — left
+    // them with no server. A refusal, a timeout (ADOPT_ACK_MS sweep) or a lost
+    // ack keeps them seated here; a partial ack releases only the named ids.
+    const nonce = this._delegateTo(leaf, role, batch);
+    if (!role.merge) role.merge = makeMergeState();
+    role.merge.pendingDelegation.set(nonce, { child: leaf, subs: batch.map((b) => b.subscriberId), at: this._now() });
+    this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length, nonce: nonce.slice(0, 8), pending: true });
     return true;
   },
 
   _delegateTo(childHex, role, subs) {
+    const nonce = randomNonce();
     this._route(idBig(childHex), T.ADOPT, {
-      topicId: idHex(role.topicId), parent: idHex(this.nodeId), subs,
+      topicId: idHex(role.topicId), parent: idHex(this.nodeId), subs, nonce,
     });
+    return nonce;
+  },
+
+  // Release the subscribers a child confirmed adopting; keep the rest. Called
+  // from _onAdoptAck and from the ADOPT_ACK_MS sweep (which releases nothing).
+  _settleDelegation(role, nonce, acceptedIds, why) {
+    const pend = role.merge?.pendingDelegation?.get(nonce);
+    if (!pend) return null;
+    role.merge.pendingDelegation.delete(nonce);
+    const accepted = new Set((acceptedIds || []).map(lc));
+    let released = 0, kept = 0;
+    for (const sh of pend.subs) {
+      if (accepted.has(sh) && role.subscribers.has(sh) && !role.children.has(sh)) { role.subscribers.delete(sh); released++; }
+      else if (role.subscribers.has(sh)) kept++;
+    }
+    if (released === 0) role.children.delete(pend.child);   // nothing moved: the leaf is a leaf again
+    this._log('info', 'delegation-settled', { topic: idHex(role.topicId).slice(0, 12), child: pend.child.slice(0, 12), nonce: nonce.slice(0, 8), why, released, kept });
+    return { released, kept };
+  },
+
+  // The ADOPT_ACK_MS sweep: a delegation no ADOPTACK answered rolls back — the
+  // parent was serving those subscribers all along, so "rollback" is only the
+  // ledger entry and the child flag. Driven from refreshTick.
+  _delegationSweep(now) {
+    for (const role of this.axonRoles.values()) {
+      const pd = role.merge?.pendingDelegation;
+      if (!pd || !pd.size) continue;
+      for (const [nonce, pend] of pd) {
+        if (now - pend.at >= ADOPT_ACK_MS) this._settleDelegation(role, nonce, [], 'ack-timeout');
+      }
+    }
   },
 
   // A node is told to become a child relay and adopt a set of subscribers.
+  // Answers the parent with ADOPTACK (dual-root packet 4(d)): the ids it seated,
+  // or `refused` when adoptChild declined the flip (a root with custody on a
+  // merge-capable node). A legacy parent without the nonce gets no ack and
+  // behaves as before (it already deleted its batch at the send).
   _onAdopt(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // routed to me specifically
     const topicBig = idBig(payload.topicId);
-    const role = this._rootClaim.adoptChild(topicBig, lc(payload.parent));
+    const parentHex = lc(payload.parent);
+    const nonce = typeof payload.nonce === 'string' ? payload.nonce : null;
+    const role = this._rootClaim.adoptChild(topicBig, parentHex);
+    if (!role) {
+      this._log('info', 'adopt-refused', { topic: idHex(topicBig).slice(0, 12), parent: parentHex.slice(0, 12), why: 'custody' });
+      if (nonce && isHexId(parentHex)) this._route(idBig(parentHex), T.ADOPTACK, { topicId: payload.topicId, nonce, accepted: [], refused: 'custody' });
+      return 'consumed';
+    }
+    const accepted = [];
     for (const s of (Array.isArray(payload.subs) ? payload.subs : [])) {
       const sh = lc(s.subscriberId);
-      if (isHexId(sh) && idBig(sh) !== this.nodeId) this._accept(role, sh, s.since);
+      if (isHexId(sh) && idBig(sh) !== this.nodeId) { this._accept(role, sh, s.since); if (role.subscribers.has(sh)) accepted.push(sh); }
     }
+    if (nonce && isHexId(parentHex)) this._route(idBig(parentHex), T.ADOPTACK, { topicId: payload.topicId, nonce, accepted });
     // Attach UP toward the parent so we receive the live feed + cache replay.
     this._sendSubscribe(topicBig);
+    return 'consumed';
+  },
+
+  // The child's answer to a delegation (ADOPTACK). Only the delegating parent
+  // settles; an ack for an unknown nonce (late, duplicate, or forged) changes
+  // nothing. `refused` keeps every subscriber here and un-flags the child.
+  _onAdoptAck(payload, meta) {
+    if (meta.targetId !== this.nodeId) return;
+    let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
+    const role = this.axonRoles.get(topicBig);
+    if (!role || typeof payload.nonce !== 'string') return 'consumed';
+    const accepted = payload.refused ? [] : (Array.isArray(payload.accepted) ? payload.accepted.filter((x) => typeof x === 'string') : []);
+    this._settleDelegation(role, payload.nonce, accepted, payload.refused ? `refused:${String(payload.refused).slice(0, 16)}` : 'acked');
     return 'consumed';
   },
 
@@ -455,6 +542,7 @@ export const wireHandlersMethods = {
 
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.PUB, payload)) return 'consumed';   // step-down hold (4.102.0)
+    if (this._mergeGateIntercept(topicBig, T.PUB, payload)) return 'consumed';   // merge gate (dual-root 4(d)): forwarded to W by name, or a returned forward
     // Root-beacon last-mile correction. At this point I'm the acting target for
     // the publish (bare-topic terminus, or via-pinned to me). If a fresh beacon
     // names a different root genuinely CLOSER to the topic than me, forward to it
@@ -487,13 +575,31 @@ export const wireHandlersMethods = {
     // continue toward the topic id. Bare-topic publishes always promote above.
     if (!role.isRoot) { this._reroute(T.PUB, payload); return 'consumed'; }
 
-    const ingest = await this._ingestPublish(role, payload.json);
+    // THE CUT (dual-root packet 4(d)): capture {role0, gen0} ONCE, here,
+    // before _ingestPublish's first await; the stamp re-checks it.
+    const cut = this._cutCapture(role);
+    const ingest = await this._ingestPublish(role, payload.json, cut);
     if (ingest?.ok) this._sendIngestAck(meta?.fromId, role, ingest.msgId, 'pub', payload);
+    else if (ingest?.reason === 'cut') this._cutDisposition(topicBig, T.PUB, payload);   // forwarded, not ingested: no ack from here
     return 'consumed';
   },
 
+  // A write admitted before the cut that resumed after it (dual-root 4(d)):
+  // handed to the gate's forward if the gate is set, or to the ordinary
+  // routing walk if the role has since demoted. Never _reroute (its topic-id
+  // fall-through can return here in a split) and never stamped here.
+  _cutDisposition(topicBig, type, payload) {
+    const role = this.axonRoles.get(topicBig);
+    if (role?.merge?.gate) { this._mergeGateForward(topicBig, type, payload, role, role.merge.gate); return; }
+    const up = this._upstream.get(topicBig);
+    if (up && up[0]) { this._forwardToRoot(topicBig, type, payload, lc(up[0])); return; }
+    this._undeliverable(type, topicBig, 'cut-no-forward');
+  },
+
   // Root ingress: authenticate, enforce write policy, stamp, cache, fan out.
-  async _ingestPublish(role, json) {
+  // `cut` is the caller's entry-time capture; the stamp below is refused when
+  // the role was cut (or demoted) while this function awaited.
+  async _ingestPublish(role, json, cut = null) {
     let env;
     try { env = JSON.parse(json); } catch { this._log('warn', 'drop-unparseable'); return { ok: false, reason: 'unparseable' }; }
     this._latStage(env?.msgId, 'root:recv');
@@ -533,12 +639,26 @@ export const wireHandlersMethods = {
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
     if (this._tombstoned(role, env.msgId, json)) return { ok: true, msgId: env.msgId, suppressed: true };
 
+    // W'S OWN WRITES DURING A ROUND, FAIL CLOSED (dual-root 4(d)): they draw on
+    // the reserve admitted with the header; past it the write is refused and
+    // the writer's flight recovers after the round. Nothing is queued.
+    if (role.merge?.reserve && (role.merge.reserve.entries <= 0 || role.merge.reserve.bytes < json.length + 80)) {
+      this._log('warn', 'refused-merge-reserve', { topic: idHex(role.topicId).slice(0, 12), msgId: String(env.msgId).slice(0, 12) });
+      return { ok: false, reason: 'merge-reserve', msgId: env.msgId };
+    }
+    // THE CUT, checked synchronously immediately before the stamp (dual-root
+    // packet 4(d)): a write admitted before the cut must not commit after it.
+    if (!this._cutHolds(role, cut)) {
+      this._log('info', 'cut-refused', { topic: idHex(role.topicId).slice(0, 12), at: 'stamp', msgId: String(env.msgId).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
+      return { ok: false, reason: 'cut', msgId: env.msgId };
+    }
     // STAMP — single serialization point; strictly monotonic, floored at now.
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
-    this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq });
+    this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
+    if (role.merge?.reserve) { role.merge.reserve.entries--; role.merge.reserve.bytes -= json.length + 80; }
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
     // leave a stale shadow body). The observer independently re-binds the topic.
@@ -749,6 +869,7 @@ export const wireHandlersMethods = {
   // adopting history must not resurrect a killed message).
   _onPullUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    if (typeof payload.corr === 'string') { this._mergeAnswerPull(payload, meta); return 'consumed'; }   // dual-root 4(d) step 3
     this._syncAnswerPull(payload);
     return 'consumed';
   },
@@ -763,7 +884,9 @@ export const wireHandlersMethods = {
     if (meta.targetId !== this.nodeId) return;
     // DEPENDENCY (row 4): none. A child's history pushed up to its root
     // installs no role toward the child; nothing is owed when it drains.
-    await this._ingestEnqueue(() => this._syncIngest(payload, meta, 'REPLAY_UP'), null);   // inline path completes here; queued path returns at once
+    // One enqueue (the duty gate pins exactly two callers in this file): a frame
+    // under corr is a merge frame (dual-root 4(d)), else the REPLAY_UP union.
+    await this._ingestEnqueue(() => (typeof payload.corr === 'string' ? this._mergeIngestFrame(payload, meta) : this._syncIngest(payload, meta, 'REPLAY_UP')), null);   // inline path completes here; queued path returns at once
     return 'consumed';
   },
 
@@ -779,12 +902,14 @@ export const wireHandlersMethods = {
   // honestly claim to account for; `rejected` is what it dropped. Callers that
   // confirm receipt (HANDOFF → HANDOFFACK) MUST report these rather than the
   // bare fact that the loop finished.
-  async _ingestStampedBatch(role, msgs) {
-    let n = 0, held = 0, rejected = 0;
+  async _ingestStampedBatch(role, msgs, cut = null) {
+    let n = 0, held = 0, rejected = 0, refused = false;
     const list = Array.isArray(msgs) ? msgs : [];
     for (const m of list) {
+      if (refused) { rejected++; continue; }           // a refusal at the cut marks the whole transfer (dual-root 4(d))
       if (m && typeof m.json === 'string' && Number.isFinite(m.publishTs)) {
-        if (await this._ingestStamped(role, m) === 'held') held++; else rejected++;
+        const r = await this._ingestStamped(role, m, cut);
+        if (r === 'held') held++; else { rejected++; if (r === 'refused') refused = true; }
       } else {
         // Shape guard. Previously skipped with NO log at all — the most silent
         // of the drop paths, and indistinguishable from success to the leaver.
@@ -795,7 +920,7 @@ export const wireHandlersMethods = {
         await new Promise(r => (typeof setImmediate === 'function' ? setImmediate(r) : setTimeout(r, 0)));
       }
     }
-    return { sent: list.length, held, rejected };
+    return { sent: list.length, held, rejected, refused };
   },
 
   // Returns an OUTCOME, consumed by _ingestStampedBatch's tally:
@@ -808,7 +933,10 @@ export const wireHandlersMethods = {
   // rejected half a batch acked identically to one that took all of it, and the
   // leaver then exempted the topic from retry AND cohort spray — dropping the
   // last copy of exactly the rejected messages.
-  async _ingestStamped(role, m) {
+  //   'refused'  — refused AT THE CUT (dual-root 4(d)): the role was cut or
+  //                demoted while this ingest awaited; counted as rejected and
+  //                the batch applies nothing further.
+  async _ingestStamped(role, m, cut = null) {
     let env;
     try { env = JSON.parse(m.json); } catch { this._log('warn', 'drop-malformed-stamped', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
     const v = await verifyEnvelope(env);                                 // B-4 still applies
@@ -828,7 +956,7 @@ export const wireHandlersMethods = {
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
-    this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
+    if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
     // independently re-binds the topic too (defense in depth). No-op flag-off.
@@ -1055,8 +1183,14 @@ export const wireHandlersMethods = {
   // delete re-acquires it on its next renewal, exactly like a missed publish
   // re-acquires from cache. Idempotent: the fan-out + cache-drop happen only the
   // first time we see the kill (tombstone-gated).
-  _applyKill(role, topicBig, m) {
+  // RETURNS false when refused at the cut (dual-root packet 4(d)); the caller
+  // propagates it. Tombstones are mutations too, and they commit first.
+  _applyKill(role, topicBig, m, cut = null) {
     const target = m.msgId;
+    if (role && !this._cutHolds(role, cut)) {
+      this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
+      return false;
+    }
     // A retracted message has no durability obligation left. Cancel it BEFORE
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
@@ -1145,6 +1279,7 @@ export const wireHandlersMethods = {
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
+    if (this._mergeGateIntercept(topicBig, T.KILL, payload)) return 'consumed';   // merge gate (dual-root 4(d))
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
     // a kill landing on a near-miss node must reach the true root, not mint a
     // competing root that the rest of the tree never consults.
@@ -1166,6 +1301,7 @@ export const wireHandlersMethods = {
     const kill = payload.kill;
     const target = kill?.msgId;
     if (!target) return 'consumed';
+    const cut = this._cutCapture(role);                 // THE CUT: captured before the first await (dual-root 4(d))
     // AUTHZ: a kill must be signed, and only the AUTHOR of the target may kill it.
     // (1) signature self-valid (B-4 analog for kills).
     const v = await verifyKill(kill);
@@ -1188,13 +1324,18 @@ export const wireHandlersMethods = {
     }
     // STAMP the kill like a publish (monotonic + dense counter) so it orders +
     // replays via `since` AND occupies a seq slot (a missed kill shows as a gap).
+    const prevTs = role.lastTs, prevSeq = role.seq;     // restored if the cut refuses the commit below
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
     const seq = ++role.seq;
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
-    this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill });
+    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill }, cut) === false) {
+      role.seq = prevSeq; role.lastTs = prevTs;               // the stamp above did not commit
+      this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
+      return 'consumed';
+    }
     // KILL completes on tombstone ingest, separately from PUB (v0.3 §1).
     // _applyKill is tombstone-gated internally; re-acking a duplicate kill is
     // the idempotent-success case, same as a duplicate publish.

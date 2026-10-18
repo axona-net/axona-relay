@@ -22,7 +22,17 @@ import { idHex, idBig, lc, isHexId } from './ids.js';
 
 export const topicStoreMethods = {
   // ── cache ────────────────────────────────────────────────────────────
-  _cachePush(role, entry) {
+  // RETURNS true when the entry committed, false when refused at the cut
+  // (dual-root packet 4(d)): `cut` is the caller's entry-time capture
+  // ({role0, gen0}, _cutCapture) and the check runs here, synchronously,
+  // immediately before the write; a gated role refuses with or without a
+  // capture. Callers that pass no cut (the relay DELIVER path) are checked
+  // against the gate alone.
+  _cachePush(role, entry, cut = null) {
+    if (!this._cutHolds(role, cut)) {
+      this._log('info', 'cut-refused', { topic: idHex(role.topicId).slice(0, 12), at: 'cachePush', msgId: String(entry?.msgId).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
+      return false;
+    }
     entry.bytes = (entry.json ? entry.json.length : 0) + 80;
     role.cache.push(entry);
     role.cacheIds.add(entry.msgId);
@@ -32,8 +42,15 @@ export const topicStoreMethods = {
     // once per holder; monotonic (eviction below never decrements it). Surfaced
     // as metrics().publishes, maxed across the cohort.
     role.publishes = (role.publishes || 0) + 1;
-    while (role.cache.length > this._cacheMax || role.cacheBytes > this._cacheBytes) {
-      const old = role.cache.shift();
+    // PINS (dual-root 4(d)): a pinned entry is never evicted by the caps. The
+    // eviction loop takes the OLDEST UNPINNED entry; with nothing unpinned it
+    // stops (the admission arithmetic guarantees pins plus reserve fit).
+    const pins = role.merge?.pins;
+    let guard = role.cache.length + 1;
+    while ((role.cache.length > this._cacheMax || role.cacheBytes > this._cacheBytes) && guard-- > 0) {
+      let i = 0;
+      if (pins && pins.size) { while (i < role.cache.length && pins.has(role.cache[i].msgId)) i++; if (i >= role.cache.length) break; }
+      const old = role.cache.splice(i, 1)[0];
       if (!old) break;
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
@@ -43,16 +60,33 @@ export const topicStoreMethods = {
     // verification, and _cachePush is also reached from the relay _onDeliver path
     // (unverified). Body observation is driven from the verified ingress
     // (_ingestPublish / _ingestStamped) with a cache-survival guard.
+    return true;
   },
 
   _expireCache(role, now) {
-    while (role.cache.length && (now - role.cache[0].publishTs) > TTL_MS) {
-      const old = role.cache.shift();
+    // PINS (dual-root 4(d)): pinned entries are exempt from expiry for the
+    // round's life, whatever this node's clock says; the cache is ordered by
+    // stamp, so a pinned head is skipped and expiry continues behind it.
+    const pins = role.merge?.pins;
+    let i = 0;
+    while (i < role.cache.length && (now - role.cache[i].publishTs) > TTL_MS) {
+      if (pins && pins.has(role.cache[i].msgId)) { i++; continue; }
+      const old = role.cache.splice(i, 1)[0];
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
       if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
     }
     if (this._tombAuthority) this._taReclaim();                          // Phase 3 shadow: reclaim + retry (no-op flag-off)
+  },
+
+  // Tombstone expiry (from refreshTick). PINS (dual-root 4(d)): a pinned
+  // tombstone — a manifest entry at W for a round's life, or a loser's
+  // pinned export — is exempt until the pin releases.
+  _expireTombstones(role, now) {
+    const pins = role.merge?.pins;
+    for (const [msgId, t] of role.tombstones) {
+      if ((t?.exp ?? 0) <= now && !(pins && pins.has(msgId))) role.tombstones.delete(msgId);
+    }
   },
 
   // My cache high-water = the newest stamp I hold (or have emitted, as root).
@@ -108,7 +142,11 @@ export const topicStoreMethods = {
   // Apply a batch of migrated tombstones BEFORE ingesting the migrated bodies, so a
   // killed message in the same batch is suppressed (not briefly fanned/delivered then
   // retracted). Shared by the replay-up and handoff receive paths.
-  async _applyDels(role, topicBig, dels) {
+  // RETURNS true when every entry committed, false at the FIRST refusal at the
+  // cut (dual-root packet 4(d)): the transfer's entry-time `cut` is passed to
+  // every _applyKill and nothing is captured after the proof await; a refusal
+  // stops the batch so no later entry commits behind the export.
+  async _applyDels(role, topicBig, dels, cut = null) {
     for (const d of (Array.isArray(dels) ? dels : [])) {
       if (d && d.msgId) {
         // Verify + BIND any propagated proof (topicId+msgId+signer) BEFORE _applyKill
@@ -118,9 +156,10 @@ export const topicStoreMethods = {
         // before retention; a verified proof also observes into the shadow authority.
         let dd = d;
         if (this._tombAuthority && d.kill && !(await this._taVerifyBoundKill(topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
-        this._applyKill(role, topicBig, dd);
+        if (this._applyKill(role, topicBig, dd, cut) === false) return false;
       }
     }
+    return true;
   },
 
   // ── app delivery (exactly-once) ──────────────────────────────────────
