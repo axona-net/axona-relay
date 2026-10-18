@@ -494,7 +494,40 @@ export async function status() {
     mesh: health ? { synaptomeSize: health.synaptomeSize ?? null, peers: health.peers?.length ?? null, state: health.state ?? null } : null,
     watches: [...WATCHES.values()].map((w) => ({ topic: w.topic, region: w.region, buffered: w.buffer.length, total: w.total, dropped: w.dropped, since: w.since, ageSec: Math.round((now() - w.startedAt) / 1000) })),
     hosted: [...HOSTED.values()].map((h) => ({ topic: h.topic, region: h.region, ageSec: Math.round((now() - h.since) / 1000) })),
+    // SEAT ROLES (dual-root packet Part 5, 2026-10-17): the one thing the
+    // #council split could not be read from — which topics THIS seat roots,
+    // and where its non-root roles point. A seat that roots a standing topic
+    // while the fleet roots it elsewhere IS the split; before this field the
+    // answer lived in nobody's view. Topic ids are prefixed, never full; the
+    // upstream is a node-id prefix (a transport id, ephemeral by design).
+    roles: seatRoles(),
   };
+}
+
+function seatRoles() {
+  const am = _session?.peer?._axonaManager;
+  if (!am || !am.axonRoles) return null;
+  const rows = [];
+  try {
+    const now = Date.now();
+    for (const [t, r] of am.axonRoles) {
+      const hex = t.toString(16).padStart(66, '0');
+      const up = am._upstream?.get?.(t);
+      let tombs = 0; for (const tb of (r.tombstones?.values?.() ?? [])) if ((tb?.exp ?? 0) > now) tombs++;
+      rows.push({
+        topic: hex.slice(0, 12),
+        nature: r.isRoot ? 'ROOT' : (r.backupOf != null ? 'BACKUP' : 'CHILD'),
+        epoch: r.isRoot ? (r.epoch ?? null) : null,
+        upstream: Array.isArray(up) && up[0] ? String(up[0]).slice(0, 12) : null,
+        subs: r.subscribers?.size ?? null, children: r.children?.size ?? null,
+        cache: r.cache?.length ?? null, tombstones: tombs,
+        lastTs: r.lastTs || null, createdAt: r.createdAt || null,
+        merge: r.merge ? { gate: !!r.merge.gate, completing: !!r.merge.completing, acceptedWinner: r.merge.acceptedWinner ? String(r.merge.acceptedWinner.id).slice(0, 12) : null, pins: r.merge.pins?.size ?? 0 } : null,
+        custodyAlive: typeof am._custodyAlive === 'function' ? am._custodyAlive(r, now) : null,
+      });
+    }
+  } catch { /* best-effort: a partial list beats none */ }
+  return { count: rows.length, rooted: rows.filter((x) => x.nature === 'ROOT').length, rows };
 }
 
 /**
@@ -525,6 +558,17 @@ export async function status() {
  * @param {{ since?: 'all'|'latest'|'live' }} [opts]
  */
 export async function reconnect({ since = 'all' } = {}) {
+  // THE LEAVE LEDGER (dual-root packet Part 5): a reconnect closes the old peer
+  // with a graceful leave, and a graceful leave HANDS OFF every topic this seat
+  // rooted to an heir — that handoff is what carried eleven #council entries
+  // into the relay-held root on 2026-10-17 03:04Z, unrecorded. The result now
+  // names what was rooted at the close and which handoffs the heirs acked.
+  const rootedBefore = (() => {
+    const am = _session?.peer?._axonaManager; const out = [];
+    try { for (const [t, r] of (am?.axonRoles ?? [])) if (r.isRoot) out.push({ topic: t.toString(16).padStart(66, '0').slice(0, 12), key: t.toString(16).padStart(66, '0'), cache: r.cache?.length ?? 0, subs: r.subscribers?.size ?? 0 }); } catch { /* */ }
+    return out;
+  })();
+  const oldAm = _session?.peer?._axonaManager ?? null;
   const before = {
     nodeId: _session?.nodeId ?? null,
     watches: [...WATCHES.entries()].map(([key, w]) => ({ key, topic: w.topic, region: w.region, descriptor: w.descriptor, buffer: w.buffer, total: w.total, dropped: w.dropped })),
@@ -534,6 +578,8 @@ export async function reconnect({ since = 'all' } = {}) {
   // Tear down. A half-dead session may throw on close — that is precisely the
   // case this function exists for, so it must not stop the rebuild (I-3).
   try { await _session?.close?.(); } catch (e) { console.error(`[mcp] reconnect: close failed (continuing) — ${e.message}`); }
+  const acked = new Set(); try { for (const k of (oldAm?._handoffAcked ?? [])) acked.add(String(k).toLowerCase()); } catch { /* */ }
+  const left = { rooted: rootedBefore.length, acked: rootedBefore.filter((r) => acked.has(r.key)).map((r) => r.topic), unacked: rootedBefore.filter((r) => !acked.has(r.key)).map(({ topic, cache, subs }) => ({ topic, cache, subs })) };
   _session = null;
   _connecting = null;
   WATCHES.clear();
@@ -560,6 +606,8 @@ export async function reconnect({ since = 'all' } = {}) {
 
   const health = (() => { try { return s.peer.health(); } catch { return null; } })();
   return {
+    left,   // the leave ledger: what this seat rooted at the close and which handoffs its heirs acked (dual-root Part 5)
+
     ok: true,
     reconnected: true,
     // The OLD nodeId is deliberately absent: a log that chains transport
