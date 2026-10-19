@@ -1324,6 +1324,27 @@ export const wireHandlersMethods = {
     }
     // STAMP the kill like a publish (monotonic + dense counter) so it orders +
     // replays via `since` AND occupies a seq slot (a missed kill shows as a gap).
+    // A DUPLICATE kill (the tombstone already stands) is the idempotent-success
+    // case: it is acked below like a duplicate publish, but it must NOT take a
+    // fresh stamp. Before 4.116.0 the stamp ran ahead of _applyKill's tombstone
+    // gate, so every re-sent kill advanced lastTs and burned a seq slot — the
+    // idle TTL restarted and subscribers saw a gap for a message that never
+    // existed (Aster lifecycle v0.2 item 3, "age laundering"; confirmed from
+    // source). _applyKill still runs for the existing tombstone so a bound
+    // proof can attach (its B2 upgrade path), carrying the tombstone's own stamp.
+    // The duplicate commits under the same cut as a fresh kill: a gate, a moved
+    // generation or a retirement during the verify await refuses it, and a
+    // refused duplicate is forwarded and NOT acked, exactly like a refused
+    // fresh kill (Aster edfdd869).
+    const existingTomb = role.tombstones.get(target);
+    if (existingTomb) {
+      if (this._applyKill(role, topicBig, { msgId: target, killTs: existingTomb.killTs, signer: lc(kill.signerPubkey), seq: existingTomb.seq, kill }, cut) === false) {
+        this._cutDisposition(topicBig, T.KILL, payload);        // forwarded, not ingested: no ack from here
+        return 'consumed';
+      }
+      this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
+      return 'consumed';
+    }
     const prevTs = role.lastTs, prevSeq = role.seq;     // restored if the cut refuses the commit below
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;

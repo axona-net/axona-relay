@@ -110,16 +110,20 @@ export const mergeMachineMethods = {
   _cutHolds(role, cut) {
     if (!role) return false;
     if (role.merge?.gate) return false;
+    // RETIRED (Aster edfdd869, 4.116.0): a role the reaper detached carries the
+    // mark `retired` (set by `_retireRole`, the one detach site) and no commit
+    // resuming on it holds, replacement or not — a tombstone or body written
+    // into a detached object has no custodian and the write would be acked
+    // for nothing. A role absent from the map WITHOUT the mark is one a
+    // construction path pushes into before registering (fixtures build roles
+    // that way) and is still allowed: never registered is not retired.
+    if (role.retired) return false;
     // MAP MEMBERSHIP (Aster c6719863 C3): a commit resuming after its role was
     // REPLACED in axonRoles — retired and re-admitted under a new object — is
     // refused exactly as a moved generation is: it would write into a detached
-    // object while a live role for the topic exists. A role absent from the map
-    // altogether is not refused here: a role is pushed into before it is
-    // registered on some construction paths (fixtures build roles that way),
-    // and a detached object with no replacement is served to nobody and goes
-    // with the object. The merge never detaches a role; the reapers and any
-    // future retirement path do, and that path's own token is the stronger
-    // fence (v0.3 C3).
+    // object while a live role for the topic exists. (The mark above now
+    // refuses the detached object whether or not it was replaced; this check
+    // stays for a replacement made without the reaper, e.g. a fixture swap.)
     const live = this.axonRoles.get(role.topicId);
     if (live !== undefined && live !== role) return false;
     if (!cut) return true;

@@ -40,6 +40,21 @@ export const DROP_MS         = 180_000;         // evict a subscriber after miss
 // A subscriber that still wants the topic re-subscribes on its own renewal
 // cadence and the role is rebuilt, so this is recoverable by construction.
 export const ROLE_IDLE_TTL_MS = 24 * 60 * 60 * 1000;   // 24 h
+// EMPTY-ROLE GRACE (David 2026-10-19). A keyspace-hosting node retained every
+// root it won for the whole idle TTL even when the role held NOTHING — no
+// bodies, no active tombstone, no seated subscriber, no backup seat, no lease,
+// no local intent. Aster's 2026-10-18 census counted 1,011 such roots across
+// the fleet; sfo3 grizzly1's seven-day journal showed the reapers firing exactly
+// at the TTL and the relay forming ~200 roots a day for single-use test topics,
+// so the inventory was one day of churn held by the keyspace pin. The pin is
+// now a bounded grace measured from the last tick on which the role held
+// anything; a later SUB or PUB re-forms the role at the same routing terminus.
+// Sized about an order of magnitude above everything an empty root may still
+// be doing: 6.7× the 45 s root verify, 10× a publisher's 30 s re-send window,
+// ~9× the birth probe (≤ 3 tries 5 s apart, re-armed once after 20 s). A
+// policy choice, not a bound on scheduler suspension (Aster edfdd869). 0
+// restores the eternal pin.
+export const ROLE_EMPTY_GRACE_MS = 5 * 60 * 1000;   // 5 min
 
 // ── Root election / convergence ─────────────────────────────────────────
 // Reachable-root fallback (cold-convergence fix). An unpinned subscriber whose

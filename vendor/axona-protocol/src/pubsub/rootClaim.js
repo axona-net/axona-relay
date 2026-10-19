@@ -100,6 +100,9 @@ export function makeRole(topicId, isRoot, createdAt = null) {
     cache: [],                       // [{ msgId, publishTs, json, bytes }] asc by publishTs
     cacheIds: new Set(),             // msgId set for O(1) dedup (root-stamp + relay re-fan)
     cacheBytes: 0,
+    emptySince: null,                // _now() of the first refreshTick that found the role holding NOTHING
+                                     // (no bodies/tombstones/custody/seats/backup/lease/intent); null while it
+                                     // holds anything. The empty-role grace is measured from it (4.116.0).
     lastTs: 0,                       // highest stamp emitted (monotonic; root authority)
     seq: 0,                          // DENSE per-topic counter (root authority): ++ per emitted
                                      // message AND kill, so subscribers detect GAPS (env.seq jumps
