@@ -71,6 +71,7 @@ export const repairPlaneMethods = {
     role.gen = (role.gen | 0) + 1;
     this.axonRoles.delete(t);
     this._upstream.delete(t);
+    if (this._attach && !this.mySubscriptions.has(t)) this._attach.delete(t);   // the attachment outlives the role only for a reader (Topic Lifetime 4.1)
     if (this._tombAuthority) this._taPurgeTopic(t);   // Phase 3 shadow: node no longer holds this topic's bodies (no-op flag-off)
   },
 
@@ -198,6 +199,11 @@ export const repairPlaneMethods = {
     //         warm.
     this._replicateRoots();
     this._emptyRootProbeSweep(now);   // v4.24.0: empty self-roots re-pull the cohort (bounded)
+    // TOPIC LIFETIME (axona-docs 11288d7; behind TOPIC_LIFETIME): the standby
+    // lease, termination and the thin-branch step-down. Before loop 1b-bak so a
+    // lapsed backup sends no further standby SUB, and before the reapers so a
+    // retired appointment is read as an ordinary role on this same tick.
+    this._lifetimeTick(now);
     // 1b-bak. Backups are subscribing CHILD RELAYS. Renew each backup's subscribe
     //         every tick so root election runs through the SAME probe-protected path
     //         as any subscriber/host (_rootHint_'s iterative lookup → one globally-
@@ -301,7 +307,7 @@ export const repairPlaneMethods = {
       const backupSeat = role.backupOf !== null || this._backupTopics.has(t);
       const custodyAlive = this._custodyAlive(role, now);   // dual-root 4(d) v0.14: never reaped while it holds
       const idleReap = this._roleIdleTtlMs > 0 && role.cache.length === 0
-        && !backupSeat && !custodyAlive
+        && !backupSeat && !custodyAlive && !role.dismantling
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
       // A root with a fresh metrics lease keeps publishing snapshots (read below).
@@ -402,8 +408,12 @@ export const repairPlaneMethods = {
       // yet DISCHARGES a standby obligation in that state. That termination
       // condition has to be agreed on its own terms; until it is, retention is
       // the contract and this code honours it rather than guessing.
+      // A DISMANTLING root (Topic Lifetime 4.5) belongs to its termination step:
+      // it goes on the tick after its last notice, counted as terminated, not
+      // to whichever reaper finds its last seat lapsed first.
+      const dismantling = !!role.dismantling;
       const deadNow = role.subscribers.size === 0 && role.cache.length === 0
-        && !backupSeat && !custodyAlive
+        && !backupSeat && !custodyAlive && !dismantling
         && !keyspacePinned && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t);
       // `empty` = a keyspace-pinned root whose grace is spent (it would have
@@ -421,7 +431,7 @@ export const repairPlaneMethods = {
           emptyMs: role.emptySince != null ? Math.max(0, now - role.emptySince) : null,
         });
       }
-      if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !custodyAlive && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
+      if (idleReap || deadNow || (role.subscribers.size === 0 && !holdsHistory && !custodyAlive && !dismantling && !keyspacePinned && !role.backupOf && !this._backupTopics.has(t) && !metricsLeased && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t))) {
         this._retireRole(t, role, why || 'teardown');
       }
     }
@@ -634,7 +644,7 @@ export const repairPlaneMethods = {
     for (let i = 0; i < keys.length; i++) {
       const idx = (start + i) % keys.length;
       const role = this.axonRoles.get(keys[idx]);
-      if (!role || !role.isRoot) continue;
+      if (!role || !role.isRoot || role.dismantling) continue;   // a dismantling root replicates nothing (Topic Lifetime 4.5)
       // The result is no longer discarded: it drives the DURABILITY ledger, which
       // is how a pending entry ever reaches verified or expired. Fire-and-forget
       // was the gap Aster found — record() ran only at ingress, so the lifecycle
@@ -928,6 +938,7 @@ export const repairPlaneMethods = {
       ({ attempted: 0, verified: 0, failed: 0, unsupported: 0, violation: 0,
          reason, dispatched: false, snapshot: false, noCohort: false, ...extra });
     if (!this._rootReplicas || !role || !role.isRoot) return nil('not-a-replicating-root');
+    if (role.dismantling) return nil('dismantling');   // Topic Lifetime 4.5: nothing is pushed from a terminating root
     if (role.cache.length === 0 && role.tombstones.size === 0) return nil('nothing-to-preserve');
     // WHY `want` IS EMPTY MATTERS (Aster, council 2026-08-01, on v4.58.3). I
     // added the no-cohort TERMINAL last commit without asking how the cohort

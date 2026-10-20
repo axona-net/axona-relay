@@ -40,13 +40,19 @@ export const rootElectionMethods = {
     if (b && Number.isInteger(b.epoch) && b.epoch > e) e = b.epoch;
     const t = this._rootTombstones?.get(tBig);              // E3: a conviction is seat history too
     if (t && Number.isInteger(t.epoch) && t.epoch > e) e = t.epoch;
+    // Topic Lifetime 4.1: a generation this node ENDED keeps its epoch as a
+    // high-water for L + S + D, so the next generation this same node forms
+    // mints above it and the two are told apart by epoch. Identity only — no
+    // deletion, no seat, no record of what the generation held.
+    const g = this._genHighWater?.get(tBig);
+    if (g && Number.isInteger(g.epoch) && g.epoch > e && g.until > this._mono()) e = g.epoch;
     return e;
   },
 
   _emitRootBeacons() {
     if (typeof this.dht.neighbors !== 'function') return;
     const rooted = [];
-    for (const [t, r] of this.axonRoles) if (r.isRoot) rooted.push(t);
+    for (const [t, r] of this.axonRoles) if (r.isRoot && !r.dismantling) rooted.push(t);   // a dismantling root advertises nothing (Topic Lifetime 4.5)
     if (!rooted.length) return;
     const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId);
     if (!neigh.length) return;

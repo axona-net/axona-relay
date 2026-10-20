@@ -26,7 +26,7 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T, METRICS_LEASE_MS } from './constants.js';
+import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
@@ -198,6 +198,15 @@ export const syncEngineMethods = {
     if (full && this._replicateSubs && role.isRoot) {
       payload.metricsRemainingMs = role.metricsOn > this._now() ? (role.metricsOn - this._now()) : 0;
     }
+    // TOPIC LIFETIME (4.1, 4.4; armed only): a REPLICATE names the generation it
+    // appoints to and carries its own issue stamp, so the receiver can drop a
+    // grant delivered outside D + S and one under a LEFT record. A departing
+    // non-root holder names its principal's generation, when it knows one.
+    if (this._topicLifetime) {
+      payload.issuedAt = this._now();
+      if (role.isRoot) payload.gen = this._genOf(role);
+      else if (role.standbyGen) payload.gen = { ...role.standbyGen };
+    }
     if (policyName === 'HANDOFF') return this._route(targetBig, T.HANDOFF, payload);
     return this._route(targetBig, T.REPLICATE, payload);
   },
@@ -287,10 +296,59 @@ export const syncEngineMethods = {
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }
       let role = this.axonRoles.get(topicBig);
+      // TOPIC LIFETIME — THE GRANT RULE (4.1, 4.2, 4.4; armed only). A REPLICATE
+      // is an appointment or a renewal only if: it names a generation not under a
+      // LEFT record here, and its apparent age is within D + S. A frame naming no
+      // generation (an older kernel) is an appointment only from this node's
+      // CURRENT principal and never creates a role from nothing, so a mixed fleet
+      // retains more, never less. Refused grants are counted and logged; nothing
+      // is applied.
+      let gen = null;
+      if (this._topicLifetime) {
+        const now = this._now();
+        const topic = String(payload.topicId).slice(0, 12);
+        gen = this._genValid(payload.gen) ? this._genNorm(payload.gen) : null;
+        if (!gen) {
+          if (!role || role.backupOf === null || role.backupOf !== from) {
+            this._grantsRefused++;
+            this._log('info', 'grant-refused', { topic, why: 'legacy-not-principal', from: from ? from.slice(0, 10) : null });
+            return;
+          }
+        } else if (this._leftRefuses(topicBig, gen)) {
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'left-record', gen: gen.root.slice(0, 10), epoch: gen.epoch });
+          return;
+        } else if (!Number.isFinite(payload.issuedAt)) {
+          // A gen-bearing grant with NO issue stamp cannot be aged and is not a
+          // legacy renewal either (Aster c5adedec TL-B03): refused, created or renewed.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'no-stamp', gen: gen.root.slice(0, 10) });
+          return;
+        } else if (this._grantFresh(payload, now) === false) {
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'stale', ageMs: now - payload.issuedAt, gen: gen.root.slice(0, 10) });
+          return;
+        } else if (role && role.standbyGen && role.standbyGen.root === gen.root && gen.epoch < (role.standbyGen.epoch | 0)) {
+          // FORWARD ONLY, as for deliveries (Aster 0cfdd82d TL-B10): a still-fresh
+          // grant naming an OLDER epoch of the same root does not roll the
+          // appointment back; freshness is not generation currency.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'obsolete-generation', gen: gen.root.slice(0, 10), epoch: gen.epoch, have: role.standbyGen.epoch | 0 });
+          return;
+        } else if (role && role.standbyGen && role.standbyGen.root !== gen.root && Number.isFinite(role.standbyIssuedAt) && payload.issuedAt + APPOINTMENT_SKEW_MS < role.standbyIssuedAt) {
+          // A DIFFERENT root's grant issued more than S before the current
+          // appointment is an old sender's delayed grant, not a new principal.
+          // Within S the two senders' clocks cannot order them and the grant
+          // re-principals as today (stated in the packet).
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'obsolete-grant', gen: gen.root.slice(0, 10), issuedAt: payload.issuedAt, have: role.standbyIssuedAt });
+          return;
+        }
+      }
       if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); }
-      this._rootClaim.becomeBackup(topicBig, role, from);   // nature transition (I-10)
+      this._rootClaim.becomeBackup(topicBig, role, from, gen, this._topicLifetime && Number.isFinite(payload.issuedAt) ? payload.issuedAt : null);   // nature transition (I-10)
       const cut = this._cutCapture(role);
-      if (await this._applyDels(role, topicBig, payload.dels, cut)) await this._ingestStampedBatch(role, payload.msgs, cut);
+      if (await this._applyDels(role, topicBig, payload.dels, cut, this._topicLifetime ? (gen || role.standbyGen || null) : null)) await this._ingestStampedBatch(role, payload.msgs, cut);   // the grant's deletions belong to the appointment's generation (X1)
       // SUBSCRIBER-LIST REPLICATION: stash the principal's subscriber list so a
       // promoted backup can re-adopt them into its fanout + replay (rootClaim._set).
       // STORED, not applied — a backup serves nobody until it becomes root.

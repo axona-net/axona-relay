@@ -74,6 +74,8 @@ export const wireHandlersMethods = {
     registerFrame(this.dht, T.PULLRESP,     this._onPullResp.bind(this),     { registry: this._frameDoor });
     registerFrame(this.dht, T.ROOTBEACON,   this._onRootBeacon.bind(this),   { registry: this._frameDoor });
     registerFrame(this.dht, T.METRICSON,    this._onMetricsOn.bind(this),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOPIC_TERMINATED, this._onTopicTerminated.bind(this), { registry: this._frameDoor });   // Topic Lifetime 4.5 (topicLifetime.js)
+    registerFrame(this.dht, T.REHOME,       this._onRehome.bind(this),       { registry: this._frameDoor });   // Topic Lifetime 4.7 (topicLifetime.js)
   },
 
   // REF-1.1 S2 inspector: the Boundary-1 registry's shadow state. `built` is
@@ -316,11 +318,16 @@ export const wireHandlersMethods = {
       if (!this._rerouteDeclined(T.SUB, payload)) this._undeliverable(T.SUB, topicBig, 'refused-no-forward');
       return 'consumed';
     }
+    // DISMANTLING (Topic Lifetime 4.5): a root whose termination began grants no
+    // seat. The subscriber's own renewal retries on its fast cadence and lands
+    // on a fresh role once this one has gone (the late renewal, David 2026-10-20).
+    if (role.dismantling) { this._log('info', 'seat-refused-dismantling', { topic: idHex(topicBig).slice(0, 12), from: String(payload.subscriberId).slice(0, 12) }); return 'consumed'; }
     this._maybePromoteRoot(role, payload, meta);
 
     const subHex = lc(payload.subscriberId);
     if (!isHexId(subHex)) return 'consumed';
     const since = Number.isFinite(payload.since) ? payload.since : 0;
+    const seat = this._seatKindOf(payload);   // Topic Lifetime 4.3: reader | child(n) | standby
 
     // The root's own renewal self-loops here. Don't seat self as a subscriber
     // (no self-fan); just replay locally if the app subscribes.
@@ -359,7 +366,7 @@ export const wireHandlersMethods = {
       // or to this pull from a log, instead of argued from the count of entries.
       if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
-    this._accept(role, subHex, since, !!payload.latest);
+    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null);
     return 'consumed';
   },
 
@@ -369,6 +376,12 @@ export const wireHandlersMethods = {
     if (d === 'reroute') { this._reroute(T.UNSUB, payload); return 'consumed'; }
     const role = this.axonRoles.get(idBig(payload.topicId));
     if (role) { const s = lc(payload.subscriberId); role.subscribers.delete(s); role.children.delete(s); role.sync.pulledLw.delete(s); }
+    // Topic Lifetime 4.7: a child that stepped down says so; this parent does not
+    // re-promote it for the cooldown (the hysteresis half of the thin-branch rule).
+    if (this._topicLifetime && payload.steppedDown === true) {
+      const s = lc(payload.subscriberId);
+      if (isHexId(s)) { this._childCooldown.set(s, this._now() + this._childCooldownMs); this._log('info', 'child-cooldown', { topic: String(payload.topicId).slice(0, 12), child: s.slice(0, 12), ms: this._childCooldownMs }); }
+    }
     return 'consumed';
   },
 
@@ -376,14 +389,23 @@ export const wireHandlersMethods = {
   // `latest` (since:'latest') folds the newest cache entry into the replay
   // DELIVER regardless of age — served from here (we hold the cache) even when
   // the subscriber is then delegated downward for ongoing fan-out.
-  _accept(role, subHex, since, latest = false) {
+  // `seat` (Topic Lifetime 4.3): { kind: 'reader'|'child'|'standby', demand }.
+  // A reader SUB and a child SUB with n > 0 stamp lastDemandAt; a standby SUB
+  // never does. A standby seat is never delegated to a child: it exists to be
+  // at the root.
+  _accept(role, subHex, since, latest = false, seat = null, attach = null) {
+    const kind = seat?.kind || 'reader';
+    const demand = seat ? (seat.demand | 0) : 1;
+    const stampsDemand = kind === 'reader' || (kind === 'child' && demand > 0);
     const existing = role.subscribers.get(subHex);
     if (existing) {                                   // renewal of a current subscriber
       existing.lastRenewed = this._now();
-      this._replayTo(role, subHex, since, false, latest);
+      existing.kind = kind; existing.demand = demand;
+      if (stampsDemand) role.lastDemandAt = this._now();
+      this._replayTo(role, subHex, since, false, latest, attach);
       return;
     }
-    if (role.subscribers.size >= this.maxDirect) {    // overloaded → delegate
+    if (role.subscribers.size >= this.maxDirect && kind !== 'standby') {    // overloaded → delegate
       // WIDEN before DEEPEN: promote a new sibling child (offloading a batch)
       // so the tree grows bushy (depth ~log_MAX_DIRECT(S)), not into a chain.
       // Only when every direct is already a child do we deepen — forward the
@@ -391,15 +413,20 @@ export const wireHandlersMethods = {
       if (!this._promoteChild(role)) {
         const c = this._pickChild(role, subHex);
         if (c) {
-          if (latest) this._replayTo(role, subHex, since, false, true);  // current value from here, then hand off
+          if (latest) this._replayTo(role, subHex, since, false, true, attach);  // current value from here, then hand off
           this._delegateTo(c, role, [{ subscriberId: subHex, since }]);
+          if (this._topicLifetime) {   // the selection handover (see _promoteChild); this seat was answered by us (attach) so the subscriber's pin is us
+            const g = this._genCarried(role);
+            try { this._route(idBig(subHex), T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [], ...(g ? { gen: g } : {}), ...(attach ? { attach } : {}), delegate: c }); } catch { /* best-effort */ }
+          }
           return;
         }
         // neither possible (no leaf to promote, no child) → seat over capacity
       }
     }
-    role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now() });
-    this._replayTo(role, subHex, since, true, latest);  // delta (+ newest if latest) + a via-repin ping
+    role.subscribers.set(subHex, { since: Number.isFinite(since) ? since : 0, lastRenewed: this._now(), kind, demand });
+    if (stampsDemand) role.lastDemandAt = this._now();
+    this._replayTo(role, subHex, since, true, latest, attach);  // delta (+ newest if latest) + a via-repin ping
   },
 
   // Choose the child relay XOR-closest to a subscriber (keyspace locality).
@@ -430,8 +457,14 @@ export const wireHandlersMethods = {
     const pending = new Set();
     for (const pd of role.merge?.pendingDelegation?.values() ?? []) for (const sh of pd.subs) pending.add(sh);
     const leaves = [];
-    for (const s of role.subscribers.keys()) {
+    const now = this._now();
+    for (const [s, seat] of role.subscribers) {
       if (role.children.has(s) || pending.has(s)) continue;
+      // Topic Lifetime: a STANDBY seat stays at the root (never promoted, never
+      // handed off); a node that stepped down within the cooldown is not
+      // re-promoted (4.7), though it may still be handed off as a leaf.
+      if (seat?.kind === 'standby') continue;
+      if (this._topicLifetime && leaves.length === 0 && (this._childCooldown.get(s) || 0) > now) continue;
       leaves.push(s);
     }
     if (leaves.length < 2) return false;
@@ -452,6 +485,20 @@ export const wireHandlersMethods = {
     const nonce = this._delegateTo(leaf, role, batch);
     if (!role.merge) role.merge = makeMergeState();
     role.merge.pendingDelegation.set(nonce, { child: leaf, subs: batch.map((b) => b.subscriberId), at: this._now() });
+    // THE SELECTION IS HANDED OVER BY THE SELECTED PARENT (Topic Lifetime 4.1,
+    // armed only): a delegated subscriber's first DELIVER from its new child
+    // echoes an attempt this parent already committed, from a node that is not
+    // its pinned parent, so under the selected-parent rule it would be data
+    // only and the subscriber would re-seat here every renewal. The parent,
+    // which the subscriber selected, therefore tells it: one empty DELIVER per
+    // delegated seat carrying `delegate` = the child, which moves the pin and
+    // the attachment's parent without changing the generation or the attempt.
+    if (this._topicLifetime) {
+      const g = this._genCarried(role);
+      for (const b of batch) {
+        try { this._route(idBig(b.subscriberId), T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [], ...(g ? { gen: g } : {}), delegate: leaf }); } catch { /* best-effort; the next renewal re-seats */ }
+      }
+    }
     this._log('info', 'delegated', { child: leaf.slice(0, 12), moved: batch.length, nonce: nonce.slice(0, 8), pending: true });
     return true;
   },
@@ -655,6 +702,7 @@ export const wireHandlersMethods = {
     // STAMP — single serialization point; strictly monotonic, floored at now.
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
+    role.lastDemandAt = this._now();                                     // a stamped write is demand (Topic Lifetime 4.3)
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
@@ -1054,7 +1102,77 @@ export const wireHandlersMethods = {
   async _onDeliver(payload, meta) {
     if (meta.targetId !== this.nodeId) return;        // forward (intermediate hop)
     const topicBig = idBig(payload.topicId);
-    if (payload.from) {
+    // ARMED, a DELIVER that names a generation re-pins only if the attachment
+    // decision below accepts it (Aster TL-B11: the decision precedes every
+    // control effect, the pin included). Unarmed, or a frame naming no
+    // generation (an older kernel), re-pins as 4.116.0 did.
+    // THE ATTACHMENT DECISION (Topic Lifetime 4.1; Aster TL-B07, B11, B12), made
+    // ONCE here and read by the pin below and the attachment block further down.
+    // Three outcomes per holder (a relay role, this node's own subscription):
+    //   'commit'  the frame echoes a nonce of an attempt NEWER than the last
+    //             committed one: this is the reply to our own request, the
+    //             selected transition — any generation, any parent; commits it.
+    //   'data'    the frame echoes a nonce we recognise as obsolete or already
+    //             committed, or one we do not recognise at all: a delayed or
+    //             repeated reply; bodies are kept, nothing else moves — no
+    //             attachment, no pin, no custody credit.
+    //   'forward' the frame echoes nothing (fan-out) AND comes from the parent
+    //             we currently select (the pinned upstream) AND names the
+    //             current root at an epoch not lower: the parent's own
+    //             generation moved forward; accepted. Fan-out from any other
+    //             node, or naming another root, or before a first attachment,
+    //             is 'data'. Same root and epoch do not identify the parent.
+    // ONE record per topic (TL-B13): the relay role and the node's own reader
+    // share it, so there is exactly one decision and one selected parent.
+    const gated = this._topicLifetime && payload.from && this._genValid(payload.gen);
+    let decision = null;   // { v: 'commit'|'data'|'forward', k, g, fromHex, a }
+    if (gated) {
+      const g = this._genNorm(payload.gen);
+      const fromHex = lc(payload.from);
+      const nonce = typeof payload.attach === 'string' ? payload.attach : null;
+      const pin = (this._upstream.get(topicBig) || [])[0] || null;
+      const a = this._attach.get(topicBig) || null;
+      const role0 = this.axonRoles.get(topicBig);
+      let v = 'data', k = 0;
+      if (role0 && role0.isRoot) v = 'data';                              // a root is attached to nothing
+      else if (nonce) {
+        k = (a && a.attempts && a.attempts.has(nonce)) ? (a.attempts.get(nonce) | 0) : 0;   // an attempt in the window; older ones are unknown
+        v = (k > 0 && k > ((a && a.committed) | 0)) ? 'commit' : 'data';
+      } else if (a && a.gen && pin && fromHex === pin && a.gen.root === g.root && (g.epoch | 0) >= (a.gen.epoch | 0)) v = 'forward';
+      decision = { v, k, g, fromHex, a };
+    }
+    // HANDOVER (armed): the SELECTED parent (the pin, or the reply to our own
+    // live attempt) names a child to take its seat; the pin and the attachment's
+    // parent move to the child, the generation and the attempt do not.
+    if (gated && typeof payload.delegate === 'string' && isHexId(lc(payload.delegate)) && lc(payload.delegate) !== lc(idHex(this.nodeId))) {
+      // THE SAME FENCE AS EVERY OTHER CONTROL EFFECT (Aster b0748c4c X2): a
+      // handover rides a frame the decision accepted — a reply to a live newer
+      // attempt, or fan-out from the selected parent at the current root at an
+      // epoch not lower. An obsolete attempt or an older epoch moves nothing,
+      // whoever sent it.
+      const fromSelected = decision.v !== 'data';
+      if (fromSelected) {
+        const child = lc(payload.delegate);
+        const a = decision.a || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
+        // THE ACCEPTED GENERATION GOES WITH THE PARENT CHANGE (Aster 31f7527f X3):
+        // a forward handover names the selected parent's newer epoch and the
+        // attachment follows it, as the same frame without a delegate would;
+        // the attempt advances only on a commit.
+        if (decision.v === 'commit') a.committed = decision.k;
+        a.gen = decision.g;
+        a.from = child; this._attach.set(topicBig, a);
+        this._upstream.set(topicBig, [child]);
+        const s = this.mySubscriptions.get(topicBig); if (s) s.interval = this.renewFastMs;
+        const role1 = this.axonRoles.get(topicBig);
+        if (role1 && !role1.isRoot) { role1.upstreamHeld = new Set(); role1.upstreamHeldFrom = child; }
+        this._log('info', 'delegated-by-parent', { topic: idHex(topicBig).slice(0, 12), from: decision.fromHex.slice(0, 10), to: child.slice(0, 10) });
+      } else {
+        this._log('info', 'delegate-ignored', { topic: idHex(topicBig).slice(0, 12), from: decision.fromHex.slice(0, 10), why: 'not-selected-parent' });
+      }
+      return 'consumed';
+    }
+    const accepted = !gated || decision.v !== 'data';
+    if (payload.from && accepted) {
       const fromHex = lc(payload.from);
       const prev = this._upstream.get(topicBig);
       // Re-pin to our relay. If the relay CHANGED (re-home after a churn), snap the
@@ -1069,6 +1187,43 @@ export const wireHandlersMethods = {
     }
 
     const role = this.axonRoles.get(topicBig);        // set iff I'm a relay → re-fan
+    // ATTACHMENT (Topic Lifetime 4.1, Aster TL-B01): the generation this DELIVER
+    // names is the one this node is attached to; a notice or a REHOME binds to it
+    // exactly. Recorded on the relay role and, for a reader, on the manager.
+    // FORWARD ONLY within a root (Aster 848688cb TL-B04): a delayed DELIVER of
+    // an older epoch of the SAME root never rolls the attachment back, so an
+    // old notice cannot be made to match again by reordered traffic. A
+    // different root is a different generation and re-attaches (no global
+    // epoch order across roots). The bodies in an obsolete DELIVER are still
+    // valid bodies and are handled below; only the attachment ignores it.
+    // CUSTODY EVIDENCE IS BOUND TO THE ATTACHMENT (TL-B05): when the upstream
+    // or the generation changes, a relay's upstreamHeld set is cleared — an
+    // old sender having once sent a body says nothing about the current one.
+    // AUTHORIZED OR FORWARD-ONLY (Aster 0cfdd82d TL-B07). A DELIVER that echoes
+    // this node's current or previous attachment nonce answers ITS OWN SUB and
+    // may attach to any generation it names (that is the selected transition);
+    // one that echoes nothing is fan-out and may only ADVANCE the attachment
+    // within the current root (same root, epoch not lower), never switch
+    // roots and never make a first attachment. A different root id alone is
+    // not evidence of a new selection. `deliverAccepted` is read below: body
+    // custody is credited only from an accepted current-generation DELIVER.
+    let deliverAccepted = false;
+    if (decision) {
+      const { g, fromHex, v, k } = decision;
+      if (v !== 'data') {
+        const a = decision.a || { gen: null, from: null, nonce: null, seq: 0, attempts: new Map(), committed: 0 };
+        if (v === 'commit') a.committed = k;                               // this attempt's selection is committed; older replies are data only
+        const changed = !a.gen || a.gen.root !== g.root || (a.gen.epoch | 0) !== (g.epoch | 0) || a.from !== fromHex;
+        a.gen = g; a.from = fromHex;
+        this._attach.set(topicBig, a);
+        if (role && !role.isRoot) {
+          if (changed || role.upstreamHeldFrom !== fromHex) { role.upstreamHeld = new Set(); role.upstreamHeldFrom = fromHex; }
+          deliverAccepted = true;
+        }
+      } else {
+        this._log('info', 'deliver-attachment-ignored', { topic: idHex(topicBig).slice(0, 12), from: fromHex.slice(0, 10), gen: g.root.slice(0, 10), epoch: g.epoch, nonce: typeof payload.attach === 'string', k, reader: this.mySubscriptions.has(topicBig) });
+      }
+    }
     for (const m of (Array.isArray(payload.msgs) ? payload.msgs : [])) {
       if (!m) continue;
       if (m.del) {
@@ -1077,10 +1232,12 @@ export const wireHandlersMethods = {
         // _applyKill installs the tombstone WITHOUT an unverified/cross-carrier proof.
         let mm = m;
         if (this._tombAuthority && m.kill && !(await this._taVerifyBoundKill(topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
-        this._applyKill(role, topicBig, mm);
+        this._applyKill(role, topicBig, mm, null, (deliverAccepted && decision) ? decision.g : null);
         continue;
       }
       if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
+      // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
+      if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
@@ -1094,7 +1251,8 @@ export const wireHandlersMethods = {
 
   // Fan a stamped message to every subscriber (optionally excluding the sender).
   _fanout(role, msg, excludeHex) {
-    const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg] };
+    const gen = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1: a DELIVER names the generation it serves
+    const base = { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [msg], ...(gen ? { gen } : {}) };
     // Publish-time expectation ledger (DRAFT, gated) — record the believed
     // recipient/lease set BEFORE the sends, at every fanning node. See _fanoutLedger.
     if (this._latTrace) this._fanoutLedger(role, msg?.msgId, excludeHex);
@@ -1112,9 +1270,13 @@ export const wireHandlersMethods = {
   // ts-floor delta can't express "newest regardless of age": a current value
   // published before the subscriber's now-anchored floor sits below it and is
   // filtered out (the "subscribe latest → no callback" bug). Receiver dedups.
-  _replayTo(role, subHex, sinceTs, ping, latest = false) {
+  _replayTo(role, subHex, sinceTs, ping, latest = false, attach = null) {
     const subBig = idBig(subHex);
     const isSelf = subBig === this.nodeId;
+    const genT = this._topicLifetime ? this._genCarried(role) : null;   // Topic Lifetime 4.1
+    // The reply to a SUB echoes its attachment nonce on every DELIVER it sends
+    // (TL-B07): that is what makes it an authorized attachment at the receiver.
+    const gx = { ...(genT ? { gen: genT } : {}), ...(this._topicLifetime && attach ? { attach } : {}) };
     let batch = [], bytes = 0, sent = false;
     const inBatch = new Set();
     const flush = () => {
@@ -1122,7 +1284,7 @@ export const wireHandlersMethods = {
       sent = true;
       if (isSelf) for (const m of batch) this._deliverToApp(role.topicId, m.json, m.msgId, m.publishTs, m.seq);
       else this._route(subBig, T.DELIVER,
-        { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: batch });
+        { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: batch, ...gx });
       batch = []; bytes = 0;
     };
     for (const c of role.cache) {
@@ -1157,10 +1319,10 @@ export const wireHandlersMethods = {
     if (dels.length) {
       sent = true;
       if (isSelf) for (const dm of dels) this._deliverKillToApp(role.topicId, dm.msgId, dm.killTs, dm.seq);
-      else this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: dels });
+      else this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: dels, ...gx });
     }
     if (ping && !sent && !isSelf) {                    // repin even with no history
-      this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [] });
+      this._route(subBig, T.DELIVER, { topicId: idHex(role.topicId), from: idHex(this.nodeId), msgs: [], ...gx });
     }
   },
 
@@ -1185,8 +1347,14 @@ export const wireHandlersMethods = {
   // first time we see the kill (tombstone-gated).
   // RETURNS false when refused at the cut (dual-root packet 4(d)); the caller
   // propagates it. Tombstones are mutations too, and they commit first.
-  _applyKill(role, topicBig, m, cut = null) {
+  _applyKill(role, topicBig, m, cut = null, genTag = null) {
     const target = m.msgId;
+    // OWNERSHIP IS A SET (Aster ef073745): the same deletion can arrive through
+    // several live obligations, and each one that delivered it owns it; the
+    // record goes only when its last owner ends. Armed only; untagged means
+    // the carrier named no generation (a root's own, a legacy grant).
+    const ownerKey = genTag ? `${genTag.root}:${genTag.epoch | 0}` : null;
+    const own = (tomb) => { if (ownerKey && tomb) { (tomb.owners ??= new Set()).add(ownerKey); } };
     if (role && !this._cutHolds(role, cut)) {
       this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
       return false;
@@ -1214,6 +1382,7 @@ export const wireHandlersMethods = {
     // internally inconsistent carrier (Aster S1/S2). Flag-off / proof-less keeps m.signer.
     const proofSigner = proof ? lc(proof.signerPubkey) : null;
     const existing = role ? role.tombstones.get(target) : null;
+    if (existing) own(existing);                      // a second obligation delivering the same deletion owns it too
     if (role && existing && proof && !existing.kill) {
       // B2 UPGRADE — a proof-less tombstone gains a verified, bound proof. Attach it and
       // converge it downstream (re-fan now + re-replicate; the replay / replicate /
@@ -1232,6 +1401,10 @@ export const wireHandlersMethods = {
     if (role && !existing) {
       const tomb = { exp: this._now() + TTL_MS, killTs, signer: proof ? proofSigner : (m.signer ?? null), seq };
       if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
+      // DELETION OWNERSHIP (Topic Lifetime 4.6; Aster b0748c4c X1): a tombstone
+      // belongs to the generation that delivered it, so an obligation's end
+      // drops only its own. Armed only; a root's own and a legacy carrier's are untagged.
+      if (genTag) { tomb.gen = { root: genTag.root, epoch: genTag.epoch | 0 }; own(tomb); }
       role.tombstones.set(target, tomb);
       const i = role.cache.findIndex(c => c.msgId === target);
       if (i >= 0) { role.cacheBytes -= role.cache[i].bytes; role.cache.splice(i, 1); }
@@ -1345,15 +1518,16 @@ export const wireHandlersMethods = {
       this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
       return 'consumed';
     }
-    const prevTs = role.lastTs, prevSeq = role.seq;     // restored if the cut refuses the commit below
+    const prevTs = role.lastTs, prevSeq = role.seq, prevDemandAt = role.lastDemandAt;   // restored if the cut refuses the commit below
     const ts = Math.max(role.lastTs + 1, this._now());
     role.lastTs = ts;
+    role.lastDemandAt = this._now();                    // a stamped kill is demand (Topic Lifetime 4.3); a duplicate above stamps nothing
     const seq = ++role.seq;
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
     if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill }, cut) === false) {
-      role.seq = prevSeq; role.lastTs = prevTs;               // the stamp above did not commit
+      role.seq = prevSeq; role.lastTs = prevTs; role.lastDemandAt = prevDemandAt;   // the stamp above did not commit
       this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
       return 'consumed';
     }

@@ -4956,6 +4956,19 @@ export class AxonaPeer extends DHT {
     let envelope;
     try {
       envelope = JSON.parse(json);
+      // TOPIC TERMINATED (Topic Lifetime 4.5, axona-docs 11288d7): the root ended
+      // the generation and the kernel has already ended its own subscription.
+      // Each app handler receives ONE `{ terminated: true, generation }` row and
+      // its Subscription is stopped here; an app that still wants the topic
+      // subscribes again and forms the next generation. Ended, not paused.
+      if (envelope && typeof envelope === 'object' && envelope.terminated === true) {
+        for (const sub of set) {
+          sub._deliver({ topic: sub.topicName ?? null, terminated: true, generation: envelope.generation ?? null, ts: publishTs, seq });
+          sub._stopped = true;
+        }
+        this._subscriptions.delete(topicId);
+        return;
+      }
       // Kill / retraction (Phase A #2): a delete marker is delivered on the
       // same handler so apps can drop their local copy.  It carries no
       // message/ts — deliver it as-is, { msgId, topic, deleted: true }, and

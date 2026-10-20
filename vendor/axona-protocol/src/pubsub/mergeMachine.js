@@ -110,6 +110,10 @@ export const mergeMachineMethods = {
   _cutHolds(role, cut) {
     if (!role) return false;
     if (role.merge?.gate) return false;
+    // DISMANTLING (Topic Lifetime 4.5): a root whose termination began takes no
+    // write; a stamped write arriving after the install is refused here and the
+    // publisher's own re-send forms the next generation at a clean role.
+    if (role.dismantling) return false;
     // RETIRED (Aster edfdd869, 4.116.0): a role the reaper detached carries the
     // mark `retired` (set by `_retireRole`, the one detach site) and no commit
     // resuming on it holds, replacement or not — a tombstone or body written

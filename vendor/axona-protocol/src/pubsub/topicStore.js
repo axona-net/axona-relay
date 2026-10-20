@@ -146,7 +146,7 @@ export const topicStoreMethods = {
   // cut (dual-root packet 4(d)): the transfer's entry-time `cut` is passed to
   // every _applyKill and nothing is captured after the proof await; a refusal
   // stops the batch so no later entry commits behind the export.
-  async _applyDels(role, topicBig, dels, cut = null) {
+  async _applyDels(role, topicBig, dels, cut = null, genTag = null) {
     for (const d of (Array.isArray(dels) ? dels : [])) {
       if (d && d.msgId) {
         // Verify + BIND any propagated proof (topicId+msgId+signer) BEFORE _applyKill
@@ -156,7 +156,7 @@ export const topicStoreMethods = {
         // before retention; a verified proof also observes into the shadow authority.
         let dd = d;
         if (this._tombAuthority && d.kill && !(await this._taVerifyBoundKill(topicBig, d))) { const { kill, ...rest } = d; dd = rest; }
-        if (this._applyKill(role, topicBig, dd, cut) === false) return false;
+        if (this._applyKill(role, topicBig, dd, cut, genTag) === false) return false;
       }
     }
     return true;

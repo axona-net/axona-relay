@@ -103,6 +103,15 @@ export function makeRole(topicId, isRoot, createdAt = null) {
     emptySince: null,                // _now() of the first refreshTick that found the role holding NOTHING
                                      // (no bodies/tombstones/custody/seats/backup/lease/intent); null while it
                                      // holds anything. The empty-role grace is measured from it (4.116.0).
+    // ── Topic Lifetime (axona-docs 11288d7; behind TOPIC_LIFETIME) ──
+    lastDemandAt: createdAt,         // last reader SUB, child SUB with n > 0, or stamped write (4.3). Never a
+                                     // standby SUB, a REPLICATE, a beacon, a keepalive or a duplicate kill.
+    dismantling: null,               // (when ROOT) { at, sends } once termination began (4.5): grants no seat,
+                                     // takes no write, replicates nothing, beacons nothing.
+    thinSince: null,                 // (when CHILD) _now() of the first tick that read demand < CHILD_MIN_READERS (4.7)
+    standbyGen: null,                // (when BACKUP) { root, epoch } the appointment names (4.1); null = legacy grant.
+                                     // The ATTACHMENT (the parent a relay or reader selected) is NOT on the role: it is
+                                     // one record per topic on the manager (_attach), shared with the node's own reader.
     lastTs: 0,                       // highest stamp emitted (monotonic; root authority)
     seq: 0,                          // DENSE per-topic counter (root authority): ++ per emitted
                                      // message AND kill, so subscribers detect GAPS (env.seq jumps
@@ -383,12 +392,16 @@ export class RootClaim {
   // isRoot in Phase 1, extended to the nature whose unmodeled residue caused
   // #333. One structured `role-nature` log per genuine transition (a replica
   // refresh from the SAME principal is bookkeeping, not a transition).
-  becomeBackup(topicBig, role, principalHex) {
+  becomeBackup(topicBig, role, principalHex, gen = null, issuedAt = null) {
     const m = this.m;
     const entering = role.backupOf === null;
     const rePrincipaled = !entering && role.backupOf !== principalHex;
     role.backupOf = principalHex;
     role.lastReplicaAt = m._now();
+    // Topic Lifetime 4.1: the appointment names its generation when the grant
+    // carried one; a legacy grant leaves the last known generation in place.
+    if (gen && typeof gen.root === 'string') role.standbyGen = { root: lc(gen.root), epoch: Number.isInteger(gen.epoch) ? gen.epoch : 0 };
+    if (Number.isFinite(issuedAt)) role.standbyIssuedAt = issuedAt;   // the grant's own stamp: a later grant must not be older (TL-B10)
     m._backupTopics.add(topicBig);
     if (entering || rePrincipaled) {
       m._log('info', 'role-nature', {

@@ -60,11 +60,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ESTABLISHED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
-      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge'] },   // merge: the completion block while a loser is completing (dual-root 4(d))
-      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string' } },
+      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach'] },   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
+      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale'], traceFields: ['topicId', 'subscriberId'], budget: budget(7),
+      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(11),
       note: 'establishes/renews a delivery lease routed toward topicId; advertises the subscriber replay cursor (hw/lw)',
     }),
     ({
@@ -72,11 +72,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_RELEASED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk',
-      projection: { payload: ['topicId', 'subscriberId'] },
-      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string' } },
+      projection: { payload: ['topicId', 'subscriberId', 'steppedDown'] },   // steppedDown: a thin child's leave arms the parent's cooldown (Topic Lifetime 4.7)
+      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', steppedDown: 'boolean' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region'], traceFields: ['topicId', 'subscriberId'], budget: budget(2),
+      errorContract: ['refuse-region'], traceFields: ['topicId', 'subscriberId'], budget: budget(3),
     }),
 
     // ── write ingress: PUB / KILL bind the ingress ATTEMPT (IngressRef), not authority ──
@@ -180,10 +180,10 @@ function rowDefs() {
       evidence: EvidenceLevel.OBSERVED, proves: Proves.OBSERVATION, outcome: 'DeliveryOutcome', terminalOutcome: 'ENTRIES_DELIVERED_AT_MOST_ONCE',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs'] },
-      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr' } },
+      projection: { payload: ['topicId', 'from', 'msgs', 'gen', 'attach', 'delegate'] },   // gen: the generation served; attach: the SUB nonce this reply answers; delegate: the selected parent hands the seat to this child (Topic Lifetime 4.1, armed only)
+      schema: { require: ['topicId', 'msgs'], types: { topicId: 'string', msgs: 'arr', gen: 'obj', attach: 'string', delegate: 'string' } },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(3),
+      errorContract: ['drop-duplicate-msgid'], traceFields: ['topicId'], budget: budget(6),
       note: 'fan-out down the tree; each entry keyed by its own msgId (per-entry idempotency, not a frame key)',
     }),
     ({
@@ -325,6 +325,31 @@ function rowDefs() {
       errorContract: [], traceFields: ['topicId', 'nonce'], budget: budget(5),
       note: 'dual-root packet 4(d): the child\'s answer to a delegation — the parent\'s half of ADOPT completes here, never on a hop-local verdict',
     }),
+    // ── topic lifetime (TopicDeliveryPlane) — axona-docs 11288d7, behind TOPIC_LIFETIME ──
+    ({
+      type: 'pubsub:topicterminated', wire: T.TOPIC_TERMINATED, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'GENERATION_ENDED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: 'generationBinding',
+      projection: { payload: ['topicId', 'from', 'gen'], meta: ['targetId'] },
+      schema: { require: ['topicId', 'gen'], types: { topicId: 'string', from: 'string', gen: 'obj' } },
+      idempotency: { from: ['topicId', 'from'] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['ignore-foreign-generation', 'ignore-holds-body', 'ignore-i-am-root'], traceFields: ['topicId'], budget: budget(4),
+      note: 'a root ends its generation (4.5): to every seat and replica, once per tick for up to three ticks; a child forwards to its seats then retires; a reader\'s subscription ENDS with one row; a backup holding a body does not obey',
+    }),
+    ({
+      type: 'pubsub:rehome', wire: T.REHOME, kind: FrameKind.ONE_WAY, owningService: 'TopicDeliveryPlane', versionRange: V,
+      evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'READER_REHOMED',
+      retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: NA, orderingModel: 'ARRIVAL',
+      authGuard: NA, admissionGuard: NA, placementGuard: 'upstreamBinding',
+      projection: { payload: ['topicId', 'from', 'upstream', 'gen'], meta: ['targetId'] },
+      schema: { require: ['topicId', 'from'], types: { topicId: 'string', from: 'string', upstream: 'string', gen: 'obj' } },
+      idempotency: { from: ['topicId', 'from'] },
+      capabilityRange: { profile: PROFILE },
+      errorContract: ['ignore-not-upstream'], traceFields: ['topicId'], budget: budget(5),
+      note: 'a thin child steps down (4.7): its readers walk to the named upstream on their fast cadence; kernel-internal, the app\'s subscription persists; only from the receiver\'s current upstream',
+    }),
     ({
       type: 'pubsub:handoffack', wire: T.HANDOFFACK, kind: FrameKind.ONE_WAY, owningService: 'SyncEngine', versionRange: V,
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'ACK_RECEIVED',
@@ -343,12 +368,12 @@ function rowDefs() {
       evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'REPLICA_UNION_APPLIED',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs', 'dels'] },
-      schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr' } },
+      projection: { payload: ['topicId', 'from', 'msgs', 'dels', 'gen', 'issuedAt'] },   // gen/issuedAt: the appointment's generation + issue stamp (Topic Lifetime 4.4, armed only)
+      schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr', gen: 'obj', issuedAt: 'number' } },
       // No correlation and no conversation: a cohort spray keyed by an unsigned `from` is not an authenticated holder
       // subject and has no request/response pairing (F3). COUNT_HIGHWATER_HINT is rate gating, never an equality proof.
       capabilityRange: { profile: PROFILE, summaryStrategy: 'COUNT_HIGHWATER_HINT' },
-      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(4),
+      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(6),
       note: 'cohort spray to K-closest; empty msgs+dels = liveness keepalive; union ingest is order-independent',
     }),
 

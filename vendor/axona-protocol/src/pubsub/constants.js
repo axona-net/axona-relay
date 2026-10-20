@@ -56,6 +56,50 @@ export const ROLE_IDLE_TTL_MS = 24 * 60 * 60 * 1000;   // 24 h
 // restores the eternal pin.
 export const ROLE_EMPTY_GRACE_MS = 5 * 60 * 1000;   // 5 min
 
+// ── TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md, title
+// v0.9 @ 11288d7; David "Build" 2026-10-20) ──────────────────────────────────
+// The 2026-10-19 census: 2,997 roles over 802 topics, 1,367 of them BACKUPS and
+// 1,147 of those seating nobody — a root pushes to two backups because it has
+// bodies, the backups seat at the root every tick because they exist, the root
+// is never dead because it has seats, the backups are never dead because they
+// are backups. David: "If there is also nothing within the cache the entire
+// topic framework must be dismantled. This must also be done quickly and
+// regularly." The whole machine sits behind TOPIC_LIFETIME (kernel option
+// `topicLifetime`, env TOPIC_LIFETIME=1). OFF by default: an unarmed node is
+// byte-identical to 4.116.0 except that it registers (and ignores nothing of)
+// the two new frames. Arming is David's separate word.
+export const TOPIC_LIFETIME_DEFAULT = 0;
+// A standby appointment is a LEASE on one thing: the root's REPLICATE. Renewed
+// only by a REPLICATE (lastReplicaAt's one writer is becomeBackup); nothing the
+// backup sends moves it. L = DROP_MS, the seat lease, so a backup lapses on the
+// same clock a reader does (packet 4.4).
+export const STANDBY_LEASE_MS = DROP_MS;                 // 180 s
+// The two assumptions the grant rule rests on, stated apart from it (4.4):
+// D = the longest a frame is in flight; S = the clock skew between any two
+// relays. A conforming grant reads at most D + S old by the receiver's clock;
+// one reading older is dropped, whatever it names. S is SET by David
+// (2026-10-20, "That is fine"), not measured; a real skew beyond S drops
+// conforming grants and admits nothing, so a later measurement can only widen it.
+export const APPOINTMENT_DELAY_MS = 60_000;              // D
+export const APPOINTMENT_SKEW_MS  = 15_000;              // S
+// A holder that leaves its part in a LIVE generation keeps a LEFT record for
+// L + S + D (255 s) on the monotonic clock (4.2); the map is bounded and
+// pressure evicts only an EXPIRED record. Termination writes NO record (4.5).
+export const LEFT_RECORD_MAX = 4096;
+// TOPIC_TERMINATED is sent once per tick for up to this many ticks, or until
+// every seat has left, whichever is first; the role goes on the tick after its
+// last send (4.5).
+export const TOPIC_TERMINATE_TRIES = 3;
+// A thin branch steps down (4.7): a child whose declared demand has read below
+// CHILD_MIN_READERS for CHILD_STEP_DOWN_MS rehomes its readers to its upstream
+// and retires. Hysteresis: a new child is not judged before CHILD_MIN_STAY_MS;
+// a parent does not re-promote a node that stepped down within
+// CHILD_COOLDOWN_MS. David 2026-10-20: "Let's use 2 subscribers and 90 seconds."
+export const CHILD_MIN_READERS   = 2;
+export const CHILD_STEP_DOWN_MS  = 90_000;
+export const CHILD_MIN_STAY_MS   = 90_000;
+export const CHILD_COOLDOWN_MS   = 300_000;
+
 // ── Root election / convergence ─────────────────────────────────────────
 // Reachable-root fallback (cold-convergence fix). An unpinned subscriber whose
 // iterative root hint names a node CLOSER in XOR but that never adopts it back
@@ -418,6 +462,8 @@ export const T = {
   REPLAYACK:    'pubsub:replayack',   // dual-root 4(d) step 4: the WINNER's terminal ack of the whole export under corr (retained, delsActive, hash) or a refusal
   MERGE_CLOSED: 'pubsub:mergeclosed', // dual-root 4(d) completion: the winner closes the handover on the loser's merge-bearing SUB
   ADOPTACK: 'pubsub:adoptack',   // dual-root packet 4(d) (axona-docs 14a6bd8): the child answers an ADOPT — accepted ids or a refusal — so the parent releases delegated subscribers only on confirmed adoption
+  TOPIC_TERMINATED: 'pubsub:topicterminated', // Topic Lifetime 4.5 (axona-docs 11288d7): a root ends its generation; routed to every seat and replica, forwarded by a child to its seats; a reader's subscription ENDS
+  REHOME: 'pubsub:rehome',       // Topic Lifetime 4.7: a thin child steps down and sends its readers to its upstream; kernel-internal, the app's subscription persists
 };
 
 // ── Dual-root reconciliation (axona-docs 14a6bd8; David "build it" 2026-10-17) ──
