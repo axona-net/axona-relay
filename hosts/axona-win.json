@@ -25,7 +25,8 @@
       "RELAY_TUI": "0",
       "SUB_TERMINAL_VERIFY": "1",
       "RELAY_MESH_POOLS": "M=50,I=50,H=100",
-      "RELAY_LEDGER_ENFORCE": "1"
+      "RELAY_LEDGER_ENFORCE": "1",
+      "TOPIC_LIFETIME": "1"
     }
   },
   "services": {
