@@ -1126,6 +1126,18 @@ export class AxonaPeer extends DHT {
     registerFrame(transport, 'route_msg', async (fromId, msg) => {
       const { type, payload, targetId, hops, originId } = msg;
       const targetBig = asId(targetId);   // wire→internal id gate
+      // Hop trace (4.121.0): what THIS hop did with a relayed offer or answer —
+      // delivered, forwarded (to whom), or stopped (why). Joined across hops and
+      // to the dialer by the wire attempt id. Offers and answers only.
+      const sk = type === 'mesh:signal' ? payload?.signal?.kind : null;
+      const hopTrace = (sk === 'sdp-offer' || sk === 'sdp-answer')
+        ? (decision, extra) => this._emitLog?.('info', 'relay-signal-hop', {
+            attempt: payload.signal.attempt ?? null, kind: sk, hop: hops,
+            target: toHex(targetBig).slice(0, 12),
+            from: fromId == null ? null : (typeof fromId === 'bigint' ? toHex(fromId) : String(fromId)).slice(0, 12),
+            decision, ...(extra || {}),
+          })
+        : null;
 
       // Paired DELIVER hop telemetry (LAT_TRACE-gated; David-approved 2026-09-01).
       // rx here = this hop actually received the forwarded DELIVER; pairs with the
@@ -1211,9 +1223,11 @@ export class AxonaPeer extends DHT {
       });
 
       if (result === 'consumed') {
+        hopTrace?.('delivered');
         return { consumed: true, atNode: meId, hops };
       }
       if (isTerminal && capable) {
+        hopTrace?.('terminal-not-target', { synaptome: node.synaptome.size });
         return { consumed: false, atNode: meId, hops, terminal: true };
       }
       if (isTerminal && !capable) {
@@ -1221,12 +1235,14 @@ export class AxonaPeer extends DHT {
         const fb = this._capableFallbackHop(targetBig, exclude);
         if (fb === null) {
           st.noCapableTerminal = (st.noCapableTerminal | 0) + 1;
+          hopTrace?.('no-capable-terminal');
           return { consumed: false, atNode: meId, hops, exhausted: true, stopped: 'no-capable-terminal' };
         }
         st.forwardedIncapable = (st.forwardedIncapable | 0) + 1;
         nextHopId = fb; isTerminal = false;
       }
       if (hops + 1 >= domain.MAX_HOPS) {
+        hopTrace?.('max-hops');
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
 
@@ -1241,6 +1257,9 @@ export class AxonaPeer extends DHT {
 
       let _hopId = null, _fEnqT = 0, _fSendT = 0;
       if (_hopLt) { _hopId = `h${(this._hopSeq = (this._hopSeq | 0) + 1)}@${toHex(node.id).slice(-6)}`; _fEnqT = Date.now(); }
+      const _hopNext = hopTrace ? toHex(nextHopId).slice(0, 12) : null;
+      const _hopConn = hopTrace && typeof node.transport.isConnected === 'function' ? node.transport.isConnected(nextHopId) : null;
+      const _hopT0 = hopTrace ? Date.now() : 0;
       try {
         // Wire payload targetId is hex (v1.5 contract).
         if (_hopLt) _fSendT = Date.now();
@@ -1256,8 +1275,10 @@ export class AxonaPeer extends DHT {
           const _oc = this._axonaManager._txOutcome(true, null);
           for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
         }
+        hopTrace?.('forwarded', { next: _hopNext, nextConnected: _hopConn, ms: Date.now() - _hopT0, downstream: downstream?.consumed ? 'consumed' : (downstream?.terminal ? 'terminal' : downstream?.exhausted ? 'exhausted' : 'other') });
         return downstream;
       } catch (e) {
+        hopTrace?.('send-failed', { next: _hopNext, nextConnected: _hopConn, ms: Date.now() - _hopT0, err: String(e?.message || e).slice(0, 60) });
         if (_hopLt) {
           this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
           const _oc = this._axonaManager._txOutcome(false, e);
@@ -6356,20 +6377,37 @@ export class AxonaPeer extends DHT {
    *  (alpha-parallel, dead-peer-aware — Peer-Relayed-Signaling §8b
    *  finding 6), cached briefly; delivery is route_msg with one retry. */
   async _relayMeshSignal(toBig, toHexId, signal) {
+    // Hop trace (4.121.0, David 2026-10-22 "Trace the relayed signal hop by hop
+    // first"): the ORIGIN's verdict for each relayed offer/answer — the
+    // reachability verdict that gates it, then the route's result. Before this,
+    // an unreachable verdict or a failed route left only a domain event no log
+    // carried. Offers and answers only; candidates would swamp the log.
+    const traced = !!signal && (signal.kind === 'sdp-offer' || signal.kind === 'sdp-answer');
+    const t0 = Date.now();
+    const pre = this._relayReach ? this._relayReach.get(toBig.toString(16)) : null;
+    const wasCached = !!(pre && (t0 - pre.ts) < RELAY_REACH_TTL_MS);
+    const origin = (ctx) => { if (traced) this._emitLog?.('info', 'relay-signal-origin', { to: String(toHexId).slice(0, 12), kind: signal.kind, attempt: signal.attempt ?? null, ms: Date.now() - t0, ...ctx }); };
     if (!(await this._relayReachable(toBig))) {
       this._domain?._emit?.({ type: 'mesh-signal-unreachable', to: toHexId });
+      origin({ reach: wasCached ? 'cached-no' : 'lookup-no', result: 'not-sent' });
       return;
     }
+    const reach = wasCached ? 'cached-ok' : 'lookup-ok';
     // Canonical 66-char hex (the web transport's meshId form) so the
     // responder's answer routes back via fromHex() without a width mismatch.
     const body = { from: toHex(this._node.id), signal };
-    for (let attempt = 0; attempt < 2; attempt++) {
+    let last = null, threw = 0;
+    for (let tryN = 0; tryN < 2; tryN++) {
       try {
         const r = await this.routeMessage(toBig, 'mesh:signal', body);
-        if (r && r.consumed) return;
-      } catch { /* retry */ }
+        last = r;
+        if (r && r.consumed) { origin({ reach, result: 'delivered', hops: r.hops ?? null, tries: tryN + 1 }); return; }
+      } catch { threw++; /* retry */ }
     }
     this._domain?._emit?.({ type: 'mesh-signal-relay-failed', to: toHexId });
+    const why = !last ? 'threw' : last.terminal ? 'terminal-not-target' : last.exhausted ? (last.stopped || 'exhausted') : 'not-consumed';
+    const at = last && last.atNode != null ? (typeof last.atNode === 'bigint' ? toHex(last.atNode) : String(last.atNode)).slice(0, 12) : null;
+    origin({ reach, result: why, atNode: at, hops: last?.hops ?? null, tries: 2, threw });
   }
 
   /** Is `toBig` reachable over the mesh right now?  Verdict cached for
