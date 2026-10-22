@@ -552,28 +552,36 @@ export function webTransport({
         }
       : null,
     sendSignal: (toPeerId, payload) => {
+      // Signal trace (4.120.0): which path each offer and answer took — the
+      // mesh relay, the door, the bridge, or nowhere. Candidates are not
+      // traced (one line per candidate would swamp the log).
+      const traced = payload && (payload.kind === 'sdp-offer' || payload.kind === 'sdp-answer');
+      const trace = (path) => { if (traced) log('signal-path', { to: toPeerId, kind: payload.kind, attempt: payload.attempt ?? null, path }); };
       if (meshRelay && typeof signalRelay === 'function' && isHexId(toPeerId)) {
         let took = false;
         try { took = signalRelay(toPeerId, payload) === true; }
         catch (err) { log('signal-relay-threw', { to: toPeerId, err: err.message }); }
-        if (took) { signalStats.meshMsgs++; signalStats.meshPeers.add(toPeerId); return; }
+        if (took) { signalStats.meshMsgs++; signalStats.meshPeers.add(toPeerId); trace('mesh-relay'); return; }
       }
       if (typeof doorSignalSink === 'function' && !isHexId(toPeerId)) {
         let took = false;
         try { took = doorSignalSink(toPeerId, payload) === true; }
         catch (err) { log('door-signal-sink-threw', { to: toPeerId, err: err.message }); }
-        if (took) { signalStats.doorMsgs = (signalStats.doorMsgs ?? 0) + 1; return; }
+        if (took) { signalStats.doorMsgs = (signalStats.doorMsgs ?? 0) + 1; trace('door'); return; }
       }
       if (!socketOpen) {
         signalStats.dropMsgs++;
         log('signal-drop-no-bridge', { to: toPeerId });
+        trace('dropped');
         return;
       }
       try {
         sendToBridge({ type: 'signal', to: toPeerId, payload });
         signalStats.bridgeMsgs++; signalStats.bridgePeers.add(toPeerId);
+        trace('bridge');
       } catch (err) {
         log('signal-send-failed', { to: toPeerId, err: err.message });
+        trace('send-failed');
       }
     },
     log,

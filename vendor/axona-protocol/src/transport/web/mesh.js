@@ -162,6 +162,18 @@ const RETRY_AFTER_MS   = 5000;   // single retry after pc-failed (B10)
 const NEGOTIATION_DEADLINE_MS = 30000;
 /** Row 13: _retire reasons on a never-opened channel that mean the attempt
  *  FAILED (as opposed to being retried or the mesh going away). */
+// Has the PC applied a remote SDP? A browser's RTCPeerConnection returns null
+// until one is set; node-datachannel 0.33.4's polyfill returns a NEW, TRUTHY,
+// EMPTY RTCSessionDescription (type undefined) every time, so a bare
+// `pc.remoteDescription` test passed before any SDP and a candidate that beat
+// the offer or answer went to libdatachannel and was lost ("Got a remote
+// candidate without remote description"; probed 2026-10-22, 4.120.0). The type
+// is set on both runtimes exactly when a description is.
+export function hasRemoteDescription(pc) {
+  const rd = pc ? pc.remoteDescription : null;
+  return !!(rd && rd.type);
+}
+
 const NEGOTIATION_FAILED_REASONS = new Set(['negotiation-timeout', 'pc-closed', 'peer-left', 'disconnect', 'rejected', 'retry-refused']);
 // G2 (two-pool packet, axona-docs ca52384): replacements of an UNBOUND
 // negotiation on one key are bounded. Past this many within the key's
@@ -963,6 +975,10 @@ export class MeshManager {
       if (payload.kind === 'sdp-offer') {
         // We're the responder.  Build (or reuse) the PC and answer.
         let existing = this._peers.get(from);
+        // Signal trace (4.120.0): every offer that reaches this node, named by
+        // its sender, BEFORE any drop or refusal below — the answering-side
+        // half of the failed-dial triage (axona.bot 0662d789).
+        this._log('offer-recv', { from, attempt: payload.attempt ?? null, existing: existing ? existing.state : null });
         // Socket-is-bootstrap v0.5, attempt ids on the offer:
         //  · missing where the policy requires one → dropped;
         //  · a NEW attempt for a key holding an OPEN channel → ignored: no
@@ -1027,8 +1043,11 @@ export class MeshManager {
           return;
         }
         if (!this._attemptOk(from, peer, payload, 'sdp-answer')) return;
+        this._log('answer-recv', { from, inc: peer.inc, attempt: peer.attempt ?? null, ms: Date.now() - peer.since });   // signal trace (4.120.0)
         await peer.pc.setRemoteDescription({ type: 'answer', sdp: payload.sdp });
         if (this._peers.get(from) !== peer) return;   // continuation: the attempt ended while we awaited
+        // Signal trace (4.120.0): the answer TOOK (answer-recv only says it arrived).
+        this._log('answer-applied', { from, inc: peer.inc, attempt: peer.attempt ?? null, ms: Date.now() - peer.since, queued: peer.pendingCandidates.length });
         await this._flushPendingCandidates(peer);
       } else if (payload.kind === 'sdp-reject') {
         // G5: the responder refused our offer for capacity. Binds to the
@@ -1054,7 +1073,14 @@ export class MeshManager {
           return;
         }
         if (!this._attemptOk(from, peer, payload, 'ice')) return;
-        if (peer.pc && peer.pc.remoteDescription) {
+        // Signal trace (4.120.0): the first remote candidate per attempt, with
+        // its age and whether it beat the SDP — the dialer-side half of the
+        // failed-dial triage (axona.bot 0662d789).
+        if (!peer.firstRemoteCandAt) {
+          peer.firstRemoteCandAt = Date.now();
+          this._log('first-remote-candidate', { from, inc: peer.inc, role: peer.role, attempt: peer.attempt ?? null, ms: peer.firstRemoteCandAt - peer.since, beforeSdp: !hasRemoteDescription(peer.pc) });
+        }
+        if (hasRemoteDescription(peer.pc)) {
           await peer.pc.addIceCandidate(payload.candidate);
         } else {
           // PC not ready (responder hasn't received offer yet) — queue.
@@ -1096,6 +1122,7 @@ export class MeshManager {
       peerLegacy: false,
       rttBuffer: [],
       pendingCandidates: [],
+      firstRemoteCandAt: 0,   // signal trace (4.120.0): epoch ms of the first remote candidate on this attempt
       pingTimer: null,
       reaperTimer: null,
       sendFailures: 0,
@@ -1466,6 +1493,10 @@ export class MeshManager {
       // state it started under must still be the key's current one.
       if (this._peers.get(peerId) !== state) { this._log('offer-continuation-stale', { peerId, attempt: state.attempt }); return; }
       this._sendSignal(peerId, { kind: 'sdp-offer', sdp: offer.sdp, attempt: state.attempt });
+      // Signal trace (4.120.0): the dialer's join key — this PC's incarnation
+      // (which every later pc-state/teardown carries) bound to the wire attempt
+      // id (which the answering side's offer-recv carries). No SDP is logged.
+      this._log('offer-sent', { peerId, inc: state.inc, attempt: state.attempt ?? null, ms: Date.now() - state.since });
       this._ledger?.negotiating(state.inc);   // row 3: first frame out
     } catch (err) {
       this._log('offer-create-failed', { peerId, err: err.message });
