@@ -168,6 +168,7 @@ export function makeRole(topicId, isRoot, createdAt = null) {
     lastReplicaAt: 0,                // (when BACKUP) _now() of the last replica push from our root (staleness → presume root gone)
     metricsOn: 0,                    // (when ROOT) lease expiry ts; while > now, this root publishes snapshots to metricTopic(T)
     metricsLastPub: 0,               // _now() of the last metric snapshot we published (throttle to METRICS_PUB_MS)
+    latestOnly: undefined,           // true = metric topic: the cache keeps only the newest body (topicStore _noteMetricRole); undefined until a bound descriptor is seen
   };
 }
 

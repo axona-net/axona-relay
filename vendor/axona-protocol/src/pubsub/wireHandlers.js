@@ -678,6 +678,7 @@ export const wireHandlersMethods = {
     if (desc.write === 'owner' && (!env.signerPubkey || lc(env.signerPubkey) !== lc(desc.owner))) {
       this._log('warn', 'drop-write-policy', { topic: desc.name }); return { ok: false, reason: 'write-policy' };
     }
+    this._noteMetricRole(role, desc);                                    // bound above: tid === role.topicId
 
     // Both of these are TERMINAL for the write and ack as SUCCESS (v0.3 §1):
     // already-held is the idempotent-retry case, and a tombstoned republish is
@@ -1001,6 +1002,7 @@ export const wireHandlersMethods = {
     try { stid = await deriveTopicIdBig({ region: env.topic?.region, owner: env.topic?.owner, name: env.topic?.name, write: env.topic?.write }); }
     catch { this._log('warn', 'drop-stamped-bad-topic', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
     if (stid !== role.topicId) { this._log('warn', 'drop-stamped-cross-topic', { msgId: String(m?.msgId).slice(0, 12) }); return 'rejected'; }
+    this._noteMetricRole(role, env.topic);                               // bound above: stid === role.topicId
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
     if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
@@ -1239,6 +1241,14 @@ export const wireHandlersMethods = {
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
       if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
+        // LATEST-ONLY needs the topic's kind; this path is unverified, so the body's
+        // descriptor counts only if it derives to THIS topic id (once per role).
+        if (role.latestOnly === undefined) {
+          try {
+            const d = JSON.parse(m.json)?.topic;
+            if (d && await deriveTopicIdBig({ region: d.region, owner: d.owner, name: d.name, write: d.write }) === topicBig) this._noteMetricRole(role, d);
+          } catch { /* undecided: cached as an ordinary topic until a bound body arrives */ }
+        }
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)

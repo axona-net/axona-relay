@@ -17,10 +17,11 @@
 // root, to a SEPARATE topic derived from the data topic's id. Anyone who knows
 // the data topic computes the metric topic and sub()s it — they receive the
 // latest snapshot via replay-on-subscribe plus every subsequent update, paying
-// one subscription instead of a scatter-gather per poll. Snapshots accumulate in
-// the replay cache and age out at the 48 h hold ceiling, so a subscriber also
-// gets a rolling history to watch trends — no replace/overwrite machinery, the
-// cache TTL is the window.
+// one subscription instead of a scatter-gather per poll. Since 4.119.0 every
+// holder keeps ONLY the newest snapshot of a metric topic (topicStore
+// latestOnly): at one snapshot per METRICS_PUB_MS, a 24 h cache held ~4,320
+// per open topic of which readers used one. A subscriber that wants a trend
+// records the live updates itself.
 //
 // The derivation uses a self-identifying reserved namespace ("axona:metric:")
 // rather than a bare hash so a root can recognise a metric topic and REFUSE to

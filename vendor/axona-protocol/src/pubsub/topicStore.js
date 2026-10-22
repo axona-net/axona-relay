@@ -19,6 +19,7 @@ import {
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
+import { isMetricTopicName } from './metrics.js';
 
 export const topicStoreMethods = {
   // ── cache ────────────────────────────────────────────────────────────
@@ -32,6 +33,15 @@ export const topicStoreMethods = {
     if (!this._cutHolds(role, cut)) {
       this._log('info', 'cut-refused', { topic: idHex(role.topicId).slice(0, 12), at: 'cachePush', msgId: String(entry?.msgId).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
       return false;
+    }
+    // LATEST-ONLY (4.119.0): a metric topic carries one live value; every older
+    // snapshot is superseded the moment a newer one exists. A body older than the
+    // newest held is not cached at all (the cache is in ARRIVAL order, so a late
+    // replay of an old snapshot must not displace a newer one).
+    if (role.latestOnly === true) {
+      let newest = null;
+      for (const e of role.cache) if (!newest || e.publishTs > newest.publishTs) newest = e;
+      if (newest && (entry.publishTs ?? 0) <= newest.publishTs) return true;   // superseded on arrival
     }
     entry.bytes = (entry.json ? entry.json.length : 0) + 80;
     role.cache.push(entry);
@@ -56,11 +66,35 @@ export const topicStoreMethods = {
       role.cacheBytes -= old.bytes;
       if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow: keep body mirror in step (no-op flag-off)
     }
+    // LATEST-ONLY: the entry just pushed is the newest held (checked above), so
+    // every other UNPINNED entry goes. Pins (dual-root 4(d)) are exempt as they
+    // are from the caps; this also trims history held from before the role knew
+    // it was a metric topic.
+    if (role.latestOnly === true && role.cache.length > 1) {
+      for (let i = role.cache.length - 2; i >= 0; i--) {
+        const old = role.cache[i];
+        if (pins && pins.has(old.msgId)) continue;
+        role.cache.splice(i, 1);
+        role.cacheIds.delete(old.msgId);
+        role.cacheBytes -= old.bytes;
+        if (this._tombAuthority) this._taObserveEvict(role, old.msgId);
+      }
+    }
     // NOTE: the body OBSERVE is NOT here — a cache write is not a local
     // verification, and _cachePush is also reached from the relay _onDeliver path
     // (unverified). Body observation is driven from the verified ingress
     // (_ingestPublish / _ingestStamped) with a cache-survival guard.
     return true;
+  },
+
+  // Decide ONCE per role whether it holds a metric topic (axona:metric:<id>),
+  // from a descriptor already BOUND to role.topicId by the caller (the topic id
+  // is a hash of the name, so a verified binding proves the name). Never decided
+  // from an unbound body: a forged metric name on an ordinary topic would
+  // otherwise erase that topic's history at this holder.
+  _noteMetricRole(role, desc) {
+    if (!role || role.latestOnly !== undefined) return;
+    role.latestOnly = isMetricTopicName(desc?.name);
   },
 
   _expireCache(role, now) {
