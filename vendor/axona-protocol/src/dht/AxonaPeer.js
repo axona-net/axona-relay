@@ -238,7 +238,7 @@ export class AxonaPeer extends DHT {
     // then gates whether the wrap observes or runs the handler verbatim). The M1
     // telemetry-only canary sets this so a relay peer can report the shadow invariant.
     this._armFrameRegistry = frameRegistry === true;
-    this._mergeCapable = mergeCapable;   // dual-root reconciliation (axona-docs 14a6bd8): null = the manager reads env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT (off)
+    this._mergeCapable = mergeCapable;   // dual-root reconciliation (axona-docs 14a6bd8): null = the manager reads env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT (on since 4.118.0)
     // REF-1.1 E2.3: the Boundary-3 door for the routed mesh:signal handler (built
     // unconditionally, same discipline as the transport's _b2door/_b3door). The B3
     // row keys mesh:signal on transportKind 'routed', so registerFrame binds it to

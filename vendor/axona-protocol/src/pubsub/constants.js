@@ -65,10 +65,13 @@ export const ROLE_EMPTY_GRACE_MS = 5 * 60 * 1000;   // 5 min
 // are backups. David: "If there is also nothing within the cache the entire
 // topic framework must be dismantled. This must also be done quickly and
 // regularly." The whole machine sits behind TOPIC_LIFETIME (kernel option
-// `topicLifetime`, env TOPIC_LIFETIME=1). OFF by default: an unarmed node is
-// byte-identical to 4.116.0 except that it registers (and ignores nothing of)
-// the two new frames. Arming is David's separate word.
-export const TOPIC_LIFETIME_DEFAULT = 0;
+// `topicLifetime`, env TOPIC_LIFETIME=1). ON by default since 4.118.0 (David,
+// 2026-10-22: "a full arm of both"): every node arms unless TOPIC_LIFETIME=0 or
+// the option says otherwise. 4.117.0 shipped it OFF; the one day armed by env
+// (2026-10-21) showed that a holder that never honours the notice regenerates
+// the root without bound, which is why the bridges now floor the kernel at
+// 4.118.0: an unarmed holder cannot reach the door.
+export const TOPIC_LIFETIME_DEFAULT = 1;
 // A standby appointment is a LEASE on one thing: the root's REPLICATE. Renewed
 // only by a REPLICATE (lastReplicaAt's one writer is becomeBackup); nothing the
 // backup sends moves it. L = DROP_MS, the seat lease, so a backup lapses on the
@@ -468,8 +471,9 @@ export const T = {
 
 // ── Dual-root reconciliation (axona-docs 14a6bd8; David "build it" 2026-10-17) ──
 // The whole machine sits behind MERGE_CAPABLE (kernel option `mergeCapable`,
-// env MERGE_CAPABLE=1). OFF by default: an unarmed node behaves as 4.114.1.
-export const MERGE_CAPABLE_DEFAULT = 0;
+// env MERGE_CAPABLE=1). ON by default since 4.118.0 (David, 2026-10-22: "a full
+// arm of both"); MERGE_CAPABLE=0 disarms a node. 4.115.0 to 4.117.0 shipped it OFF.
+export const MERGE_CAPABLE_DEFAULT = 1;
 export const ADOPT_ACK_MS          = 5_000;   // a delegation not acknowledged within this is rolled back: the parent keeps serving its subscribers
 // The gate's forward ledger (the shape of the step-down hold's holdFwd ledger).
 export const MERGE_GATE_FWD_MAX     = 256;
