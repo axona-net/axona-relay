@@ -87,6 +87,14 @@ const LIFECYCLE = {
   'pc-state': ['peerId', 'inc', 'pc'],
   'dc-open':  ['peerId', 'inc', 'role'],
   'retry':    ['peerId', 'inc'],
+  // Kernel 4.120.0 signal trace (David 2026-10-22, failed-dial triage). None of
+  // these names matches INTERESTING, so without this list the relay dropped
+  // them all (seen on the first 4.120.0 roll, 19:57Z). Metadata only.
+  'offer-sent':             ['peerId', 'inc', 'attempt', 'ms'],
+  'offer-recv':             ['from', 'attempt', 'existing'],
+  'answer-recv':            ['from', 'inc', 'attempt', 'ms'],
+  'answer-applied':         ['from', 'inc', 'attempt', 'ms', 'queued'],
+  'first-remote-candidate': ['from', 'inc', 'role', 'attempt', 'ms', 'beforeSdp'],
 };
 
 // How a ctx is rendered — and what may be cut — lives in logctx.js, because
