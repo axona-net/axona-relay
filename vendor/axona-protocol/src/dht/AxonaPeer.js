@@ -3383,6 +3383,8 @@ export class AxonaPeer extends DHT {
       time:    result.totalTimeMs,
       found:   result.found,
       stalled: !!result.stalled,      // (c): no unvisited candidate remained — terminal, not the cap
+      reason:  result.reason ?? (result.found ? 'found' : null),   // 4.122.0: why it failed
+      fail:    result.fail ?? null,                                // 4.122.0: send-failed detail
       closest: result.closest ?? null, // (c): the visited id nearest the target
     };
   }
@@ -6389,7 +6391,13 @@ export class AxonaPeer extends DHT {
     const origin = (ctx) => { if (traced) this._emitLog?.('info', 'relay-signal-origin', { to: String(toHexId).slice(0, 12), kind: signal.kind, attempt: signal.attempt ?? null, ms: Date.now() - t0, ...ctx }); };
     if (!(await this._relayReachable(toBig))) {
       this._domain?._emit?.({ type: 'mesh-signal-unreachable', to: toHexId });
-      origin({ reach: wasCached ? 'cached-no' : 'lookup-no', result: 'not-sent' });
+      // 4.122.0: name WHY the lookup said no (David: "Log why each lookup fails").
+      const v = this._relayReach ? this._relayReach.get(toBig.toString(16)) : null;
+      const f = v && v.fail ? v.fail : null;
+      origin({
+        reach: wasCached ? 'cached-no' : 'lookup-no', result: 'not-sent', lookupWhy: v ? (v.why ?? null) : null,
+        ...(f ? { failHop: f.hop ?? null, failAt: f.at ?? null, failNext: f.next ?? null, failConnected: f.connected ?? null, failOpened: f.opened ?? null, failAddedBy: f.addedBy ?? null, failDirect: f.direct ?? null, failIsTarget: f.isTarget ?? null, failErr: f.err ?? null } : {}),
+      });
       return;
     }
     const reach = wasCached ? 'cached-ok' : 'lookup-ok';
@@ -6418,10 +6426,10 @@ export class AxonaPeer extends DHT {
     const cached = this._relayReach.get(key);
     const now = Date.now();
     if (cached && (now - cached.ts) < RELAY_REACH_TTL_MS) return cached.ok;
-    let ok = false;
-    try { const lk = await this.lookup(toBig); ok = !!(lk && lk.found); }
-    catch { ok = false; }
-    this._relayReach.set(key, { ok, ts: Date.now() });
+    let ok = false, why = null, fail = null;
+    try { const lk = await this.lookup(toBig); ok = !!(lk && lk.found); why = lk ? (lk.reason ?? null) : 'no-result'; fail = lk ? (lk.fail ?? null) : null; }
+    catch (err) { ok = false; why = 'threw'; fail = { err: String(err?.message || err).slice(0, 60) }; }
+    this._relayReach.set(key, { ok, ts: Date.now(), why, fail });   // why/fail: 4.122.0, read by the origin trace
     capOldest(this._relayReach, RELAY_REACH_CAP);
     return ok;
   }
@@ -6631,7 +6639,7 @@ export class AxonaPeer extends DHT {
     const node   = this._node;
     const domain = this._domain;
     if (!node || !node.alive) {
-      return this._lookupResult(ctx, false);
+      return this._lookupResult(ctx, false, { reason: 'node-down' });
     }
 
     const { sourceId, targetKey } = ctx;
@@ -6640,7 +6648,7 @@ export class AxonaPeer extends DHT {
       return this._lookupResult(ctx, true);
     }
     if (ctx.hops >= domain.MAX_HOPS) {
-      return this._lookupResult(ctx, false);
+      return this._lookupResult(ctx, false, { reason: 'max-hops' });
     }
 
     const dead = node._deadPeers || new Set();
@@ -6696,7 +6704,7 @@ export class AxonaPeer extends DHT {
       };
       for (const s of node.synaptome.values())         scan(s);
       for (const s of node.incomingSynapses.values()) scan(s);
-      if (!bestSyn) return this._lookupResult(ctx, false, { stalled: true });   // nothing unvisited: terminal, not the cap
+      if (!bestSyn) return this._lookupResult(ctx, false, { stalled: true, reason: 'stalled' });   // nothing unvisited: terminal, not the cap
       candidates.push(bestSyn);
     }
 
@@ -6795,11 +6803,16 @@ export class AxonaPeer extends DHT {
     // on simTransport.  If open fails (peer gone / admission denied)
     // the subsequent send() throws and the lookup terminates with
     // found=false, same as before.
+    // Lookup failure reason (4.122.0): what this hop knew about the next hop,
+    // read before and after the bound-only open, so a send that fails says
+    // whether there was ever a channel to try.
+    const _wasConnected = typeof node.transport.isConnected === 'function' ? node.transport.isConnected(nextId) : null;
+    let _opened = null;
     if (typeof node.transport.isConnected === 'function'
         && !node.transport.isConnected(nextId)
         && typeof node.transport.openConnection === 'function') {
-      try { await node.transport.openConnection(nextId); }
-      catch { /* fall through — send() will fail and we return false */ }
+      try { _opened = await node.transport.openConnection(nextId); }
+      catch { _opened = false; /* fall through — send() will fail and we return false */ }
     }
 
     try {
@@ -6812,8 +6825,21 @@ export class AxonaPeer extends DHT {
         totalTimeMs: ctx.totalTimeMs,
       });
       return downstream;
-    } catch {
-      return this._lookupResult(ctx, false);
+    } catch (err) {
+      return this._lookupResult(ctx, false, {
+        reason: 'send-failed',
+        fail: {
+          hop:       ctx.hops,
+          at:        toHex(node.id).slice(0, 12),
+          next:      toHex(nextId).slice(0, 12),
+          connected: _wasConnected,
+          opened:    _opened,
+          addedBy:   nextSyn._addedBy ?? (node.incomingSynapses.has(nextId) ? 'incoming' : null),
+          direct:    nextSyn === direct,
+          isTarget:  nextId === targetKey,
+          err:       String(err?.message || err).slice(0, 60),
+        },
+      });
     }
   }
 
@@ -6831,6 +6857,10 @@ export class AxonaPeer extends DHT {
     return {
       found,
       stalled:     !!extra.stalled,
+      // 4.122.0: why a lookup failed — 'stalled' | 'max-hops' | 'send-failed'
+      // | 'node-down' — and, for send-failed, what the failing hop knew.
+      reason:      found ? 'found' : (extra.reason ?? null),
+      fail:        extra.fail ?? null,
       closest,
       path:        ctx.path,
       trace:       ctx.trace,
