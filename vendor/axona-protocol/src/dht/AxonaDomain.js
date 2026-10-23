@@ -59,6 +59,17 @@ const DEFAULTS = Object.freeze({
   // forwards onto that path. The measured loop was two nodes trading the frame
   // to MAX_HOPS; eight covers four such pairs. The cap above stays the outer bound.
   PATH_MEMORY:         8,
+  // 4.123.0 (David 2026-10-23, "Make the lookup iterative, then roll it"):
+  // the lookup walk is ACKED PER STEP. Each hop answers its caller as soon as
+  // it has taken the walk, then forwards on its own; the result travels back
+  // along the walk's path as a one-way lookup_done. A request's timeout then
+  // covers one step, and the originator gives the whole walk this deadline.
+  // Before this, lookup_step was recursive and the originator's single 5 s
+  // request timeout had to cover the entire walk (4.122.0: 234 of 303 failed
+  // sends were that timeout, median 5,090 ms). LOOKUP_WALK false = the
+  // recursive walk, byte-identical to 4.122.0.
+  LOOKUP_WALK:         true,
+  LOOKUP_WALK_DEADLINE_MS: 12000,
   // R4 (Routed-Walk-Terminals v0.6): a node declares itself a routing terminal,
   // and births a root, only if it can SERVE — the transport's servingCapable()
   // says so (web composite: meshBoundCount() >= its serve floor, the graduation

@@ -57,6 +57,10 @@ function rowDefs() {
     // ── iterative lookup / routing legs (onRequest) ──
     routing('dht:lookup_step',      'lookup_step',      'request', 'DhtRouting',
       'one hop of the iterative lookup: given a target, return this node\'s closest known peers. REQUEST_RESPONSE carrying the TransportRpcRef channel subject: the reply is the transport return, associated by the request-return pair, not a payload correlation.'),
+    routing('dht:lookup_walk',      'lookup_walk',      'request', 'DhtRouting',
+      '4.123.0 acked lookup walk: take one step of the walk and ACK at once ({ack:true}); the node then forwards on its own and the result returns as lookup_done along the path. The reply obligation is the ACK alone, so a caller\'s request timeout covers one step, not the walk.'),
+    routing('dht:lookup_done',      'lookup_done',      'notification', 'DhtRouting',
+      '4.123.0 acked lookup walk: the walk\'s result travelling back to its originator, one predecessor at a time along the walk\'s path. Fire-and-forget; the originator\'s LOOKUP_WALK_DEADLINE_MS covers a result lost on the way.'),
     routing('dht:lookahead_probe',  'lookahead_probe',  'request', 'DhtRouting',
       'speculative next-hop probe used to prime the routing table ahead of the walk.'),
     routing('dht:local_probe',      'local_probe',      'request', 'DhtRouting',

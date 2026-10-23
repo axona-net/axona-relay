@@ -176,6 +176,21 @@ const LOCAL_PROBE_MAX   = 8;
 // finding 6) stays cached, so per-ICE-candidate signal frames within one
 // negotiation don't each pay a full lookup.
 const RELAY_REACH_TTL_MS = 5000;
+// 4.123.0 acked lookup walk: _lookupStep's return when it handed the walk on.
+const WALK_FORWARDED = Symbol('lookup-walk-forwarded');
+// Node ids travel the wire as hex (the codec) or stay BigInt in-process.
+function asWalkId(v) {
+  if (typeof v === 'bigint') return v;
+  try { return BigInt('0x' + String(v)); } catch { return null; }
+}
+// The node before `self` on a walk's path, or null.
+function walkPrev(path, self) {
+  if (!Array.isArray(path)) return null;
+  for (let i = path.length - 1; i > 0; i--) {
+    if (asWalkId(path[i]) === self) return asWalkId(path[i - 1]);
+  }
+  return null;
+}
 // Memory bounds for two caches that the TTL/threshold logic alone does NOT
 // bound by entry COUNT: the relay-reachability verdict cache keeps one entry
 // per distinct peer-id ever checked (TTL only gates freshness, never evicts),
@@ -924,6 +939,36 @@ export class AxonaPeer extends DHT {
         queried,
         totalTimeMs: payload.totalTimeMs,
       });
+    }, { registry: this._b5door });
+
+    // ── lookup_walk / lookup_done — 4.123.0 acked lookup walk ──────
+    // lookup_walk: take the walk, ACK at once, then run this node's step on
+    // our own time; the caller's request timeout covers only this ack.
+    // lookup_done: the walk's result on its way back to the originator —
+    // hand it to the waiting lookup, or pass it to our predecessor on the path.
+    registerFrame(transport, 'lookup_walk', async (_fromId, payload) => {
+      const queried = payload?.queried instanceof Set ? payload.queried
+        : Array.isArray(payload?.queried) ? new Set(payload.queried) : new Set();
+      const ctx = {
+        sourceId:    payload.sourceId,
+        targetKey:   payload.targetKey,
+        hops:        payload.hops,
+        path:        payload.path,
+        trace:       payload.trace,
+        queried,
+        totalTimeMs: payload.totalTimeMs,
+      };
+      const walkId = payload.walkId;
+      setTimeout(() => {
+        this._lookupStep(ctx, { walkId })
+          .then((r) => { if (r !== WALK_FORWARDED) this._lookupWalkFinish(r, walkId, ctx.sourceId); })
+          .catch((err) => this._lookupWalkFinish(this._lookupResult(ctx, false, { reason: 'step-threw', fail: { at: toHex(node.id).slice(0, 12), err: String(err?.message || err).slice(0, 60) } }), walkId, ctx.sourceId));
+      }, 0);
+      return { ack: true };
+    }, { registry: this._b5door });
+    registerFrame(transport, 'lookup_done', (_fromId, payload) => {
+      if (!payload || typeof payload.walkId !== 'string') return;
+      this._lookupWalkFinish(payload.result, payload.walkId, payload.sourceId);
     }, { registry: this._b5door });
 
     // ── lookahead_probe — AP-best forward synapse to target ─────────
@@ -3334,7 +3379,7 @@ export class AxonaPeer extends DHT {
       domain.lookupsSinceDecay = 0;
     }
 
-    const result = await this._lookupStep({
+    const ctx0 = {
       sourceId:    node.id,
       targetKey,
       hops:        0,
@@ -3342,7 +3387,9 @@ export class AxonaPeer extends DHT {
       trace:       [],
       queried:     new Set([node.id]),
       totalTimeMs: 0,
-    });
+    };
+    // 4.123.0: the acked walk by default; LOOKUP_WALK false = the recursive walk.
+    const result = domain.LOOKUP_WALK ? await this._lookupWalkOrigin(ctx0) : await this._lookupStep(ctx0);
 
     // ── LEARN: LTP reinforcement on fast paths ─────────────────────
     if (result.found && result.trace.length > 0) {
@@ -6635,7 +6682,7 @@ export class AxonaPeer extends DHT {
   // peer methods (e.g. `this._addByVitality(syn)` instead of
   // `engine._addByVitality(node, syn)`).
   //
-  async _lookupStep(ctx) {
+  async _lookupStep(ctx, walk = null) {   // walk: { walkId } = 4.123.0 acked walk; null = recursive (legacy)
     const node   = this._node;
     const domain = this._domain;
     if (!node || !node.alive) {
@@ -6815,32 +6862,91 @@ export class AxonaPeer extends DHT {
       catch { _opened = false; /* fall through — send() will fail and we return false */ }
     }
 
+    const stepBody = {
+      sourceId, targetKey,
+      hops:        ctx.hops,
+      path:        ctx.path,
+      trace:       ctx.trace,
+      queried:     ctx.queried,
+      totalTimeMs: ctx.totalTimeMs,
+    };
+    const sendFailed = (err) => this._lookupResult(ctx, false, {
+      reason: 'send-failed',
+      fail: {
+        hop:       ctx.hops,
+        at:        toHex(node.id).slice(0, 12),
+        next:      toHex(nextId).slice(0, 12),
+        connected: _wasConnected,
+        opened:    _opened,
+        addedBy:   nextSyn._addedBy ?? (node.incomingSynapses.has(nextId) ? 'incoming' : null),
+        direct:    nextSyn === direct,
+        isTarget:  nextId === targetKey,
+        err:       String(err?.message || err).slice(0, 60),
+        ...(walk ? { walk: true } : {}),
+      },
+    });
+
+    // 4.123.0 ACKED WALK: hand the walk to the next hop and return as soon as
+    // it has TAKEN it; the result comes back as lookup_done along the path. A
+    // next hop on an older kernel has no lookup_walk handler and says so at
+    // once ("no handler"); for that one hop the walk falls back to the
+    // recursive lookup_step, whose reply carries the rest of the walk's result.
+    if (walk) {
+      try {
+        const ack = await node.transport.send(nextId, 'lookup_walk', { ...stepBody, walkId: walk.walkId });
+        if (ack && ack.ack === true) return WALK_FORWARDED;
+        throw new Error('lookup_walk: not acknowledged');
+      } catch (err) {
+        if (!/no handler/i.test(String(err?.message || err))) return sendFailed(err);
+        try { return await node.transport.send(nextId, 'lookup_step', stepBody); }
+        catch (err2) { return sendFailed(err2); }
+      }
+    }
+
     try {
-      const downstream = await node.transport.send(nextId, 'lookup_step', {
-        sourceId, targetKey,
-        hops:        ctx.hops,
-        path:        ctx.path,
-        trace:       ctx.trace,
-        queried:     ctx.queried,
-        totalTimeMs: ctx.totalTimeMs,
-      });
+      const downstream = await node.transport.send(nextId, 'lookup_step', stepBody);
       return downstream;
     } catch (err) {
-      return this._lookupResult(ctx, false, {
-        reason: 'send-failed',
-        fail: {
-          hop:       ctx.hops,
-          at:        toHex(node.id).slice(0, 12),
-          next:      toHex(nextId).slice(0, 12),
-          connected: _wasConnected,
-          opened:    _opened,
-          addedBy:   nextSyn._addedBy ?? (node.incomingSynapses.has(nextId) ? 'incoming' : null),
-          direct:    nextSyn === direct,
-          isTarget:  nextId === targetKey,
-          err:       String(err?.message || err).slice(0, 60),
-        },
-      });
+      return sendFailed(err);
     }
+  }
+
+  // ── 4.123.0 acked walk: the originator side ─────────────────────────
+  // Runs the originator's own step; if it forwarded, waits for lookup_done or
+  // the walk deadline. The pending entry is registered BEFORE the first step,
+  // so a lookup_done that races back can never miss it.
+  async _lookupWalkOrigin(ctx) {
+    const domain = this._domain;
+    const walkId = `${toHex(this._node.id).slice(0, 8)}-${(this._walkSeq = (this._walkSeq | 0) + 1)}-${Date.now().toString(36)}`;
+    if (!this._walksPending) this._walksPending = new Map();
+    let settle;
+    const done = new Promise((resolve) => { settle = resolve; });
+    const timer = setTimeout(() => {
+      if (!this._walksPending.has(walkId)) return;
+      this._walksPending.delete(walkId);
+      settle(this._lookupResult(ctx, false, { reason: 'walk-deadline', fail: { at: toHex(this._node.id).slice(0, 12), hop: ctx.hops, deadlineMs: domain.LOOKUP_WALK_DEADLINE_MS } }));
+    }, domain.LOOKUP_WALK_DEADLINE_MS ?? 12000);
+    // NOT unref'd: a pending lookup must always settle. An unref'd deadline let
+    // a process with nothing else running exit with the lookup still open.
+    this._walksPending.set(walkId, (result) => { clearTimeout(timer); this._walksPending.delete(walkId); settle(result); });
+    const first = await this._lookupStep(ctx, { walkId });
+    if (first !== WALK_FORWARDED) this._walksPending.get(walkId)?.(first);
+    return done;
+  }
+
+  // A hop that ends the walk (found / stalled / max-hops / send-failed, or a
+  // legacy hop's recursive result) sends it back toward the originator: to its
+  // predecessor on the walk's path, which passes it on. Fire-and-forget; the
+  // originator's deadline covers a result lost on the way.
+  _lookupWalkFinish(result, walkId, sourceId) {
+    const node = this._node;
+    const self = node.id;
+    const src = asWalkId(sourceId);
+    if (src === self) { this._walksPending?.get(walkId)?.(result); return; }
+    const prev = walkPrev(result?.path, self);
+    if (prev === null) return;
+    node.transport.notify(prev, 'lookup_done', { walkId, sourceId: toHex(src), result })
+      .catch(() => { /* the originator's deadline covers it */ });
   }
 
   _lookupResult(ctx, found, extra = {}) {
