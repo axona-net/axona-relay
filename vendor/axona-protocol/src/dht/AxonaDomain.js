@@ -34,6 +34,8 @@
 //
 // =====================================================================
 
+import { envNum } from '../utils/env.js';
+
 /** Default tuning constants.  All overrideable via constructor opts. */
 const DEFAULTS = Object.freeze({
   // Routing / Kademlia
@@ -70,6 +72,18 @@ const DEFAULTS = Object.freeze({
   // recursive walk, byte-identical to 4.122.0.
   LOOKUP_WALK:         true,
   LOOKUP_WALK_DEADLINE_MS: 12000,
+  // B1 (Mesh Signaling Route First v0.1, axona-docs 7cb47a7; David 2026-10-24
+  // "Ship B1 first"): a chosen next hop is TENTATIVE until its send issues.
+  // _lookupStep, the route_msg forwarder and routeMessage's origin send each
+  // choose a hop, then await (the lookahead round, _addByVitality, the bound-
+  // only open) and send without looking again. 4.124.0 window: 34 lookups on
+  // our relays sent to a peer onPeerDied had evicted during that await, read
+  // isConnected false first, and ended send-failed with no second candidate.
+  // ON: re-read liveness after the awaits, take the next eligible candidate on
+  // a dead edge under the same deadline, charge queried/path/hops at issue.
+  // OFF = the 4.124.0 order. Env LOOKUP_RESELECT=1 arms it where process.env
+  // exists (relays); apps and seats take the default.
+  LOOKUP_RESELECT:     false,
   // R4 (Routed-Walk-Terminals v0.6): a node declares itself a routing terminal,
   // and births a root, only if it can SERVE — the transport's servingCapable()
   // says so (web composite: meshBoundCount() >= its serve floor, the graduation
@@ -111,6 +125,12 @@ export class AxonaDomain {
     // Config — defaults overridable per-instance.
     for (const [k, v] of Object.entries(DEFAULTS)) {
       this[k] = opts[k] ?? v;
+    }
+    // B1 arming: the env knob speaks only when the option is not given AND the
+    // variable is set; LOOKUP_RESELECT=0 is a control arm, unset is the default.
+    if (opts.LOOKUP_RESELECT == null) {
+      const e = envNum('LOOKUP_RESELECT', null);
+      if (e !== null) this.LOOKUP_RESELECT = e === 1;
     }
 
     // ── Shared mutable state ───────────────────────────────────────

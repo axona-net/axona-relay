@@ -393,9 +393,9 @@ export const mergeMachineMethods = {
       this._log('info', 'merge-offer-loses', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10), loserEpoch, myEpoch: role.epoch | 0 });
       // ANSWER, as the not-root branch does. Silence here reads as a legacy
       // winner at the offerer, whose sweep then demotes the claim that
-      // outranks ours toward us (merge-legacy-fallback). Fleet logs: 6 against
-      // 598 merge-step5 rounds in a 4.121.0 window, 2 against 396 in a
-      // 4.122.0 window; the logs do not say which were this silence and which
+      // outranks ours toward us (merge-legacy-fallback). Fleet logs: 3 against
+      // 299 merge-step5 rounds in a 4.121.0 window, 1 against 198 in a
+      // 4.122.0 window (by event name); the logs do not say which were this silence and which
       // were lost routes. The offerer keeps its claim; we offer. A lost answer
       // still falls back (the offer timeout); this closes the silent path only.
       this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: role.epoch | 0, loser, loserEpoch, disposition: 'outranked' });

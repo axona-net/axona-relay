@@ -178,6 +178,15 @@ const LOCAL_PROBE_MAX   = 8;
 const RELAY_REACH_TTL_MS = 5000;
 // 4.123.0 acked lookup walk: _lookupStep's return when it handed the walk on.
 const WALK_FORWARDED = Symbol('lookup-walk-forwarded');
+// B1: a send failure that says the EDGE is gone (no route, no channel, peer
+// died), as against a hop that is there and slow (a timeout) or old (no
+// handler). Only the first kind earns a re-selection; the others keep today's
+// outcome, so a slow mesh is never charged twice.
+function isEdgeLoss(err) {
+  const m = String(err?.message || err);
+  if (/no handler/i.test(m)) return false;
+  return /no route|not connected|no open channel|not registered|died|unreachable|channel closed/i.test(m);
+}
 // Node ids travel the wire as hex (the codec) or stay BigInt in-process.
 function asWalkId(v) {
   if (typeof v === 'bigint') return v;
@@ -1291,6 +1300,24 @@ export class AxonaPeer extends DHT {
         return { consumed: false, atNode: meId, hops, exhausted: true };
       }
 
+      // B1 (Mesh Signaling Route First v0.1): the forwarder's chosen hop is
+      // tentative until the send issues too. _deliverRouted and the open above
+      // are awaits; a hop that dies in them is not sent to, the next live
+      // usable peer closer than this node is taken, bounded by that set. OFF:
+      // one candidate, as 4.124.0.
+      const _rsOn = !!domain.LOOKUP_RESELECT;
+      const _rsTried = new Set();
+      let _rsN = 0;
+      const _rsPick = () => {
+        let best = null, bestD = meId ^ targetBig;
+        for (const { id } of this._usablePeers({ exclude })) {
+          if (_rsTried.has(id)) continue;
+          const d = id ^ targetBig;
+          if (d < bestD) { bestD = d; best = id; }
+        }
+        return best;
+      };
+      for (;;) {
       // Same lazy channel-open as _lookupStep — route_msg can hop
       // through cache synapses installed mid-walk.
       if (typeof node.transport.isConnected === 'function'
@@ -1298,6 +1325,15 @@ export class AxonaPeer extends DHT {
           && typeof node.transport.openConnection === 'function') {
         try { await node.transport.openConnection(nextHopId); }
         catch { /* fall through */ }
+      }
+
+      if (_rsOn && connOk && !connOk(nextHopId)) {
+        _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+        const n = _rsPick();
+        this._emitLog?.('info', 'lookup-reselect', { kind: 'route', hop: hops, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'dead-after-await', reselects: _rsN });
+        if (n !== null) { nextHopId = n; continue; }
+        hopTrace?.('send-failed', { next: toHex(nextHopId).slice(0, 12), nextConnected: false, ms: 0, err: 'no live hop after re-selection', reselects: _rsN });
+        return { consumed: false, atNode: meId, hops, exhausted: true, stopped: 'no-live-hop' };
       }
 
       let _hopId = null, _fEnqT = 0, _fSendT = 0;
@@ -1320,16 +1356,23 @@ export class AxonaPeer extends DHT {
           const _oc = this._axonaManager._txOutcome(true, null);
           for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
         }
-        hopTrace?.('forwarded', { next: _hopNext, nextConnected: _hopConn, ms: Date.now() - _hopT0, downstream: downstream?.consumed ? 'consumed' : (downstream?.terminal ? 'terminal' : downstream?.exhausted ? 'exhausted' : 'other') });
+        hopTrace?.('forwarded', { next: _hopNext, nextConnected: _hopConn, ms: Date.now() - _hopT0, downstream: downstream?.consumed ? 'consumed' : (downstream?.terminal ? 'terminal' : downstream?.exhausted ? 'exhausted' : 'other'), ...(_rsOn && _rsN ? { reselects: _rsN } : {}) });
         return downstream;
       } catch (e) {
-        hopTrace?.('send-failed', { next: _hopNext, nextConnected: _hopConn, ms: Date.now() - _hopT0, err: String(e?.message || e).slice(0, 60) });
         if (_hopLt) {
           this._axonaManager._deliverHopTx(_hopMids, _hopId, hops + 1, toHex(node.id), toHex(nextHopId), 'fail', String(e?.message || e));
           const _oc = this._axonaManager._txOutcome(false, e);
           for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(node.id), to: toHex(nextHopId), hopIdx: hops + 1, enqueueT: _fEnqT, sendAttemptT: _fSendT, ..._oc });
         }
+        if (_rsOn && isEdgeLoss(e)) {
+          _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+          const n = _rsPick();
+          this._emitLog?.('info', 'lookup-reselect', { kind: 'route', hop: hops, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'send-threw', reselects: _rsN });
+          if (n !== null) { nextHopId = n; continue; }
+        }
+        hopTrace?.('send-failed', { next: _hopNext, nextConnected: _hopConn, ms: Date.now() - _hopT0, err: String(e?.message || e).slice(0, 60), ...(_rsOn && _rsN ? { reselects: _rsN } : {}) });
         return { consumed: false, atNode: meId, hops, exhausted: true };
+      }
       }
     }, { registry: this._b5door });
 
@@ -6355,11 +6398,37 @@ export class AxonaPeer extends DHT {
     // subscriber it isn't connected to, both silently failed → the subscriber
     // never attached (empty `_upstream`), the dominant residual no-delivery case.
     // Open the channel first so the routed SUB/PUB/DELIVER traverses a real link.
+    // B1 (Mesh Signaling Route First v0.1): the origin's chosen hop is tentative
+    // until the send issues; _findCloserInTwoHops, _deliverRouted and the open
+    // are awaits. ON: a dead edge takes the next live usable peer closer than
+    // the origin, bounded by that set. OFF: one candidate, as 4.124.0.
+    const _rsOn = !!this._domain?.LOOKUP_RESELECT;
+    const _rsTried = new Set();
+    let _rsN = 0;
+    const _rsExclude = new Set([originNode.id]);
+    const _rsPick = () => {
+      let best = null, bestD = originNode.id ^ targetId;
+      for (const { id } of this._usablePeers({ exclude: _rsExclude })) {
+        if (_rsTried.has(id)) continue;
+        const d = id ^ targetId;
+        if (d < bestD) { bestD = d; best = id; }
+      }
+      return best;
+    };
+    const _rsConn = (typeof originNode.transport?.isConnected === 'function') ? originNode.transport.isConnected.bind(originNode.transport) : null;
+    for (;;) {
     if (typeof originNode.transport.isConnected === 'function'
         && !originNode.transport.isConnected(nextHopId)
         && typeof originNode.transport.openConnection === 'function') {
       try { await originNode.transport.openConnection(nextHopId); }
       catch { /* fall through; send may still route via the bridge/relay sink */ }
+    }
+    if (_rsOn && _rsConn && !_rsConn(nextHopId)) {
+      _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+      const n = _rsPick();
+      this._emitLog?.('info', 'lookup-reselect', { kind: 'origin', hop: 0, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'dead-after-await', reselects: _rsN });
+      if (n !== null) { nextHopId = n; continue; }
+      return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true, stopped: 'no-live-hop' };
     }
 
     // Origin hop (0->1) DELIVER telemetry — same LAT_TRACE gate; pairs with the
@@ -6395,7 +6464,14 @@ export class AxonaPeer extends DHT {
         const _oc = this._axonaManager._txOutcome(false, e);
         for (const mid of _hopMids) this._axonaManager._txLedger({ msgId: mid, edgeAttemptId: _hopId, from: toHex(originNode.id), to: toHex(nextHopId), hopIdx: 1, enqueueT: _enqT, sendAttemptT: _sendT, ..._oc });
       }
+      if (_rsOn && isEdgeLoss(e)) {
+        _rsTried.add(nextHopId); _rsN += 1; viaNext = null;
+        const n = _rsPick();
+        this._emitLog?.('info', 'lookup-reselect', { kind: 'origin', hop: 0, dead: toHex(nextHopId).slice(0, 12), next: n !== null ? toHex(n).slice(0, 12) : null, why: 'send-threw', reselects: _rsN });
+        if (n !== null) { nextHopId = n; continue; }
+      }
       return { consumed: false, atNode: originNode.id, hops: 0, exhausted: true };
+    }
     }
   }
 
@@ -6443,7 +6519,7 @@ export class AxonaPeer extends DHT {
       const f = v && v.fail ? v.fail : null;
       origin({
         reach: wasCached ? 'cached-no' : 'lookup-no', result: 'not-sent', lookupWhy: v ? (v.why ?? null) : null,
-        ...(f ? { failHop: f.hop ?? null, failAt: f.at ?? null, failNext: f.next ?? null, failConnected: f.connected ?? null, failOpened: f.opened ?? null, failAddedBy: f.addedBy ?? null, failDirect: f.direct ?? null, failIsTarget: f.isTarget ?? null, failErr: f.err ?? null } : {}),
+        ...(f ? { failHop: f.hop ?? null, failAt: f.at ?? null, failNext: f.next ?? null, failConnected: f.connected ?? null, failOpened: f.opened ?? null, failAddedBy: f.addedBy ?? null, failDirect: f.direct ?? null, failIsTarget: f.isTarget ?? null, failErr: f.err ?? null, ...(f.reselects != null ? { failReselects: f.reselects } : {}) } : {}),
       });
       return;
     }
@@ -6769,6 +6845,35 @@ export class AxonaPeer extends DHT {
       nextSyn = await this._bestByTwoHopAP(candidates, targetKey, currentDist);
     }
 
+    // B1 (Mesh Signaling Route First v0.1, axona-docs 7cb47a7; David 2026-10-24
+    // "Ship B1 first"): the chosen hop is TENTATIVE until the send issues. The
+    // awaits above (the lookahead round, _addByVitality) and below (the hop-cache
+    // insert, the bound-only open) each let the chosen peer die. 4.124.0 window:
+    // 34 lookups on our relays read isConnected false here and sent anyway, so
+    // the walk ended send-failed with a second candidate still in `candidates`.
+    // With LOOKUP_RESELECT the hop re-reads liveness after the awaits, takes the
+    // next eligible candidate on a dead edge under the same deadline, and
+    // charges queried/path/hops at ISSUE (Aster A3). OFF keeps the 4.124.0
+    // order: charge before the send, one candidate, the same log shape.
+    const reselect = !!domain.LOOKUP_RESELECT;
+    const connOk = (typeof node.transport?.isConnected === 'function') ? node.transport.isConnected.bind(node.transport) : null;
+    const tried = new Set();
+    let reselects = 0;
+    // The next eligible candidate: closest first; never one already tried,
+    // queried, dead-marked, or (when the transport can say) unconnected.
+    const pickNext = () => {
+      let best = null, bestD = null;
+      for (const s of candidates) {
+        const id = s.peerId;
+        if (tried.has(id) || ctx.queried.has(id) || dead.has(id)) continue;
+        if (connOk && !connOk(id)) continue;
+        const d = id ^ targetKey;
+        if (bestD === null || d < bestD) { bestD = d; best = s; }
+      }
+      return best;
+    };
+    let hopCached = false;
+    for (;;) {
     const nextId = nextSyn.peerId;
 
     if (node.incomingSynapses.has(nextId) && !node.synaptome.has(nextId)) {
@@ -6787,9 +6892,6 @@ export class AxonaPeer extends DHT {
       }
     }
 
-    ctx.queried.add(nextId);
-    ctx.path.push(nextId);
-    ctx.trace.push({ fromId: node.id, synapse: nextSyn });
     // v1.1.2: prefer the transport's live RTT measurement over the
     // synapse's stamped latency.  syn.latency is set once at handshake
     // admission (often before the WebRTC ping buffer is populated) and
@@ -6801,37 +6903,49 @@ export class AxonaPeer extends DHT {
     const liveLatency = (typeof node.transport?.getLatency === 'function')
       ? node.transport.getLatency(nextId)
       : -1;
-    ctx.totalTimeMs += (liveLatency > 0 ? liveLatency : nextSyn.latency);
-    ctx.hops += 1;
+    const stepLatency = (liveLatency > 0 ? liveLatency : nextSyn.latency);
+    // What the step charges: with LOOKUP_RESELECT, at issue (commit, below);
+    // without, here, before the send, as 4.124.0 did.
+    const chargeStep = () => {
+      ctx.queried.add(nextId);
+      ctx.path.push(nextId);
+      ctx.trace.push({ fromId: node.id, synapse: nextSyn });
+      ctx.totalTimeMs += stepLatency;
+      ctx.hops += 1;
+    };
+    if (!reselect) chargeStep();
 
-    if (node.id !== targetKey && !node.synaptome.has(targetKey)) {
-      const stratum = clz264(node.id ^ targetKey);
-      const syn = new Synapse({
-        peerId: targetKey, latencyMs: 0, stratum,
-      });
-      syn.weight   = 0.5;
-      syn.inertia  = domain.simEpoch;
-      syn._addedBy = 'hopCache';
-      const added = await this._addByVitality(syn);
-      if (added && domain.EN_LATERAL_SPREAD) {
-        const nodeRegion = node.id >> BigInt(64 - domain.GEO_REGION_BITS);
-        const regional   = [];
-        for (const s of node.synaptome.values()) {
-          if (s.peerId === targetKey) continue;
-          if ((s.peerId >> BigInt(64 - domain.GEO_REGION_BITS)) === nodeRegion) {
-            regional.push(s);
+    if (!hopCached) {
+      hopCached = true;
+      if (node.id !== targetKey && !node.synaptome.has(targetKey)) {
+        const stratum = clz264(node.id ^ targetKey);
+        const syn = new Synapse({
+          peerId: targetKey, latencyMs: 0, stratum,
+        });
+        syn.weight   = 0.5;
+        syn.inertia  = domain.simEpoch;
+        syn._addedBy = 'hopCache';
+        const added = await this._addByVitality(syn);
+        if (added && domain.EN_LATERAL_SPREAD) {
+          const nodeRegion = node.id >> BigInt(64 - domain.GEO_REGION_BITS);
+          const regional   = [];
+          for (const s of node.synaptome.values()) {
+            if (s.peerId === targetKey) continue;
+            if ((s.peerId >> BigInt(64 - domain.GEO_REGION_BITS)) === nodeRegion) {
+              regional.push(s);
+            }
           }
-        }
-        regional.sort((a, b) => b.weight - a.weight);
-        for (let i = 0; i < Math.min(domain.LATERAL_K, regional.length); i++) {
-          node.transport.notify(regional[i].peerId, 'lateral_spread',
-                                { target: targetKey, depth: 1 })
-            .catch(() => { /* opportunistic — see _reinforceWave comment */ });
+          regional.sort((a, b) => b.weight - a.weight);
+          for (let i = 0; i < Math.min(domain.LATERAL_K, regional.length); i++) {
+            node.transport.notify(regional[i].peerId, 'lateral_spread',
+                                  { target: targetKey, depth: 1 })
+              .catch(() => { /* opportunistic — see _reinforceWave comment */ });
+          }
         }
       }
     }
 
-    if (node.id !== sourceId) this._recordTransit(sourceId, nextId);
+    if (!reselect && node.id !== sourceId) this._recordTransit(sourceId, nextId);
 
     node.temperature = Math.max(domain.T_MIN, node.temperature * domain.ANNEAL_COOLING);
     // ANNEAL IS GONE (Hold-and-Fill v0.5 row 6, axona-docs 4334504). It
@@ -6862,29 +6976,52 @@ export class AxonaPeer extends DHT {
       catch { _opened = false; /* fall through — send() will fail and we return false */ }
     }
 
-    const stepBody = {
-      sourceId, targetKey,
-      hops:        ctx.hops,
-      path:        ctx.path,
-      trace:       ctx.trace,
-      queried:     ctx.queried,
-      totalTimeMs: ctx.totalTimeMs,
-    };
-    const sendFailed = (err) => this._lookupResult(ctx, false, {
-      reason: 'send-failed',
-      fail: {
-        hop:       ctx.hops,
-        at:        toHex(node.id).slice(0, 12),
-        next:      toHex(nextId).slice(0, 12),
-        connected: _wasConnected,
-        opened:    _opened,
-        addedBy:   nextSyn._addedBy ?? (node.incomingSynapses.has(nextId) ? 'incoming' : null),
-        direct:    nextSyn === direct,
-        isTarget:  nextId === targetKey,
-        err:       String(err?.message || err).slice(0, 60),
-        ...(walk ? { walk: true } : {}),
-      },
+    const stepHops = reselect ? ctx.hops + 1 : ctx.hops;
+    const failOf = (err) => ({
+      hop:       stepHops,
+      at:        toHex(node.id).slice(0, 12),
+      next:      toHex(nextId).slice(0, 12),
+      connected: _wasConnected,
+      opened:    _opened,
+      addedBy:   nextSyn._addedBy ?? (node.incomingSynapses.has(nextId) ? 'incoming' : null),
+      direct:    nextSyn === direct,
+      isTarget:  nextId === targetKey,
+      err:       String(err?.message || err).slice(0, 60),
+      ...(walk ? { walk: true } : {}),
+      ...(reselect ? { reselects } : {}),
     });
+    const sendFailed = (err) => this._lookupResult(ctx, false, { reason: 'send-failed', fail: failOf(err) });
+    // B1: a dead edge is not sent to. The candidate was live when chosen and
+    // died in an await; take the next one, or end with the last hop's facts.
+    // B1 trace: one line per re-selection, at the hop that made it. Read on
+    // the fleet against the 4.124.0 send-failed/connected:false count.
+    const tryNext = (why) => {
+      tried.add(nextId); reselects += 1;
+      const n = pickNext();
+      this._emitLog?.('info', 'lookup-reselect', { kind: walk ? 'walk' : 'step', hop: stepHops, dead: toHex(nextId).slice(0, 12), next: n ? toHex(n.peerId).slice(0, 12) : null, why, reselects });
+      if (n) { nextSyn = n; return true; }
+      return false;
+    };
+    if (reselect && connOk && !connOk(nextId)) {
+      if (tryNext('dead-after-await')) continue;
+      return sendFailed(new Error('no live candidate after re-selection'));
+    }
+
+    const stepBody = reselect
+      ? { sourceId, targetKey,
+          hops:        ctx.hops + 1,
+          path:        [...ctx.path, nextId],
+          trace:       [...ctx.trace, { fromId: node.id, synapse: nextSyn }],
+          queried:     new Set([...ctx.queried, nextId]),
+          totalTimeMs: ctx.totalTimeMs + stepLatency }
+      : { sourceId, targetKey,
+          hops:        ctx.hops,
+          path:        ctx.path,
+          trace:       ctx.trace,
+          queried:     ctx.queried,
+          totalTimeMs: ctx.totalTimeMs };
+    // B1: the step is charged when the send has issued, not before.
+    const commit = () => { if (!reselect) return; chargeStep(); if (node.id !== sourceId) this._recordTransit(sourceId, nextId); };
 
     // 4.123.0 ACKED WALK: hand the walk to the next hop and return as soon as
     // it has TAKEN it; the result comes back as lookup_done along the path. A
@@ -6894,20 +7031,29 @@ export class AxonaPeer extends DHT {
     if (walk) {
       try {
         const ack = await node.transport.send(nextId, 'lookup_walk', { ...stepBody, walkId: walk.walkId });
-        if (ack && ack.ack === true) return WALK_FORWARDED;
+        if (ack && ack.ack === true) { commit(); return WALK_FORWARDED; }
         throw new Error('lookup_walk: not acknowledged');
       } catch (err) {
-        if (!/no handler/i.test(String(err?.message || err))) return sendFailed(err);
-        try { return await node.transport.send(nextId, 'lookup_step', stepBody); }
-        catch (err2) { return sendFailed(err2); }
+        if (!/no handler/i.test(String(err?.message || err))) {
+          if (reselect && isEdgeLoss(err) && tryNext('send-threw')) continue;
+          return sendFailed(err);
+        }
+        try { const r = await node.transport.send(nextId, 'lookup_step', stepBody); commit(); return r; }
+        catch (err2) {
+          if (reselect && isEdgeLoss(err2) && tryNext('send-threw')) continue;
+          return sendFailed(err2);
+        }
       }
     }
 
     try {
       const downstream = await node.transport.send(nextId, 'lookup_step', stepBody);
+      commit();
       return downstream;
     } catch (err) {
+      if (reselect && isEdgeLoss(err) && tryNext('send-threw')) continue;
       return sendFailed(err);
+    }
     }
   }
 

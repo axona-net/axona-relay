@@ -118,6 +118,12 @@ export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region
   console.log(`[${ts()}] axona-relay v${version} [${(mode || 'primary').toUpperCase()}] (kernel v${kernelVersion})`);
   console.log(`[${ts()}] node ${nodeId}`);
   console.log(`[${ts()}] region ${regionLabel ?? '?'} (${region.lat},${region.lng})  bridge ${bridgeUrl}`);
+  // The fleet's armed state, readable from the log instead of inferred from a
+  // launch line (fleet.sh carries these on every path; axona-win from the
+  // manifest env; droplets from arm.conf). Unset prints as unset: the kernel
+  // takes its default then (SUB_TERMINAL_VERIFY on, LOOKUP_RESELECT off).
+  const envOr = (k) => (process.env[k] === undefined ? 'unset' : process.env[k]);
+  console.log(`[${ts()}] arm SUB_TERMINAL_VERIFY=${envOr('SUB_TERMINAL_VERIFY')} LOOKUP_RESELECT=${envOr('LOOKUP_RESELECT')}`);
   return {
     update(s) {
       const t = s.health.transport || {};
