@@ -296,7 +296,7 @@ function rowDefs() {
       schema: { require: ['topicId', 'corr'], types: { topicId: 'string', corr: 'string' } },
       conversation: { role: RESP, opposite: 'pubsub:mergeoffer', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'corr', remote: 'corr' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refused-capacity', 'refused-timing', 'merge-ack-short', 'merge-ack-expired', 'merge-stale'], traceFields: ['topicId', 'corr'], budget: budget(11),
+      errorContract: ['refused-capacity', 'refused-timing', 'not-root', 'outranked', 'merge-ack-short', 'merge-ack-expired', 'merge-stale'], traceFields: ['topicId', 'corr'], budget: budget(11),
       note: 'dual-root 4(d) step 4: the winner\'s TERMINAL ack of the whole export under corr (counts against the manifest + hash) or a refusal; step 5 at the loser matches all six fields and the retention check',
     }),
     ({
