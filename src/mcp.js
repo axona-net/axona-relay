@@ -25,7 +25,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect,
+import { publish, pull, watch, poll, unwatch, status, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect, ensureSession,
 } from './mcp-session.js';
 
 const VERSION = JSON.parse(
@@ -166,6 +166,16 @@ server.tool(
 );
 
 await server.connect(new StdioServerTransport());
+
+// Auto-connect the persistent peer and arm MCP_STANDING_WATCHES in the
+// background on process start (unless MCP_AUTO_CONNECT=0), so a newly spawned
+// MCP server joins the mesh immediately instead of staying connected:false
+// until the first tool call.
+if (process.env.MCP_AUTO_CONNECT !== '0') {
+  ensureSession().catch((e) => {
+    process.stderr.write(`[axona-mcp] startup connect failed (will retry on tool call): ${e?.message || e}\n`);
+  });
+}
 
 
 // PUSH: every arrival on a watched topic is emitted as an MCP logging

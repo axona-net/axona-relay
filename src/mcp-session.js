@@ -159,6 +159,7 @@ function warnHandleOverridden(supplied) {
 // ── module state ────────────────────────────────────────────────────────
 let _session = null;          // { peer, regionName, center, nodeId, author, close }
 let _connecting = null;
+let _standingFailures = [];
 let _releaseIdentity = null;  // frees the author-key lock; see claimAuthorIdentity
 for (const sig of ['exit', 'SIGINT', 'SIGTERM']) {
   process.once(sig, () => { try { _releaseIdentity?.(); } catch { /* */ } });
@@ -226,7 +227,8 @@ export async function ensureSession() {
     // Voluntary, signed self-declaration: this peer is an AI agent. Best-effort —
     // a failed declare must never fail the connection.
     if (DECLARE_CLASS) { try { await setAuthorClass({ cls: AUTHOR_CLASS, operator: OPERATOR, label: 'axona-relay MCP peer' }); } catch { /* */ } }
-    await armStandingWatches();
+    const standing = await armStandingWatches();
+    _standingFailures = standing.failed;
     return h;
   })();
   try { return await _connecting; } catch (e) { _connecting = null; throw e; }
@@ -369,18 +371,23 @@ export function parseWatchSpec(spec) {
   return { topic, region: region || undefined, ...(owned ? { owner: 'self', write: 'owner' } : {}) };
 }
 
-async function armStandingWatches() {
+export async function armStandingWatches({ since = 'all' } = {}) {
+  const armed = [];
+  const failed = [];
   for (const spec of STANDING) {
     // Best-effort and individually guarded: one unreachable topic must not stop
     // the others, and must never fail the connection itself.
     try {
       const w = parseWatchSpec(spec);
-      await watch({ ...w, since: 'all' });
+      await watch({ ...w, since });
+      armed.push(w.topic);
       console.error(`[mcp] standing watch armed: ${spec}`);
     } catch (e) {
+      failed.push({ topic: spec, error: e.message });
       console.error(`[mcp] standing watch FAILED: ${spec} — ${e.message}`);
     }
   }
+  return { armed, failed };
 }
 
 // ── standing subscription ───────────────────────────────────────────────
@@ -594,14 +601,24 @@ export async function reconnect({ since = 'all' } = {}) {
   const failed = [];
   for (const w of before.watches) {
     try {
-      await watch({ topic: w.topic, region: w.region, since });
+      const ro = resolveOwner(s, w.descriptor?.owner);
+      await watch({ topic: w.topic, region: w.region, owner: ro, write: w.descriptor?.write, since });
       const nw = WATCHES.get(w.key);
       if (nw && w.buffer.length) { nw.buffer.unshift(...w.buffer); nw.total += w.total; nw.dropped += w.dropped; }
       restored.push(w.topic);
     } catch (e) { failed.push({ topic: w.topic, error: e.message }); }
   }
+  // Include standing watches armed by ensureSession() on a cold start (when
+  // before.watches was empty) or not already listed in restored, so callers
+  // see the full set of active watches instead of an empty watchesRestored[].
+  for (const w of WATCHES.values()) {
+    if (!restored.includes(w.topic)) restored.push(w.topic);
+  }
+  for (const sf of _standingFailures) {
+    if (!failed.some((f) => f.topic === sf.topic)) failed.push(sf);
+  }
   for (const h of before.hosted) {
-    try { await host({ topic: h.topic, region: h.region }); } catch (e) { failed.push({ topic: h.topic, error: `host: ${e.message}` }); }
+    try { await host({ topic: h.topic, region: h.region, owner: h.descriptor?.owner, write: h.descriptor?.write }); } catch (e) { failed.push({ topic: h.topic, error: `host: ${e.message}` }); }
   }
 
   const health = (() => { try { return s.peer.health(); } catch { return null; } })();
