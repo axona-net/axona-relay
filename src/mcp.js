@@ -36,6 +36,16 @@ const VERSION = JSON.parse(
 // OOM-restarts behind its proxy) or an unhandled rejection on a connect/reconnect
 // promise. Those must NOT kill the persistent MCP server — the long-lived session
 // reconnects on its own. Log to STDERR (stdout is the JSON-RPC channel) and continue.
+// WHY THIS SERVER STOPS, on stderr, every time (2026-10-26): the Claude harness
+// log showed this seat's server "connection closed … (cleanly)" five times in
+// a day with no server-side line to say whether a signal, stdin EOF or an exit
+// path ended it. Every host app captures stderr; name the cause there.
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => process.stderr.write(`[axona-mcp] ${sig} received (ppid ${process.ppid}); shutting down\n`));
+}
+process.stdin.on('end',   () => process.stderr.write(`[axona-mcp] stdin ended (host closed the MCP transport)\n`));
+process.stdin.on('close', () => process.stderr.write(`[axona-mcp] stdin closed\n`));
+process.on('exit', (code) => process.stderr.write(`[axona-mcp] exit code ${code} after ${Math.round(process.uptime())}s\n`));
 process.on('uncaughtException',  (e) => process.stderr.write(`⚠ uncaughtException (continuing): ${e?.stack || e?.message || e}\n`));
 process.on('unhandledRejection', (e) => process.stderr.write(`⚠ unhandledRejection (continuing): ${e?.message || e}\n`));
 
