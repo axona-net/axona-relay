@@ -125,3 +125,38 @@ test('a live process we CAN signal is also refused (the non-EPERM branch)', asyn
     );
   } finally { child.kill('SIGKILL'); }
 });
+
+// SHARED SEAT (2026-10-26). codex spawns one MCP server per thread fork, so a
+// second process on the SAME seat's key is the same mind, not the seq-537
+// misconfiguration. Opt-in, explicit path, matching handle — and nothing else.
+test('shared seat: a second process joins when opted in, the path is explicit and the handle matches', () => {
+  const d = tmp();
+  const lock = join(d, 'id.json.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.ppid, handle: 'Aster', startedAt: Date.now() }));   // a LIVE holder we did not start
+  const release = claimAuthorIdentity({ storePath: join(d, 'id.json'), lockPath: lock, handle: 'Aster', shared: true, usingDefault: false });
+  const held = JSON.parse(readFileSync(lock, 'utf8'));
+  assert.equal(held.pid, process.ppid, 'the holder keeps its lock untouched');
+  release();
+  assert.equal(existsSync(lock), true, 'releasing the joiner does not unlink the holder lock');
+});
+
+test('shared seat: a different handle on the same key is still REFUSED', () => {
+  const d = tmp();
+  const lock = join(d, 'id.json.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.ppid, handle: 'Orion', startedAt: Date.now() }));
+  assert.throws(() => claimAuthorIdentity({ storePath: join(d, 'id.json'), lockPath: lock, handle: 'Aster', shared: true, usingDefault: false }), /held by pid/);
+});
+
+test('shared seat: the default identity path is still REFUSED even when opted in', () => {
+  const d = tmp();
+  const lock = join(d, 'id.json.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.ppid, handle: 'Aster', startedAt: Date.now() }));
+  assert.throws(() => claimAuthorIdentity({ storePath: join(d, 'id.json'), lockPath: lock, handle: 'Aster', shared: true, usingDefault: true }), /held by pid/);
+});
+
+test('shared seat: without the opt-in a live holder is REFUSED as before', () => {
+  const d = tmp();
+  const lock = join(d, 'id.json.lock');
+  writeFileSync(lock, JSON.stringify({ pid: process.ppid, handle: 'Aster', startedAt: Date.now() }));
+  assert.throws(() => claimAuthorIdentity({ storePath: join(d, 'id.json'), lockPath: lock, handle: 'Aster', shared: false, usingDefault: false }), /held by pid/);
+});

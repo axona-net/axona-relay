@@ -119,6 +119,7 @@ function pidAlive(pid) {
 
 export function claimAuthorIdentity({ storePath = STORE_PATH, lockPath = LOCK_PATH, handle = HANDLE,
                                       strict = process.env.MCP_STRICT_IDENTITY === '1',
+                                      shared = process.env.MCP_SHARED_SEAT === '1',
                                       usingDefault = !process.env.MCP_AUTHOR_PATH } = {}) {
   if (strict && usingDefault) {
     throw new Error(
@@ -128,6 +129,19 @@ export function claimAuthorIdentity({ storePath = STORE_PATH, lockPath = LOCK_PA
   let held = null;
   try { held = JSON.parse(readFileSync(lockPath, 'utf8')); } catch { held = null; }
   if (held && held.pid !== process.pid && pidAlive(held.pid)) {
+    // SHARED SEAT (2026-10-26): codex spawns a NEW MCP server on every thread
+    // fork, so the second process on Aster's key is Aster again, not a wrong
+    // seat. The refusal below exists for the misconfiguration where two
+    // different seats resolve to one key (council seq 537). When the install
+    // opts in, the identity path is explicit, and the lock's handle equals
+    // ours, a further process joins the seat instead of dying: it does not
+    // touch the holder's lock, signs with the same author (same mind), and
+    // minds its own watches. A stale lock from a dead holder is reclaimed as
+    // before. Handle mismatch or a default path is still refused.
+    if (shared && !usingDefault && held.handle === handle) {
+      process.stderr.write(`[axona-mcp] shared seat: joining author key held by pid ${held.pid} (handle=${handle}) as a second process; MCP_SHARED_SEAT=1\n`);
+      return () => { /* the holder owns the lock; nothing to release */ };
+    }
     throw new Error(
       `[axona-mcp] REFUSING TO START: author key ${storePath} is already held by pid ${held.pid}`
       + `${held.handle ? ` (handle=${held.handle})` : ''}. Two servers on one key sign identically and `
