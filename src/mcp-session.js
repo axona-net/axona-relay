@@ -188,6 +188,7 @@ const ARRIVAL_LISTENERS = new Set();   // fn({topic,region,message,signer,msgId}
 // key must carry them (else a watch on "axona.bot" listens to the wrong topic).
 import { sendFileBytes, listPointers, fetchFileToDisk, readLocalFile, namespaced, FILES_DIR }
   from './file-transfer.js';
+import { makeWatch, deliver, collect as collectWatch, settle } from './mcp-watch.js';
 
 const keyOf = (region, topic, owner, write) => `${region}|${topic}|${owner || ''}|${write || 'open'}`;
 const now = () => Date.now();
@@ -435,21 +436,45 @@ export async function watch({ topic, region, since = 'all', owner, write }) {
   const r = region || REGION;
   const ro = resolveOwner(s, owner);
   const key = keyOf(r, topic, ro, write);
-  if (WATCHES.has(key)) { const w = WATCHES.get(key); return { ok: true, watching: true, alreadyWatching: true, topic, region: r, buffered: w.buffer.length, total: w.total }; }
+  if (WATCHES.has(key)) {
+    const w = WATCHES.get(key);
+    if (since !== 'all') return { ok: true, watching: true, alreadyWatching: true, topic, region: r, buffered: w.buffer.length, total: w.total, replayed: w.replayed };
+    // REPLAY ON REQUEST (2026-10-26). A watch asked for again with since:"all"
+    // re-subscribes so the topic backlog is delivered again. deliver() puts
+    // back what was drained, skips what is still buffered, and counts it as
+    // `replayed` — so a seat whose earlier polls emptied the buffer (and whose
+    // context then lost them) can recover without a reconnect. Before this a
+    // repeat watch was a no-op and "buffer empty" could not be told from
+    // "nothing was ever posted".
+    const before = w.total + w.replayed;
+    try { await s.peer.unsub?.(w.descriptor); } catch { /* a stale sub must not block the replay */ }
+    await s.peer.sub(w.descriptor, arrivalHandler(w, s), { since: 'all' });
+    w.replays += 1; w.lastReplayAt = now();
+    const settled = await settle(w);
+    return { ok: true, watching: true, alreadyWatching: true, replayed: true, topic, region: r,
+      replayedNow: (w.total + w.replayed) - before, buffered: w.buffer.length, total: w.total, replayedTotal: w.replayed, settleMs: settled.elapsedMs };
+  }
   const descriptor = descriptorFor(topic, region, ro, write);
-  const w = { topic, region: r, descriptor, buffer: [], total: 0, dropped: 0, since, startedAt: now(), waiters: [] };
+  const w = makeWatch({ topic, region: r, descriptor, since, now, bufferCap: BUFFER_CAP });
   // kernel `since`: 'all' (replay backlog) | 'latest' (most recent only) | a
   // timestamp | undefined (live tail). Expose 'live' as the friendly name for
   // undefined. Subscribe FIRST; only register the watch if sub() succeeds, so a
   // rejected sub can't leave a phantom watch that a retry then no-ops over.
   const sinceArg = (since === 'live' || since == null) ? undefined : since;
-  await s.peer.sub(descriptor, (env) => {
+  await s.peer.sub(descriptor, arrivalHandler(w, s), { since: sinceArg });
+  WATCHES.set(key, w);                                                       // only after sub() resolves
+  return { ok: true, watching: true, alreadyWatching: false, topic, region: r, since };
+}
+
+/** The per-watch subscription callback. One function for the first sub and every replay re-sub. */
+function arrivalHandler(w, s) {
+  return (env) => {
     if (!env || env.deleted) return;
-    w.total += 1;
     const m = { message: env.message, signer: env.signerPubkey ?? null, msgId: env.msgId ?? null, seq: env.seq ?? null, ts: env.ts ?? null, receivedAt: now() };
-    w.buffer.push(m);
-    if (w.buffer.length > BUFFER_CAP) { w.buffer.shift(); w.dropped += 1; }
+    const { buffered, duplicate } = deliver(w, m);
+    if (!buffered) return;                                                   // still buffered from before: nothing to do
     const waiters = w.waiters.splice(0); for (const res of waiters) res();   // wake long-pollers
+    if (duplicate) return;                                                   // a replay refill is not a new arrival: no push-sink wake
     // `self` is carried on the ARRIVAL EVENT only, never into the buffer, so
     // poll()'s shape is unchanged. A push sink that wakes an agent must be able
     // to ignore that agent's own posts — otherwise every message it publishes
@@ -457,20 +482,14 @@ export async function watch({ topic, region, since = 'all', owner, write }) {
     // that gets ignored, which is how an alert channel dies.
     const self = !!(env.signerPubkey && env.signerPubkey === s.author?.authorId);
     emitArrival({ topic: w.topic, region: w.region, ...m, self });           // push sink (notifications)
-  }, { since: sinceArg });
-  WATCHES.set(key, w);                                                       // only after sub() resolves
-  return { ok: true, watching: true, alreadyWatching: false, topic, region: r, since };
+  };
 }
 
 /** Drain (or peek) buffered messages. With `wait`, long-poll: block until an arrival or `timeoutSec`. */
 export async function poll({ topic, region, peek = false, max, wait = false, timeoutSec = 25, owner, write } = {}) {
   const s0 = await ensureSession();
   const pollKey = topic ? keyOf(region || REGION, topic, resolveOwner(s0, owner), write) : null;
-  const collect = (w) => {
-    const out = max ? w.buffer.slice(0, Number(max)) : w.buffer.slice();
-    if (!peek) { if (max) w.buffer.splice(0, out.length); else w.buffer.length = 0; }
-    return { topic: w.topic, region: w.region, drained: peek ? 0 : out.length, remaining: w.buffer.length, total: w.total, dropped: w.dropped, messages: out };
-  };
+  const collect = (w) => collectWatch(w, { peek, max });   // counts the drain; an empty result carries a hint
   const anyBuffered = () => [...WATCHES.values()].some((w) => w.buffer.length);
 
   if (wait && !peek) {
@@ -538,7 +557,7 @@ export async function status() {
     handle: HANDLE,
     declaredClass: _session.declaredClass?.class ?? 'unstated', operator: _session.declaredClass?.operator ?? null,
     mesh: health ? { synaptomeSize: health.synaptomeSize ?? null, peers: health.peers?.length ?? null, state: health.state ?? null } : null,
-    watches: [...WATCHES.values()].map((w) => ({ topic: w.topic, region: w.region, buffered: w.buffer.length, total: w.total, dropped: w.dropped, since: w.since, ageSec: Math.round((now() - w.startedAt) / 1000) })),
+    watches: [...WATCHES.values()].map((w) => ({ topic: w.topic, region: w.region, buffered: w.buffer.length, total: w.total, drained: w.drained, replayed: w.replayed, dropped: w.dropped, since: w.since, startedAt: new Date(w.startedAt).toISOString(), ageSec: Math.round((now() - w.startedAt) / 1000) })),
     hosted: [...HOSTED.values()].map((h) => ({ topic: h.topic, region: h.region, ageSec: Math.round((now() - h.since) / 1000) })),
     // SEAT ROLES (dual-root packet Part 5, 2026-10-17): the one thing the
     // #council split could not be read from — which topics THIS seat roots,
@@ -617,7 +636,7 @@ export async function reconnect({ since = 'all' } = {}) {
   const oldAm = _session?.peer?._axonaManager ?? null;
   const before = {
     nodeId: _session?.nodeId ?? null,
-    watches: [...WATCHES.entries()].map(([key, w]) => ({ key, topic: w.topic, region: w.region, descriptor: w.descriptor, buffer: w.buffer, total: w.total, dropped: w.dropped })),
+    watches: [...WATCHES.entries()].map(([key, w]) => ({ key, topic: w.topic, region: w.region, descriptor: w.descriptor, buffer: w.buffer, total: w.total, dropped: w.dropped, drained: w.drained, replayed: w.replayed, seen: w.seen })),
     hosted: [...HOSTED.values()].map((h) => ({ topic: h.topic, region: h.region, descriptor: h.descriptor })),
   };
 
@@ -643,7 +662,17 @@ export async function reconnect({ since = 'all' } = {}) {
       const ro = resolveOwner(s, w.descriptor?.owner);
       await watch({ topic: w.topic, region: w.region, owner: ro, write: w.descriptor?.write, since });
       const nw = WATCHES.get(w.key);
-      if (nw && w.buffer.length) { nw.buffer.unshift(...w.buffer); nw.total += w.total; nw.dropped += w.dropped; }
+      if (nw) {
+        // Carry the old buffer and counters over, deduplicated against what the
+        // fresh since:"all" sub already replayed, so `total` keeps meaning
+        // "distinct messages seen" and nothing unread is duplicated or lost.
+        const have = new Set(nw.buffer.map((m) => m.msgId).filter((id) => id != null));
+        const carry = w.buffer.filter((m) => m.msgId == null || !have.has(m.msgId));
+        if (carry.length) nw.buffer.unshift(...carry);
+        for (const id of w.seen) if (!nw.seen.has(id)) { nw.seen.add(id); nw.seenOrder.push(id); }
+        nw.total = Math.max(nw.total, nw.seen.size);
+        nw.drained += w.drained; nw.replayed += w.replayed; nw.dropped += w.dropped;
+      }
       restored.push(w.topic);
     } catch (e) { failed.push({ topic: w.topic, error: e.message }); }
   }
