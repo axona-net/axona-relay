@@ -31,6 +31,7 @@ import { cleanupWebRTC } from './polyfill.js';
 import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
 import { createAuthorIdentity } from '../vendor/axona-protocol/src/identity/index.js';
 import { authorClassTopic } from '../vendor/axona-protocol/src/index.js';   // kernel author-class helper
+import { confirmPublished, drainInflight, CONFIRM_TIMEOUT_MS, DRAIN_BUDGET_MS } from './mcp-confirm.js';
 export { authorClassTopic };                                               // re-export for callers/smoke
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -269,7 +270,17 @@ export async function getAuthorClass({ authorId } = {}) {
 }
 
 // ── point operations over the live peer ─────────────────────────────────
-export async function publish({ topic, message, region, handle, authorClass, raw = false, owner, write }) {
+// Publishes whose routed PUB may still be in flight: msgId → { topic, descriptor, at, timeoutMs }.
+// peer.pub() resolves on LOCAL acceptance (the kernel's pubsubPublish is not awaited), so a
+// process that closes its peer right after publishing kills the PUB. shutdown() drains this
+// map by reading each message back from the holder; publish({ confirm:true }) does it inline.
+const _inflight = new Map();
+const INFLIGHT_MAX = 64;
+export function inflightPublishes() {
+  return [..._inflight].map(([msgId, r]) => ({ msgId, topic: r.topic, ageMs: Date.now() - r.at }));
+}
+
+export async function publish({ topic, message, region, handle, authorClass, raw = false, owner, write, confirm = false, confirmTimeoutMs = CONFIRM_TIMEOUT_MS }) {
   const s = await ensureSession();
   // Default to the cross-app std/message shape WITH an in-payload declaration.
   // Chat clients enforce §6.5 at render: a message whose payload lacks
@@ -289,8 +300,22 @@ export async function publish({ topic, message, region, handle, authorClass, raw
     // passing a different one is reported once per session on stderr.
     : { v: 1, text: message, handle: HANDLE, authorClass: authorClass || AUTHOR_CLASS };
   if (!raw && handle && handle !== HANDLE) warnHandleOverridden(handle);
-  const msgId = await s.peer.pub(descriptorFor(topic, region, resolveOwner(s, owner), write), body, { signWith: s.author });
-  return { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
+  const descriptor = descriptorFor(topic, region, resolveOwner(s, owner), write);
+  const msgId = await s.peer.pub(descriptor, body, { signWith: s.author });
+  // Record the in-flight PUB before anything can close the peer. Bounded: the
+  // oldest entry goes when the map is full; a confirm removes its own entry.
+  while (_inflight.size >= INFLIGHT_MAX) _inflight.delete(_inflight.keys().next().value);
+  _inflight.set(msgId, { topic, descriptor, at: Date.now(), timeoutMs: confirmTimeoutMs });
+  const result = { ok: true, topic, region: region || REGION, owner: resolveOwner(s, owner) ?? null, write: write ?? null, msgId, signer: s.author.authorId, nodeId: s.nodeId, persistent: true, shape: raw ? 'raw' : 'std-message' };
+  if (confirm) {
+    // READ IT BACK. confirmed:true = the topic's holder answered a pull for this
+    // msgId; confirmed:false = not read back within the budget, absence NOT
+    // established (the PUB may still land; retry byte-identical is idempotent).
+    const c = await confirmPublished({ pull: (id, o) => s.peer.pull(id, o), msgId, descriptor, timeoutMs: confirmTimeoutMs });
+    _inflight.delete(msgId);
+    Object.assign(result, { confirmed: c.confirmed, confirmAttempts: c.attempts, confirmMs: c.elapsedMs, ...(c.error ? { confirmError: c.error } : {}) });
+  }
+  return result;
 }
 
 // A READ THAT DID NOT COMPLETE IS NOT AN EMPTY TOPIC.
@@ -649,6 +674,16 @@ let _shuttingDown = false;
 export async function shutdown() {
   if (_shuttingDown) return; _shuttingDown = true;
   try {
+    if (_session && _inflight.size) {
+      // DRAIN BEFORE CLOSING. A publish whose PUB is still routing dies with the
+      // peer; read each one back from the holder first, within one budget, and
+      // say on stderr which ones were not read back so the caller cannot mistake
+      // "publish ok" for "at the root".
+      const peer = _session.peer;
+      const d = await drainInflight({ inflight: _inflight, pull: (id, o) => peer.pull(id, o), budgetMs: DRAIN_BUDGET_MS });
+      for (const u of d.unconfirmed) console.error(`[mcp] publish NOT read back before shutdown: ${u.topic} ${u.msgId.slice(0, 8)}… (${u.reason}) — retry byte-identical from a live peer`);
+      if (d.confirmed.length) console.error(`[mcp] shutdown drain: ${d.confirmed.length} publish(es) read back in ${d.elapsedMs}ms`);
+    }
     if (_session) {
       for (const w of WATCHES.values()) { try { await _session.peer.unsub?.(w.descriptor); } catch { /* */ } }
       for (const h of HOSTED.values())  { try { await _session.peer.unhost?.(h.descriptor); } catch { /* */ } }
