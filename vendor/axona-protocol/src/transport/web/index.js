@@ -1640,6 +1640,12 @@ export function webTransport({
   composite.classOf = (nodeId) => { try { return webrtc.classOf(nodeId); } catch { return null; } };
   composite.reclass = (nodeId, cls, opts) => { try { return webrtc.reclass(nodeId, cls, opts); } catch (err) { return { ok: false, why: `threw:${err?.message}`, prev: null, deferred: false }; } };
   // G5: the reason the far end refused our last offer to `nodeId`, read once.
+  // P3 (kernel 4.126.0): the kernel's relay sink learned the offer cannot be
+  // delivered; retire that attempt's never-opened negotiation now. Boolean:
+  // true when the mesh retired it, false when there was nothing to retire.
+  composite.abortNegotiation = (toHex, attempt = null, reason = 'no-path') => {
+    try { return mesh.abortNegotiation(toHex, attempt, reason) === true; } catch { return false; }
+  };
   composite.lastRejectFor = (nodeId) => {
     try { const hex = (typeof nodeId === 'bigint') ? toHex(nodeId) : String(nodeId); return mesh.lastRejectFor(hex); } catch { return null; }
   };

@@ -10,7 +10,8 @@
 // accept the E2.5 migration. Every flag-off path stays byte-identical; there is
 // no live observer wired to Boundary-5 yet.
 //
-// THE TEN FRAMES (AxonaPeer.start, verified against the E0 manifest):
+// THE TEN FRAMES (AxonaPeer.start, verified against the E0 manifest) — plus
+// presence (4.66.0), lookup_walk/lookup_done (4.123.0) and peer_exchange (4.126.0):
 //   onRequest      lookup_step (:465) lookahead_probe (:483) local_probe (:598)
 //                  find_closest_set (:622) route_msg (:648)
 //   onNotification reinforce (:498) triadic_introduce (:526) hop_cache (:535)
@@ -67,6 +68,8 @@ function rowDefs() {
       'liveness/identity probe of a directly-known peer; D-4 trimmed its disclosure.'),
     routing('dht:find_closest_set', 'find_closest_set', 'request', 'DhtRouting',
       'return the K closest known peers to a target id (K clamp is issue #433, out of scope here).'),
+    routing('dht:peer_exchange',    'peer_exchange',    'request', 'SynaptomeLearning',
+      'P2 of Mesh Partition Self-Heal v0.2 (kernel 4.126.0, PEER_EXCHANGE default OFF): the asker, a bound peer, asks for a sample of the responder\'s usable set (M ∪ I, uniform without replacement, at most pexSample ids, never the asker or the responder itself). Reply { ids: hex[] }; empty with the flag off or inside the per-asker cooldown. Ids are nominations into the candidate cache under the pex aggregate cap, never table entries.'),
     routing('dht:route_msg',        'route_msg',        'request', 'DhtRouting',
       'forward an application/routed payload one hop toward its destination id.'),
     // ── synaptome learning (onNotification) ──

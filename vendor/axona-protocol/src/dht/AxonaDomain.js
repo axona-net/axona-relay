@@ -84,6 +84,28 @@ const DEFAULTS = Object.freeze({
   // OFF = the 4.124.0 order. Env LOOKUP_RESELECT=1 arms it where process.env
   // exists (relays); apps and seats take the default.
   LOOKUP_RESELECT:     false,
+  // P3 of Mesh Partition Self-Heal v0.2 (axona-docs 87a608a; David 2026-10-30
+  // "Build P3 and P2, default off"): an offer the mesh COULD NOT DELIVER is a
+  // deferral, not a failure of the identity. Confirmed non-delivery is the
+  // pre-send veto (reach not-sent), a terminal-not-target verdict, or a
+  // pre-send stop code (no-live-hop, no-capable-terminal) — never a bare
+  // `exhausted`, which is a caught send throw (Orion 94ad7c46 note 2). ON: the
+  // owning negotiation is aborted at once (its incarnation only), the guard
+  // token is released without a count, no loss mark is written, the candidate
+  // returns to the cache under a PATH cooldown outside DeadPeers, and the
+  // attempt guard's exhaustion ends at its refill window instead of at process
+  // death. OFF = 4.125.0: the offer dangles to the 30 s deadline and is marked.
+  NO_PATH_DEFER:       false,
+  // P2 of the same packet: PEER EXCHANGE over the mesh. Every pexMs an armed
+  // node asks ONE bound channel — the one it has not asked for longest — for
+  // a sample of that peer's usable set (M ∪ I, uniform without replacement,
+  // ≤ pexSample ids); the ids enter the candidate cache as 'pex' under an
+  // aggregate cap of K_cache/2 (oldest pex evicted), never displacing near or
+  // band entries. A responder answers one asker per channel per pexCooldownMs
+  // and answers nothing with the flag off. No lookup, no bridge, no root. It
+  // cannot merge components with no surviving channel; it makes a surviving
+  // channel enough. OFF = no ask, an empty answer.
+  PEER_EXCHANGE:       false,
   // R4 (Routed-Walk-Terminals v0.6): a node declares itself a routing terminal,
   // and births a root, only if it can SERVE — the transport's servingCapable()
   // says so (web composite: meshBoundCount() >= its serve floor, the graduation
@@ -131,6 +153,14 @@ export class AxonaDomain {
     if (opts.LOOKUP_RESELECT == null) {
       const e = envNum('LOOKUP_RESELECT', null);
       if (e !== null) this.LOOKUP_RESELECT = e === 1;
+    }
+    // P2/P3 arming, the same rule: the env speaks only when the option is not
+    // given AND the variable is set; =0 is a control arm, unset is the default.
+    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE']) {
+      if (opts[flag] == null) {
+        const e = envNum(flag, null);
+        if (e !== null) this[flag] = e === 1;
+      }
     }
 
     // ── Shared mutable state ───────────────────────────────────────

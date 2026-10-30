@@ -307,9 +307,12 @@ export class AxonaPeer extends DHT {
     // the tick is the legacy near-quota refill, unchanged.
     this._maintainCfg = (synaptomeMaintain && typeof synaptomeMaintain === 'object')
       ? { kNear: synaptomeMaintain.kNear ?? 5, intervalMs: synaptomeMaintain.intervalMs ?? 15000, maxPerTick: synaptomeMaintain.maxPerTick ?? 3,
-          kCache: synaptomeMaintain.kCache ?? 64, pPending: synaptomeMaintain.pPending ?? 8, directoryMs: synaptomeMaintain.directoryMs ?? 600000 }
+          kCache: synaptomeMaintain.kCache ?? 64, pPending: synaptomeMaintain.pPending ?? 8, directoryMs: synaptomeMaintain.directoryMs ?? 600000,
+          // P2 (Mesh Partition Self-Heal v0.2): T_pex, S_pex, C_pex; P3: the PATH cooldown. Read only with the flags on.
+          pexMs: synaptomeMaintain.pexMs ?? 60000, pexSample: synaptomeMaintain.pexSample ?? 16, pexCooldownMs: synaptomeMaintain.pexCooldownMs ?? 30000,
+          noPathMs: synaptomeMaintain.noPathMs ?? 30000 }
       : (synaptomeMaintain === true)
-        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000 }
+        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000 }
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
@@ -323,6 +326,21 @@ export class AxonaPeer extends DHT {
      *  'sent' (sent, no answer observed yet), 'answered' (a peer-list arrived after the request; `offered` may be 0). */
     this._fillDirectory = { state: 'none', askedAt: 0, answeredAt: 0, offered: 0 };
     this._fillDisarmedLogged = false;
+    // P2 PEER EXCHANGE (Mesh Partition Self-Heal v0.2, axona-docs 87a608a; flag
+    // PEER_EXCHANGE, default OFF). Asker side: when the next ask is due, which
+    // bound channel was asked when (unasked first, then least recently). The
+    // map is pruned to the usable set at every ask, so it is bounded by degree.
+    this._pexNextAt = 0;
+    this._pexAskedAt = new Map();      // bigint → ts of our last ask on that channel
+    // Responder side: the per-asker cooldown (one answer per channel per C_pex).
+    this._pexServedAt = new Map();     // bigint → ts of our last answer; pruned past the window
+    this._pexStats = { asks: 0, askFailed: 0, noChannel: 0, offered: 0, nominated: 0, evicted: 0, invalid: 0, served: 0, servedRefused: 0, servedOff: 0 };
+    // P3 NO-PATH DEFERRAL (flag NO_PATH_DEFER, default OFF). The source a
+    // candidate carried when its dial went out, so a requeue after confirmed
+    // non-delivery keeps it (band stays band); cleared on bind, deadline or
+    // requeue, and bounded by the pending-slot count the dials run under.
+    this._heldSrc = new Map();         // bigint → src
+    this._noPathStats = { deferred: 0, aborted: 0, requeued: 0, requeueRefused: 0, cooling: 0, bareExhausted: 0, answersSkipped: 0 };
     // Hold-or-improve admission gate (Connection-Quality definition v0.6,
     // axona-docs 0e4d75a; council-closed 2026-08-24). Governs the binding-
     // transport admission path (_seedSynaptomeWithSponsor): below the synaptome
@@ -476,6 +494,9 @@ export class AxonaPeer extends DHT {
     }
     this._engine = engine;
     this._domain = domain ?? engine;
+    // P3 (MPSH-1): with the flag on, the guard's exhaustion ends at its refill
+    // window (the mark table's R_refill rule), not at process death.
+    if (this._attemptGuard && this._domain?.NO_PATH_DEFER === true) this._attemptGuard.expiryRefill = true;
     this._node   = node;
     this._axonaManager = axonaManager;
     // The NODE identity — the connection/transport keypair (its pubkey forms the
@@ -711,6 +732,7 @@ export class AxonaPeer extends DHT {
         // ignored too (R8-2). Transports that cannot name the incarnation
         // pass none and the token ends by identity alone.
         const g = this._attemptGuard;
+        this._heldSrc.delete(peerBig);   // P3: the dial that carried this src is over
         if (g) {
           let ended = false;
           try { ended = g.end(peerBig, true, Date.now(), undefined, inc ?? undefined) === true; } catch { ended = false; }
@@ -775,6 +797,11 @@ export class AxonaPeer extends DHT {
       this._onNegotiationFailedUnsub = transport.onNegotiationFailed((peerBig, reason, inc) => {
         try {
           if (typeof peerBig !== 'bigint') return;
+          this._heldSrc.delete(peerBig);   // P3: the dial that carried this src is over
+          // P3: a negotiation the kernel itself aborted for want of a path is
+          // not a failure of the identity; its books were kept in _onNoPath.
+          // The mesh does not report this reason as a failure; this is the fence.
+          if (reason === 'no-path') return;
           const node = this._node;
           if (!node) return;
           let open = false;
@@ -1169,6 +1196,39 @@ export class AxonaPeer extends DHT {
         }
       }
       return top.map(t => t.peerId);
+    }, { registry: this._b5door });
+
+    // ── peer_exchange — P2 of Mesh Partition Self-Heal v0.2 (kernel 4.126.0,
+    // PEER_EXCHANGE default OFF). A bound peer asks for a sample of OUR usable
+    // set — M ∪ I through _usablePeers, the one iterator every selector reads
+    // (local_probe and find_closest_set read the synaptome alone, which is M;
+    // a browser tab that spans two islands sits in I as often as not when M
+    // is full, Orion MPSH-4) — uniform without replacement, at most pexSample
+    // ids, never the asker and never self. One answer per asker per
+    // pexCooldownMs; the flag off answers nothing, so an armed asker learns
+    // nothing from a control-population peer. Ids only, no SDP, no addresses.
+    registerFrame(transport, 'peer_exchange', async (fromId, payload) => {
+      if (this._domain?.PEER_EXCHANGE !== true) { this._pexStats.servedOff++; return { ids: [], off: true }; }
+      const fromBig = asId(fromId);   // wire→internal id gate
+      const cfg = this._maintainCfg;
+      const cooldown = cfg?.pexCooldownMs ?? 30000;
+      const sMax = cfg?.pexSample ?? 16;
+      const now = Date.now();
+      for (const [k, at] of this._pexServedAt) if (now - at >= cooldown) this._pexServedAt.delete(k);   // bounded: only live windows stay
+      const last = this._pexServedAt.get(fromBig);
+      if (last != null && now - last < cooldown) { this._pexStats.servedRefused++; return { ids: [], refused: 'cooldown' }; }
+      this._pexServedAt.set(fromBig, now);
+      let n = Number(payload?.n);
+      n = Number.isFinite(n) ? Math.max(1, Math.min(sMax, Math.floor(n))) : sMax;
+      const pool = this._usablePeers({ exclude: new Set([fromBig]) }).map((e) => e.id);
+      // Partial Fisher–Yates: the first n positions are a uniform sample without replacement.
+      for (let i = 0; i < Math.min(n, pool.length); i++) {
+        const j = i + Math.floor(Math.random() * (pool.length - i));
+        const tmp = pool[i]; pool[i] = pool[j]; pool[j] = tmp;
+      }
+      const ids = pool.slice(0, n).map((id) => toHex(id));
+      this._pexStats.served++;
+      return { ids };
     }, { registry: this._b5door });
 
     // ── route_msg — recursive routed-message forwarder ──────────────
@@ -1846,6 +1906,15 @@ export class AxonaPeer extends DHT {
     if (node.synaptome.has(id) || (this._isBoundPeer(id) && this._classOf(id) !== 'I')) return false;
     if (this._fillCache.has(id)) return false;                      // dup: no-op
     if (!this._isEligibleCandidate(id)) { this._fillStats.nominateIneligible++; return false; }
+    // P2 (Orion 94ad7c46 note 3): 'pex' entries hold at most K_cache/2 of the
+    // cache; a new one past that bound evicts the OLDEST pex entry, so four
+    // sources' samples cannot fill the cache and refuse near and band below.
+    if (src === 'pex') {
+      const pexCap = Math.max(1, Math.floor(this._maintainCfg.kCache / 2));
+      let n = 0, oldest = null;
+      for (const [k, r] of this._fillCache) if (r.src === 'pex') { n++; if (!oldest || r.at < oldest.r.at) oldest = { k, r }; }
+      if (n >= pexCap && oldest) { this._fillCache.delete(oldest.k); this._pexStats.evicted++; }
+    }
     if (this._fillCache.size >= this._maintainCfg.kCache) { this._fillStats.nominateRefusedFull++; return false; }
     this._fillCache.set(id, { src, at: Date.now() });
     this._fillStats.nominated++;
@@ -2095,6 +2164,95 @@ export class AxonaPeer extends DHT {
     return { held: true, asked: true, state: d.state };
   }
 
+  // ── P2 / P3 (Mesh Partition Self-Heal v0.2, axona-docs 87a608a) ────────
+  _pexOn() { return this._domain?.PEER_EXCHANGE === true && this._fillArmed(); }
+  _noPathOn() { return this._domain?.NO_PATH_DEFER === true; }
+
+  /**
+   * P2 asker: when T_pex is due, ask ONE bound usable channel — unasked first,
+   * then the one asked longest ago — for a sample of its usable set, and
+   * nominate the ids as 'pex'. One ask per tick at most; the ask rides the
+   * existing channel (no lookup, no bridge, no root). Nothing is dialed here:
+   * the dial phase takes the nominations under its own budget.
+   * @returns {Promise<{asked:boolean, state:string, peer?:string, offered?:number, nominated?:number}>}
+   */
+  async _peerExchangeStep() {
+    if (!this._pexOn()) return { asked: false, state: 'off' };
+    const cfg = this._maintainCfg; const now = Date.now();
+    if (now < this._pexNextAt) return { asked: false, state: 'held' };
+    const usable = this._usablePeers();
+    const live = new Set(usable.map((e) => e.id));
+    for (const k of this._pexAskedAt.keys()) if (!live.has(k)) this._pexAskedAt.delete(k);   // bounded by degree
+    if (usable.length === 0) { this._pexStats.noChannel++; return { asked: false, state: 'no-channel' }; }
+    let pick = null, pickAt = Infinity;
+    for (const e of usable) { const at = this._pexAskedAt.get(e.id) ?? -Infinity; if (at < pickAt) { pick = e; pickAt = at; } }
+    this._pexAskedAt.set(pick.id, now);
+    this._pexNextAt = now + cfg.pexMs;
+    this._pexStats.asks++;
+    const t0 = now;
+    let reply = null;
+    try { reply = await this._node.transport.send(pick.id, 'peer_exchange', { n: cfg.pexSample }); }
+    catch (err) {
+      this._pexStats.askFailed++;
+      this._emitLog?.('info', 'peer-exchange', { peer: toHex(pick.id).slice(0, 12), cls: pick.cls, ok: false, err: String(err?.message || err).slice(0, 60), ms: Date.now() - t0 });
+      return { asked: true, state: 'failed', peer: toHex(pick.id).slice(0, 12) };
+    }
+    const raw = Array.isArray(reply?.ids) ? reply.ids.slice(0, cfg.pexSample) : [];
+    let nominated = 0, invalid = 0;
+    const evictedBefore = this._pexStats.evicted;
+    for (const v of raw) {
+      let big = null;
+      try { big = asId(v); } catch { big = null; }
+      if (big == null || big === pick.id) { invalid++; continue; }
+      if (this._nominateCandidate(big, 'pex')) nominated++;
+    }
+    this._pexStats.offered += raw.length; this._pexStats.nominated += nominated; this._pexStats.invalid += invalid;
+    const out = { asked: true, state: reply?.off ? 'peer-off' : reply?.refused ? 'refused' : 'answered', peer: toHex(pick.id).slice(0, 12), offered: raw.length, nominated };
+    this._emitLog?.('info', 'peer-exchange', { ...out, cls: pick.cls, invalid, evicted: this._pexStats.evicted - evictedBefore, ms: Date.now() - t0 });
+    return out;
+  }
+
+  /**
+   * P3: the kernel's relay sink learned that an OFFER it took ownership of
+   * could not be delivered — confirmed, not timed out. Abort the owning
+   * negotiation now (its attempt only), release the guard token without a
+   * count, write no loss mark, and return the candidate to the cache under a
+   * PATH cooldown (jittered noPathMs, on the cache entry, never in DeadPeers).
+   * Answers are left alone: the offerer's own deadline governs that side.
+   */
+  _onNoPath(toBig, toHexId, signal, why) {
+    if (!this._noPathOn()) return;
+    if (!signal || signal.kind !== 'sdp-offer') { if (signal?.kind === 'sdp-answer') this._noPathStats.answersSkipped++; return; }
+    const t = this._node?.transport;
+    let aborted = false;
+    try { aborted = typeof t?.abortNegotiation === 'function' && t.abortNegotiation(toHexId, signal.attempt ?? null, 'no-path') === true; } catch { aborted = false; }
+    let released = false;
+    try { released = this._attemptGuard?.release?.(toBig) === true; } catch { released = false; }
+    this._noPathStats.deferred++; if (aborted) this._noPathStats.aborted++;
+    const src = this._heldSrc.get(toBig) ?? null; this._heldSrc.delete(toBig);
+    let requeued = false, cooldownMs = null;
+    const cfg = this._maintainCfg;
+    if (this._fillArmed() && cfg) {
+      const base = cfg.noPathMs ?? 30000;
+      cooldownMs = Math.round(base * (0.5 + Math.random()));          // U[T/2, 3T/2], as the directory timer draws
+      const cache = this._fillCache;
+      const have = cache.get(toBig);
+      if (have) { have.noPathUntil = Date.now() + cooldownMs; requeued = true; }
+      else if (cache.size >= cfg.kCache) { this._noPathStats.requeueRefused++; }
+      else { cache.set(toBig, { src: src ?? 'near', at: Date.now(), noPathUntil: Date.now() + cooldownMs }); requeued = true; }
+      if (requeued) this._noPathStats.requeued++;
+    }
+    this._emitLog?.('info', 'relay-signal-no-path', { to: String(toHexId).slice(0, 12), why, attempt: signal.attempt ?? null, aborted, released, requeued, src, cooldownMs });
+  }
+
+  /** P2 counters for health(). */
+  pexStats() {
+    const on = this._pexOn();
+    return { on, nextInMs: on ? Math.max(0, this._pexNextAt - Date.now()) : null, channelsAsked: this._pexAskedAt.size, ...this._pexStats };
+  }
+  /** P3 counters for health(). */
+  noPathStats() { return { on: this._noPathOn(), held: this._heldSrc.size, ...this._noPathStats }; }
+
   /** Report the tick's liveness state when it changes; never on every tick. */
   _fillReport(rep) {
     this._fillLast = rep;
@@ -2137,7 +2295,7 @@ export class AxonaPeer extends DHT {
     // separate predicate. `budget` here is the tick's starting picture, for
     // the report only.
     const budget = Math.max(0, Math.min(cfg.maxPerTick, (cap - admitted) - inflight));
-    const rep = { cap, admitted, deficit: cap - admitted, inflight, budget, availStop: false, near: 0, directory: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, state: null };
+    const rep = { cap, admitted, deficit: cap - admitted, inflight, budget, availStop: false, near: 0, directory: null, pex: null, cache: this._fillCache.size, dialed: 0, cancelled: 0, deferred: 0, deferredAt: null, refused: 0, ineligible: 0, cooling: 0, state: null };
     if (rep.deficit <= 0) {                                          // Rule 2: stop at cap
       rep.state = 'at-cap';
       // Perimeter v0.1 §5–§6: improve an occupied near slot. One bounded near
@@ -2159,6 +2317,8 @@ export class AxonaPeer extends DHT {
     rep.band = await this._bandDiscoveryStep(self);
     // 3. DIRECTORY
     rep.directory = this._fillDirectoryStep();
+    // 3b. EXCHANGE (P2): one ask on one bound channel when T_pex is due.
+    rep.pex = await this._peerExchangeStep();
     // 4. DIAL — nearest-first out of the cache, each under the reservation.
     //    The PREFLIGHT here (pending slots, the ledger's predicate) is a
     //    capacity observation; the reservation that holds is made at the
@@ -2186,6 +2346,10 @@ export class AxonaPeer extends DHT {
       if (this._fillAvailability() <= 0) { rep.availStop = true; break; }
       if (node.synaptome.has(id) || this._isBoundPeer(id)) { cache.delete(id); continue; }   // held meanwhile
       if (!this._isEligibleCandidate(id)) { cache.delete(id); rep.ineligible++; continue; }   // marked meanwhile
+      // P3: a candidate on its PATH cooldown stays nominated and is not dialed
+      // until the cooldown ends — the cooldown lives here, never in DeadPeers.
+      const noPathUntil = cache.get(id)?.noPathUntil;
+      if (noPathUntil != null && Date.now() < noPathUntil) { rep.cooling++; this._noPathStats.cooling++; continue; }
       const pending = guard.inflightCount();
       if (pending >= cfg.pPending || !this._transportMayDial()) {
         // Case 45 at the preflight: NOMINATED stays, attempts and token
@@ -2208,6 +2372,9 @@ export class AxonaPeer extends DHT {
         if (at === 'deficit') rep.availStop = true;
         break;
       }
+      // P3: remember the src a HELD dial carried, so confirmed non-delivery
+      // can requeue the candidate as what it was (bounded by the pending slots).
+      if (out === 'held' && this._noPathOn()) this._heldSrc.set(id, cache.get(id)?.src ?? 'near');
       cache.delete(id);
       if (out === 'held' || out === 'bound' || out === 'added') { rep.dialed++; st.dialed++; }
       else if (out === 'failed') rep.cancelled++;                    // nothing went out; the guard counted the cancel
@@ -2226,7 +2393,7 @@ export class AxonaPeer extends DHT {
       else if (d.held && d.state === 'sent') rep.state = 'fill-unknown';
       else rep.state = 'fill-stalled:supply';
     }
-    else if (rep.refused > 0 && rep.refused + rep.ineligible >= ordered.length) rep.state = 'fill-stalled:fair-retry';
+    else if (rep.refused + rep.cooling > 0 && rep.refused + rep.cooling + rep.ineligible >= ordered.length) rep.state = 'fill-stalled:fair-retry';
     else rep.state = 'fill-unknown';
     if (rep.dialed || rep.deferred || rep.cancelled) this._emitLog?.('info', 'synaptome-fill', { ...rep, directory: d.held ? d.state : 'none' });
     this._fillReport(rep);
@@ -4644,6 +4811,8 @@ export class AxonaPeer extends DHT {
       lookahead:     (() => { try { return this.lookaheadStats(); } catch { return null; } })(),
       servingCapable: (() => { try { return { ...(this._servingCapableStats ?? { calls: 0, capable: 0, incapable: 0, exception: 0 }), now: this._servingCapable() }; } catch { return null; } })(),   // R4
       perimeter:     (() => { try { return this.perimeterStats(); } catch { return null; } })(),   // Perimeter v0.1–v0.3
+      pex:           (() => { try { return this.pexStats(); } catch { return null; } })(),         // P2 peer exchange (4.126.0)
+      noPath:        (() => { try { return this.noPathStats(); } catch { return null; } })(),      // P3 no-path deferral (4.126.0)
       started:       this._started === true,
       transport,
       meshDegraded,
@@ -6521,6 +6690,7 @@ export class AxonaPeer extends DHT {
         reach: wasCached ? 'cached-no' : 'lookup-no', result: 'not-sent', lookupWhy: v ? (v.why ?? null) : null,
         ...(f ? { failHop: f.hop ?? null, failAt: f.at ?? null, failNext: f.next ?? null, failConnected: f.connected ?? null, failOpened: f.opened ?? null, failAddedBy: f.addedBy ?? null, failDirect: f.direct ?? null, failIsTarget: f.isTarget ?? null, failErr: f.err ?? null, ...(f.reselects != null ? { failReselects: f.reselects } : {}) } : {}),
       });
+      this._onNoPath?.(toBig, toHexId, signal, 'not-sent');   // P3: the offer never left — confirmed non-delivery (optional: fences call this on a stub)
       return;
     }
     const reach = wasCached ? 'cached-ok' : 'lookup-ok';
@@ -6539,6 +6709,14 @@ export class AxonaPeer extends DHT {
     const why = !last ? 'threw' : last.terminal ? 'terminal-not-target' : last.exhausted ? (last.stopped || 'exhausted') : 'not-consumed';
     const at = last && last.atNode != null ? (typeof last.atNode === 'bigint' ? toHex(last.atNode) : String(last.atNode)).slice(0, 12) : null;
     origin({ reach, result: why, atNode: at, hops: last?.hops ?? null, tries: 2, threw });
+    // P3: CONFIRMED non-delivery is a terminal verdict (the walk ended at a
+    // node that is not the target) or a PRE-SEND stop code. A bare `exhausted`
+    // is the route_msg catch after a send THREW (:1374, :6473): the frame may
+    // have been delivered, so it is counted and left to the deadline (Orion
+    // 94ad7c46 note 2). 'threw' and 'not-consumed' are left alike.
+    const confirmed = !!last && (last.terminal === true || last.stopped === 'no-live-hop' || last.stopped === 'no-capable-terminal');
+    if (confirmed) this._onNoPath?.(toBig, toHexId, signal, why);
+    else if (last && last.exhausted && !last.stopped && this._noPathStats) this._noPathStats.bareExhausted++;
   }
 
   /** Is `toBig` reachable over the mesh right now?  Verdict cached for

@@ -47,6 +47,14 @@ export class AttemptGuard {
     // in flight (and therefore undialable) for ever. NEGOTIATION_DEADLINE_MS
     // is 30 s; 45 s leaves the signal room to arrive first.
     this.inflightMaxMs = inflightMaxMs;
+    // P3 (Mesh Partition Self-Heal v0.2, MPSH-1): with this set, an EXHAUSTED
+    // identity is allowed ONE attempt per refillWindowMs after its exhaustion,
+    // the mark table's R_refill rule, instead of never again for the life of
+    // the process. Off (the default) the guard is byte-identical to 4.125.0:
+    // only a fresh presence record refills, and with RELAY_PRESENCE unset
+    // fleet-wide that is never — Air slot 1's silence after 12 × 4 dials.
+    this.expiryRefill = false;
+    this.expiryRefills = 0;
     this._state = new Map();        // suffix -> { attempts, inflight, k, beganAt, nextAt, expired }
     this._lastRefillAt = new Map(); // suffix -> ts of last granted refill
     this._seq = 0;                  // completion-token counter (k)
@@ -64,7 +72,8 @@ export class AttemptGuard {
     const key = identitySuffix(id);
     if (key === null) return true;             // structurally unreadable: not ours to block
     const s = this._s(key);
-    return !s.expired && !s.inflight && t >= s.nextAt;
+    if (s.expired) return this.expiryRefill && !s.inflight && t >= s.nextAt;   // one per window after exhaustion (expiryRefill), else never
+    return !s.inflight && t >= s.nextAt;
   }
 
   /** Open an attempt. Returns the completion token `k` the attempt owns
@@ -73,6 +82,9 @@ export class AttemptGuard {
     const key = identitySuffix(id);
     if (key === null) return 0;
     const s = this._s(key);
+    // The window advances at ISSUE (as DeadPeers.consume does): a second
+    // evaluation inside the same window is refused whatever ran between.
+    if (s.expired) { s.nextAt = t + this.refillWindowMs; this.expiryRefills++; }
     s.inflight = true; s.k = ++this._seq; s.beganAt = t;
     return s.k;
   }
@@ -98,7 +110,9 @@ export class AttemptGuard {
     s.inflight = false; s.k = 0; s.inc = null;
     if (bound) { this._state.delete(key); return true; }
     s.attempts++;
-    if (s.attempts >= this.maxAttempts) { s.expired = true; return true; }
+    // Exhaustion: expired, and (for expiryRefill) next eligible one refill
+    // window from now. Off, `expired` alone blocks and nextAt is not read.
+    if (s.attempts >= this.maxAttempts) { s.expired = true; s.nextAt = t + this.refillWindowMs; return true; }
     s.nextAt = t + this.baseMs * Math.pow(this.factor, s.attempts - 1);
     return true;
   }

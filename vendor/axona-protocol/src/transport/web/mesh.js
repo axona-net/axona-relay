@@ -572,6 +572,25 @@ export class MeshManager {
    *  event from another incarnation of the same peer is told apart. */
   incFor(peerId) { return this._peers.get(peerId)?.inc ?? null; }
 
+  /** P3 (Mesh Partition Self-Heal v0.2, kernel 4.126.0): the kernel learned,
+   *  after handing an offer to the mesh relay, that the offer could NOT be
+   *  delivered (the pre-send veto, a terminal-not-target verdict, a pre-send
+   *  stop code). Until this existed the never-opened PC, its pending slot and
+   *  its ledger charge stood for the full NEGOTIATION_DEADLINE_MS and then
+   *  counted as a failure of the identity. This retires the negotiation NOW,
+   *  for the attempt the kernel names only (a newer attempt on the same key
+   *  is untouched), with a reason that is NOT a negotiation failure: no
+   *  onNegotiationFailed listener fires, the kernel keeps its own books.
+   *  Refused (false) for an unknown key, an opened channel, or a stale attempt. */
+  abortNegotiation(peerId, attempt = null, reason = 'no-path') {
+    const state = this._peers.get(peerId);
+    if (!state || state.openedAt > 0) return false;
+    if (attempt != null && state.attempt !== attempt) return false;
+    this._log('negotiation-aborted', { peerId, inc: state.inc ?? null, attempt: state.attempt ?? null, reason, ms: Date.now() - state.since });
+    this._retire(peerId, reason);
+    return true;
+  }
+
   /**
    * v2.0.2 — Subscribe to per-frame ping/pong traffic on each peer
    * data channel.  Fires `callback(peerId, 'sent')` immediately after
