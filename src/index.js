@@ -95,6 +95,10 @@ const LIFECYCLE = {
   'answer-recv':            ['from', 'inc', 'attempt', 'ms'],
   'answer-applied':         ['from', 'inc', 'attempt', 'ms', 'queued'],
   'first-remote-candidate': ['from', 'inc', 'role', 'attempt', 'ms', 'beforeSdp'],
+  // Kernel 4.126.0 P3 (NO_PATH_DEFER): the kernel aborted a never-opened
+  // attempt because its offer could not be delivered. The teardown row above
+  // carries reason 'no-path'; this row carries the attempt the abort named.
+  'negotiation-aborted':    ['peerId', 'inc', 'attempt', 'reason', 'ms'],
 };
 
 // How a ctx is rendered — and what may be cut — lives in logctx.js, because

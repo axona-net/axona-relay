@@ -121,9 +121,10 @@ export function makePlainLog({ version, kernelVersion, bridgeUrl, nodeId, region
   // The fleet's armed state, readable from the log instead of inferred from a
   // launch line (fleet.sh carries these on every path; axona-win from the
   // manifest env; droplets from arm.conf). Unset prints as unset: the kernel
-  // takes its default then (SUB_TERMINAL_VERIFY on, LOOKUP_RESELECT off).
+  // takes its default then (SUB_TERMINAL_VERIFY on, LOOKUP_RESELECT off,
+  // NO_PATH_DEFER off, PEER_EXCHANGE off — kernel 4.126.0 P3/P2).
   const envOr = (k) => (process.env[k] === undefined ? 'unset' : process.env[k]);
-  console.log(`[${ts()}] arm SUB_TERMINAL_VERIFY=${envOr('SUB_TERMINAL_VERIFY')} LOOKUP_RESELECT=${envOr('LOOKUP_RESELECT')}`);
+  console.log(`[${ts()}] arm SUB_TERMINAL_VERIFY=${envOr('SUB_TERMINAL_VERIFY')} LOOKUP_RESELECT=${envOr('LOOKUP_RESELECT')} NO_PATH_DEFER=${envOr('NO_PATH_DEFER')} PEER_EXCHANGE=${envOr('PEER_EXCHANGE')}`);
   return {
     update(s) {
       const t = s.health.transport || {};
