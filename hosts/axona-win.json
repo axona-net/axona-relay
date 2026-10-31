@@ -28,7 +28,10 @@
       "RELAY_LEDGER_ENFORCE": "1",
       "LOOKUP_RESELECT": "1",
       "NO_PATH_DEFER": "1",
-      "PEER_EXCHANGE": "1"
+      "PEER_EXCHANGE": "1",
+      "RELAY_SYNAPTOME_MAINTAIN": "1",
+      "RELAY_ATTEMPT_GUARD": "1",
+      "RELAY_ADMISSION_GATE": "1"
     }
   },
   "services": {
