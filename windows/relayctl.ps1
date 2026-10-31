@@ -28,14 +28,23 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $Repo     = Split-Path -Parent $PSScriptRoot
-$Manifest = Get-Content (Join-Path $Repo "hosts\$HostName.json") -Raw | ConvertFrom-Json
-$Count    = [int]$Manifest.services.count
-$Prefix   = $Manifest.services.name_prefix
-$WrapDir  = $Manifest.services.wrapper_dir
 $Wrapper  = $null   # set by BuildWrapper
-$LogDir   = $Manifest.services.log_dir
-$RelayDir = $Manifest.relay.repo
-$Csc      = $Manifest.facts.compiler
+# relay 0.184.0 (Orion RCTL-1, 2026-10-31): the manifest is read by a function so
+# `roll` can read it AGAIN after `Prep -Pull` brings a new one to disk. In 0.183.0
+# the manifest was parsed once at script start, so a roll that pulled a changed
+# relay.env re-defined the services from the PRE-pull copy in memory, and only a
+# second roll (a fresh process) applied it. Script-scope assignments on purpose:
+# a plain `$Count = …` inside a function would make a local and change nothing.
+function LoadManifest {
+  $script:Manifest = Get-Content (Join-Path $Repo "hosts\$HostName.json") -Raw | ConvertFrom-Json
+  $script:Count    = [int]$script:Manifest.services.count
+  $script:Prefix   = $script:Manifest.services.name_prefix
+  $script:WrapDir  = $script:Manifest.services.wrapper_dir
+  $script:LogDir   = $script:Manifest.services.log_dir
+  $script:RelayDir = $script:Manifest.relay.repo
+  $script:Csc      = $script:Manifest.facts.compiler
+}
+LoadManifest
 
 function SvcName([int]$i) { $Prefix + $i.ToString('00') }
 function LogPath([int]$i) { Join-Path $LogDir ('svc-' + $i.ToString('00') + '.log') }
@@ -254,10 +263,13 @@ switch ($Command) {
     # relay 0.183.0 (David 2026-10-31 "Arm the droplets and Windows"): a roll
     # re-defines every service from the manifest BEFORE restarting it, so a
     # change to relay.env in hosts/axona-win.json reaches the services on the
-    # roll that pulls it. Until now only `install` wrote the registry
+    # roll that pulls it. Until 0.183.0 only `install` wrote the registry
     # Environment, and a roll restarted the services on the env they had.
-    # DefineService is idempotent for an existing service (ImagePath, start
-    # type, failure actions, Environment rewritten; nothing stopped).
+    # 0.184.0: the manifest is RE-READ here, after the pull, or the re-define
+    # would use the pre-pull copy (Orion RCTL-1). DefineService is idempotent
+    # for an existing service (ImagePath, start type, failure actions,
+    # Environment rewritten; nothing stopped).
+    LoadManifest
     for ($i = 1; $i -le $Count; $i++) { DefineService $i }
     for ($i = 1; $i -le $Count; $i++) {
       Restart-Service (SvcName $i)
