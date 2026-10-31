@@ -310,9 +310,10 @@ export class AxonaPeer extends DHT {
           kCache: synaptomeMaintain.kCache ?? 64, pPending: synaptomeMaintain.pPending ?? 8, directoryMs: synaptomeMaintain.directoryMs ?? 600000,
           // P2 (Mesh Partition Self-Heal v0.2): T_pex, S_pex, C_pex; P3: the PATH cooldown. Read only with the flags on.
           pexMs: synaptomeMaintain.pexMs ?? 60000, pexSample: synaptomeMaintain.pexSample ?? 16, pexCooldownMs: synaptomeMaintain.pexCooldownMs ?? 30000,
-          noPathMs: synaptomeMaintain.noPathMs ?? 30000 }
+          noPathMs: synaptomeMaintain.noPathMs ?? 30000, noPathMaxMs: synaptomeMaintain.noPathMaxMs ?? 600000,
+          pexIncapableMs: synaptomeMaintain.pexIncapableMs ?? 600000 }
       : (synaptomeMaintain === true)
-        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000 }
+        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000, noPathMaxMs: 600000, pexIncapableMs: 600000 }
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
@@ -334,7 +335,12 @@ export class AxonaPeer extends DHT {
     this._pexAskedAt = new Map();      // bigint → ts of our last ask on that channel
     // Responder side: the per-asker cooldown (one answer per channel per C_pex).
     this._pexServedAt = new Map();     // bigint → ts of our last answer; pruned past the window
-    this._pexStats = { asks: 0, askFailed: 0, noChannel: 0, offered: 0, nominated: 0, evicted: 0, invalid: 0, served: 0, servedRefused: 0, servedOff: 0 };
+    this._pexStats = { asks: 0, askFailed: 0, noChannel: 0, offered: 0, nominated: 0, evicted: 0, invalid: 0, served: 0, servedRefused: 0, servedOff: 0, incapable: 0 };
+    // 4.127.0: channels that answered "no handler" (a peer that predates the
+    // frame) are skipped for pexIncapableMs and the same tick asks another.
+    // First reading of 4.126.0: 46 of 56 asks on Air went to such peers, the
+    // bridge first, one per T_pex, so no armed relay was asked for four minutes.
+    this._pexIncapable = new Map();    // bigint → ts marked
     // P3 NO-PATH DEFERRAL (flag NO_PATH_DEFER, default OFF). The source a
     // candidate carried when its dial went out, so a requeue after confirmed
     // non-delivery keeps it (band stays band); cleared on bind, deadline or
@@ -2183,20 +2189,34 @@ export class AxonaPeer extends DHT {
     const usable = this._usablePeers();
     const live = new Set(usable.map((e) => e.id));
     for (const k of this._pexAskedAt.keys()) if (!live.has(k)) this._pexAskedAt.delete(k);   // bounded by degree
-    if (usable.length === 0) { this._pexStats.noChannel++; return { asked: false, state: 'no-channel' }; }
-    let pick = null, pickAt = Infinity;
-    for (const e of usable) { const at = this._pexAskedAt.get(e.id) ?? -Infinity; if (at < pickAt) { pick = e; pickAt = at; } }
-    this._pexAskedAt.set(pick.id, now);
+    for (const [k, at] of this._pexIncapable) if (!live.has(k) || now - at >= (cfg.pexIncapableMs ?? 600000)) this._pexIncapable.delete(k);
+    const capable = usable.filter((e) => !this._pexIncapable.has(e.id));
+    if (capable.length === 0) { this._pexStats.noChannel++; return { asked: false, state: usable.length ? 'no-capable-channel' : 'no-channel' }; }
     this._pexNextAt = now + cfg.pexMs;
-    this._pexStats.asks++;
-    const t0 = now;
-    let reply = null;
-    try { reply = await this._node.transport.send(pick.id, 'peer_exchange', { n: cfg.pexSample }); }
-    catch (err) {
-      this._pexStats.askFailed++;
-      this._emitLog?.('info', 'peer-exchange', { peer: toHex(pick.id).slice(0, 12), cls: pick.cls, ok: false, err: String(err?.message || err).slice(0, 60), ms: Date.now() - t0 });
-      return { asked: true, state: 'failed', peer: toHex(pick.id).slice(0, 12) };
+    // 4.127.0: up to three picks in one tick, so a channel that predates the
+    // frame ("no handler") costs a skip, not a whole T_pex.
+    let pick = null, reply = null, t0 = now;
+    for (let tries = 0; tries < 3; tries++) {
+      pick = null; let pickAt = Infinity;
+      for (const e of capable) { if (this._pexIncapable.has(e.id)) continue; const at = this._pexAskedAt.get(e.id) ?? -Infinity; if (at < pickAt) { pick = e; pickAt = at; } }
+      if (!pick) { this._pexStats.noChannel++; return { asked: tries > 0, state: 'no-capable-channel' }; }
+      this._pexAskedAt.set(pick.id, Date.now());
+      this._pexStats.asks++;
+      t0 = Date.now();
+      try { reply = await this._node.transport.send(pick.id, 'peer_exchange', { n: cfg.pexSample }); break; }
+      catch (err) {
+        const msg = String(err?.message || err);
+        if (/no handler/i.test(msg)) {
+          this._pexIncapable.set(pick.id, Date.now()); this._pexStats.incapable++;
+          this._emitLog?.('info', 'peer-exchange', { peer: toHex(pick.id).slice(0, 12), cls: pick.cls, ok: false, incapable: true, ms: Date.now() - t0 });
+          reply = null; continue;                                   // ask the next capable channel in this tick
+        }
+        this._pexStats.askFailed++;
+        this._emitLog?.('info', 'peer-exchange', { peer: toHex(pick.id).slice(0, 12), cls: pick.cls, ok: false, err: msg.slice(0, 60), ms: Date.now() - t0 });
+        return { asked: true, state: 'failed', peer: toHex(pick.id).slice(0, 12) };
+      }
     }
+    if (reply === null) return { asked: true, state: 'no-capable-channel' };
     const raw = Array.isArray(reply?.ids) ? reply.ids.slice(0, cfg.pexSample) : [];
     let nominated = 0, invalid = 0;
     const evictedBefore = this._pexStats.evicted;
@@ -2232,9 +2252,13 @@ export class AxonaPeer extends DHT {
     const src = this._heldSrc.get(toBig) ?? null; this._heldSrc.delete(toBig);
     let requeued = false, cooldownMs = null;
     const cfg = this._maintainCfg;
+    // 4.127.0: the cooldown is the guard's PATH backoff — doubling per
+    // consecutive non-delivery, honoured by every dial site through allow() —
+    // and the cache entry carries the same instant for the fill's own report.
+    const base = cfg?.noPathMs ?? 30000, maxMs = cfg?.noPathMaxMs ?? 600000;
+    if (this._attemptGuard) cooldownMs = this._attemptGuard.deferPath(toBig, Date.now(), { baseMs: base, maxMs });
+    else cooldownMs = Math.round(base * (0.5 + Math.random()));
     if (this._fillArmed() && cfg) {
-      const base = cfg.noPathMs ?? 30000;
-      cooldownMs = Math.round(base * (0.5 + Math.random()));          // U[T/2, 3T/2], as the directory timer draws
       const cache = this._fillCache;
       const have = cache.get(toBig);
       if (have) { have.noPathUntil = Date.now() + cooldownMs; requeued = true; }
@@ -2242,7 +2266,7 @@ export class AxonaPeer extends DHT {
       else { cache.set(toBig, { src: src ?? 'near', at: Date.now(), noPathUntil: Date.now() + cooldownMs }); requeued = true; }
       if (requeued) this._noPathStats.requeued++;
     }
-    this._emitLog?.('info', 'relay-signal-no-path', { to: String(toHexId).slice(0, 12), why, attempt: signal.attempt ?? null, aborted, released, requeued, src, cooldownMs });
+    this._emitLog?.('info', 'relay-signal-no-path', { to: String(toHexId).slice(0, 12), why, attempt: signal.attempt ?? null, aborted, released, requeued, src, cooldownMs, noPath: this._attemptGuard?.noPathOf?.(toBig) ?? null });
   }
 
   /** P2 counters for health(). */
@@ -6702,7 +6726,11 @@ export class AxonaPeer extends DHT {
       try {
         const r = await this.routeMessage(toBig, 'mesh:signal', body);
         last = r;
-        if (r && r.consumed) { origin({ reach, result: 'delivered', hops: r.hops ?? null, tries: tryN + 1 }); return; }
+        if (r && r.consumed) {
+          origin({ reach, result: 'delivered', hops: r.hops ?? null, tries: tryN + 1 });
+          if (signal?.kind === 'sdp-offer') { try { this._attemptGuard?.pathDelivered?.(toBig); } catch { /* bookkeeping only */ } }   // 4.127.0: the path is good
+          return;
+        }
       } catch { threw++; /* retry */ }
     }
     this._domain?._emit?.({ type: 'mesh-signal-relay-failed', to: toHexId });

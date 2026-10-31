@@ -55,7 +55,17 @@ export class AttemptGuard {
     // fleet-wide that is never — Air slot 1's silence after 12 × 4 dials.
     this.expiryRefill = false;
     this.expiryRefills = 0;
-    this._state = new Map();        // suffix -> { attempts, inflight, k, beganAt, nextAt, expired }
+    // 4.127.0 (the first live reading of 4.126.0, 2026-10-30 17:41Z): the PATH
+    // backoff. P3 releases a no-path token without counting an attempt, so the
+    // guard never backed off an identity the mesh could not reach, and a flat
+    // 30 s cooldown on the fill cache gated the fill's dials only. Armed relays
+    // re-dialed the same unreachable ids about twice a minute each, forever
+    // (Air relay 1: 38, 36, 29 aborts a minute). Now every confirmed
+    // non-delivery DOUBLES a per-identity path cooldown (base × 2^(n−1),
+    // jittered in [½, 1½], capped at maxMs) that `allow` honours for EVERY dial
+    // site; a delivered offer, a bind or a fresh presence record resets it.
+    this.pathDefers = 0;
+    this._state = new Map();        // suffix -> { attempts, inflight, k, beganAt, nextAt, expired, pathUntil, noPath }
     this._lastRefillAt = new Map(); // suffix -> ts of last granted refill
     this._seq = 0;                  // completion-token counter (k)
     this.refills = 0; this.coalesced = 0; this.staleEnded = 0; this.ignoredEnds = 0;
@@ -63,7 +73,7 @@ export class AttemptGuard {
 
   _s(key) {
     let s = this._state.get(key);
-    if (!s) { s = { attempts: 0, inflight: false, k: 0, beganAt: 0, nextAt: 0, expired: false }; this._state.set(key, s); }
+    if (!s) { s = { attempts: 0, inflight: false, k: 0, beganAt: 0, nextAt: 0, expired: false, pathUntil: 0, noPath: 0 }; this._state.set(key, s); }
     return s;
   }
 
@@ -72,9 +82,38 @@ export class AttemptGuard {
     const key = identitySuffix(id);
     if (key === null) return true;             // structurally unreadable: not ours to block
     const s = this._s(key);
+    if (t < s.pathUntil) return false;                                           // 4.127.0: on its PATH backoff, whichever site asks
     if (s.expired) return this.expiryRefill && !s.inflight && t >= s.nextAt;   // one per window after exhaustion (expiryRefill), else never
     return !s.inflight && t >= s.nextAt;
   }
+
+  /** 4.127.0: confirmed non-delivery toward `id`. The n-th consecutive one
+   *  defers the identity for baseMs × 2^(n−1), drawn in [½, 1½] of that and
+   *  capped at maxMs. Counts no attempt. Returns the cooldown in ms. */
+  deferPath(id, t = Date.now(), { baseMs = 30000, maxMs = 600000, jitter = true } = {}) {
+    const key = identitySuffix(id);
+    if (key === null) return 0;
+    const s = this._s(key);
+    s.noPath = Math.min(s.noPath + 1, 30);
+    let ms = Math.min(maxMs, baseMs * Math.pow(2, s.noPath - 1));
+    if (jitter) ms = Math.round(ms * (0.5 + Math.random()));
+    s.pathUntil = t + ms;
+    this.pathDefers++;
+    return ms;
+  }
+  /** 4.127.0: an offer toward `id` was DELIVERED (or it bound): the path is
+   *  known good, the backoff resets. An entry with nothing else pending is dropped. */
+  pathDelivered(id) {
+    const key = identitySuffix(id);
+    if (key === null) return false;
+    const s = this._state.get(key);
+    if (!s) return false;
+    s.noPath = 0; s.pathUntil = 0;
+    if (s.attempts === 0 && !s.expired && !s.inflight) this._state.delete(key);
+    return true;
+  }
+  noPathOf(id) { return this._state.get(identitySuffix(id))?.noPath ?? 0; }
+  pathUntilOf(id) { return this._state.get(identitySuffix(id))?.pathUntil ?? 0; }
 
   /** Open an attempt. Returns the completion token `k` the attempt owns
    *  (row 8, case 16: `begin(id, k)` once; `end(id, k, ·)` exactly once). */
@@ -139,7 +178,7 @@ export class AttemptGuard {
     const s = this._state.get(key);
     if (!s || !s.inflight || (k !== undefined && k !== s.k)) { this.ignoredEnds++; return false; }
     s.inflight = false; s.k = 0; this.released = (this.released ?? 0) + 1;
-    if (s.attempts === 0 && !s.expired) this._state.delete(key);
+    if (s.attempts === 0 && !s.expired && s.noPath === 0) this._state.delete(key);   // 4.127.0: a path backoff keeps the entry
     return true;
   }
 
@@ -174,8 +213,8 @@ export class AttemptGuard {
     // allowed by freshness while a dial is out; the dial's own bind,
     // deadline or sweep ends it.
     const s = this._state.get(key);
-    if (s && s.inflight) { s.attempts = 0; s.expired = false; s.nextAt = 0; }
-    else this._state.delete(key);              // one fresh budget, re-eligible
+    if (s && s.inflight) { s.attempts = 0; s.expired = false; s.nextAt = 0; s.noPath = 0; s.pathUntil = 0; }
+    else this._state.delete(key);              // one fresh budget, re-eligible (the path backoff goes with it)
     this.refills++;
     return true;
   }
