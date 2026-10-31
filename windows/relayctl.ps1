@@ -251,6 +251,14 @@ switch ($Command) {
   'roll' { WithLock {
     Prep $Kernel -Pull
     BuildWrapper
+    # relay 0.183.0 (David 2026-10-31 "Arm the droplets and Windows"): a roll
+    # re-defines every service from the manifest BEFORE restarting it, so a
+    # change to relay.env in hosts/axona-win.json reaches the services on the
+    # roll that pulls it. Until now only `install` wrote the registry
+    # Environment, and a roll restarted the services on the env they had.
+    # DefineService is idempotent for an existing service (ImagePath, start
+    # type, failure actions, Environment rewritten; nothing stopped).
+    for ($i = 1; $i -le $Count; $i++) { DefineService $i }
     for ($i = 1; $i -le $Count; $i++) {
       Restart-Service (SvcName $i)
       $line = AwaitReady $i
