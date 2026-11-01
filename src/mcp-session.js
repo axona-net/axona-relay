@@ -728,10 +728,38 @@ export async function shutdown() {
       for (const h of HOSTED.values())  { try { await _session.peer.unhost?.(h.descriptor); } catch { /* */ } }
       try { await _session.close(); } catch { /* */ }
     }
-  } finally { try { cleanupWebRTC(); } catch { /* */ } _session = null; WATCHES.clear(); HOSTED.clear(); }
+  } finally {
+    try { cleanupWebRTC(); } catch { /* */ }
+    // Release the author-key lock HERE, not only on 'exit': if close() stalls,
+    // the next server on this seat must not be refused for a lock a dying
+    // process still holds (MCP-STDIN-ORPHAN, Orion f94337df, 2026-11-01).
+    try { _releaseIdentity?.(); } catch { /* */ }
+    _session = null; WATCHES.clear(); HOSTED.clear();
+  }
 }
 
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { shutdown().finally(() => process.exit(0)); });
+// ONE EXIT PATH (0.186.0). Until 0.185.0 only SIGINT and SIGTERM reached
+// shutdown(); SIGHUP and a closed stdin were logged and nothing else, so a host
+// that dropped the stdio pipe on restart left this process alive (sockets and
+// timers keep the loop open) holding the seat's author lock, and the
+// replacement server was refused with "already held by pid" until a human
+// killed the orphan (Orion f94337df, 2026-11-01). terminate() drains, closes,
+// releases the lock and exits; a hard-exit timer bounds a stalled close. The
+// timer is unref'd so it never keeps an otherwise-finished loop alive.
+export const HARD_EXIT_MS = DRAIN_BUDGET_MS + 2000;
+let _terminating = false;
+export function terminate(cause) {
+  if (_terminating) return; _terminating = true;
+  console.error(`[mcp] terminating: ${cause}`);
+  const hard = setTimeout(() => {
+    console.error(`[mcp] shutdown exceeded ${HARD_EXIT_MS}ms; hard exit`);
+    try { _releaseIdentity?.(); } catch { /* */ }
+    process.exit(0);
+  }, HARD_EXIT_MS);
+  hard.unref();
+  shutdown().finally(() => { clearTimeout(hard); process.exit(0); });
+}
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => terminate(`${sig} received`));
 process.on('exit', () => { try { cleanupWebRTC(); } catch { /* */ } });
 
 // ── files ───────────────────────────────────────────────────────────────

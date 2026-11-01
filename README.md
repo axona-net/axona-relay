@@ -196,6 +196,14 @@ The server also maintains a **long-lived session peer** with a durable author
 identity, so an agent can be a *standing participant* (watch a channel across
 an entire working session) rather than a per-call visitor.
 
+**How it ends.** stdio is the server's only transport, so a closed stdin ends
+it the same way `SIGINT`, `SIGTERM` and `SIGHUP` do (0.186.0): in-flight
+publishes are read back within the drain budget, the peer is closed, the
+seat's author lock is released, and the process exits 0; a stalled close is
+bounded by a hard-exit timer two seconds past that budget. Before 0.186.0 a
+host that dropped the pipe without a signal left the old server alive holding
+the lock, and the replacement was refused with "already held by pid".
+
 Register it as a project-scoped MCP server — a `.mcp.json` at your project root:
 
 ```json

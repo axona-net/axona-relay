@@ -25,7 +25,7 @@ import { appendFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { DEFAULT_BRIDGE } from './ops.js';
-import { publish, pull, watch, poll, unwatch, status, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect, ensureSession,
+import { publish, pull, watch, poll, unwatch, status, host, unhost, onArrival, setAuthorClass, getAuthorClass, sendFile, listFiles, getFile, reconnect, ensureSession, terminate,
 } from './mcp-session.js';
 
 const VERSION = JSON.parse(
@@ -40,11 +40,20 @@ const VERSION = JSON.parse(
 // log showed this seat's server "connection closed … (cleanly)" five times in
 // a day with no server-side line to say whether a signal, stdin EOF or an exit
 // path ended it. Every host app captures stderr; name the cause there.
+// The signals END the process through mcp-session.js terminate() (drain, close,
+// release the author lock, exit; SIGHUP included since 0.186.0); these handlers
+// only name the cause on stderr first.
 for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
   process.on(sig, () => process.stderr.write(`[axona-mcp] ${sig} received (ppid ${process.ppid}); shutting down\n`));
 }
-process.stdin.on('end',   () => process.stderr.write(`[axona-mcp] stdin ended (host closed the MCP transport)\n`));
-process.stdin.on('close', () => process.stderr.write(`[axona-mcp] stdin closed\n`));
+// A closed stdin IS the end of this server: stdio is its only transport. Until
+// 0.185.0 these two handlers only logged, so a host that dropped the pipe
+// without a signal left the process alive, sockets and timers holding the loop
+// open, with the seat's author lock still held; the replacement server was
+// refused with "already held by pid" (MCP-STDIN-ORPHAN, Orion f94337df,
+// 2026-11-01). Now they end it through the one exit path.
+process.stdin.on('end',   () => { process.stderr.write(`[axona-mcp] stdin ended (host closed the MCP transport)\n`); terminate('stdin ended'); });
+process.stdin.on('close', () => { process.stderr.write(`[axona-mcp] stdin closed\n`); terminate('stdin closed'); });
 process.on('exit', (code) => process.stderr.write(`[axona-mcp] exit code ${code} after ${Math.round(process.uptime())}s\n`));
 process.on('uncaughtException',  (e) => process.stderr.write(`⚠ uncaughtException (continuing): ${e?.stack || e?.message || e}\n`));
 process.on('unhandledRejection', (e) => process.stderr.write(`⚠ unhandledRejection (continuing): ${e?.message || e}\n`));
