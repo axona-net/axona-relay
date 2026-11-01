@@ -8,8 +8,9 @@
 // strict one (Antigravity) drops the pipe. Since 0.189.0 src/mcp.js imports
 // src/mcp-console.js FIRST, which rebinds console.log/info/debug/warn to stderr.
 //
-// This test spawns the real src/mcp.js with a --require preload that calls all
-// four console methods from a timer, AFTER the server has loaded: the same shape
+// This test spawns the real src/mcp.js with a --require preload that calls the
+// console methods (log, info, debug, warn, and since 0.190.0 dir, table, count,
+// group and assert) from a timer, AFTER the server has loaded: the same shape
 // as the polyfill's state-change callback. It sends one MCP initialize request
 // so stdout carries at least one real frame, closes stdin (the one exit path),
 // and asserts that every stdout line parses as a JSON-RPC frame while the
@@ -37,6 +38,11 @@ test('console.log/info/debug/warn from a loaded module never reach stdout under 
     console.info('[probe] info');
     console.debug('[probe] debug');
     console.warn('[probe] warn');
+    console.dir({ probe: 'dir' });
+    console.table([{ probe: 'table' }]);
+    console.count('[probe] count');
+    console.group('[probe] group'); console.groupEnd();
+    console.assert(false, '[probe] assert');
   }, ${PROBE_DELAY_MS});\n`);
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('MCP_') && k !== 'BRIDGE_URL' && k !== 'RELAY_NETWORK') env[k] = v;
@@ -71,4 +77,8 @@ test('console.log/info/debug/warn from a loaded module never reach stdout under 
   // Only after stdout is proven clean: the probe did fire, and it went to stderr.
   assert.match(stderr, /ice-pair \{"probe":"log"\}/, 'the probe never fired (or went nowhere); nothing was proven');
   assert.match(stderr, /\[probe\] info/); assert.match(stderr, /\[probe\] debug/); assert.match(stderr, /\[probe\] warn/);
+  // 0.190.0: the methods that bypass a rebound console.log (dir on Node 24) and
+  // the ones that route through it must all land on stderr too.
+  assert.match(stderr, /probe: 'dir'/, 'console.dir did not reach stderr');
+  assert.match(stderr, /table/); assert.match(stderr, /\[probe\] count: 1/); assert.match(stderr, /\[probe\] group/); assert.match(stderr, /\[probe\] assert/);
 });

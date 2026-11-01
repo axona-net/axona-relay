@@ -7,12 +7,18 @@
 // in 22 minutes on one seat ("Ignoring non-JSON line on stdout") and carried
 // on; Antigravity's client dropped the stdio pipe at the first one. The relay
 // daemon NEEDS that line on its stdout (ops/negotiation-triage.py reads it), so
-// polyfill.js is untouched: this module rebinds the four stdout-bound console
-// methods to stderr instead, and mcp.js imports it FIRST. ESM evaluates imports
-// in order before the importing module's body, so every later import — ops.js,
-// polyfill.js, the kernel — already sees the rebound console when it loads.
-// console.error and console.trace already write stderr and are left alone.
-import { format } from 'node:util';
+// polyfill.js is untouched: this module points the whole console at stderr
+// instead, and mcp.js imports it FIRST. ESM evaluates imports in order before
+// the importing module's body, so every later import — ops.js, polyfill.js,
+// the kernel — already sees this console when it loads.
+//
+// 0.189.0 rebound console.log, info, debug and warn. On Node 24 console.dir
+// (and dirxml) write the Console's own stdout stream without going through
+// log, so they slipped past that form (Orion 11c49d2f, MCPSC-1); table, count,
+// time, group and assert do go through log or warn. 0.190.0 replaces the
+// global console with a Console whose stdout AND stderr are process.stderr,
+// which covers every method at once; nothing in this server's import graph
+// calls dir today, so this closes a door nobody has walked through yet.
+import { Console } from 'node:console';
 
-const toStderr = (...args) => { process.stderr.write(format(...args) + '\n'); };
-for (const name of ['log', 'info', 'debug', 'warn']) console[name] = toStderr;
+globalThis.console = new Console({ stdout: process.stderr, stderr: process.stderr });
