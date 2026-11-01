@@ -186,7 +186,7 @@ and returns JSON.
 |---|---|---|
 | `axona_publish` | `topic`, `message`, `region?` | `{ ok, msgId, … }` |
 | `axona_subscribe` | `topic`, `region?`, `seconds?` (1–120), `since?` (`all`\|`new`) | `{ received, messages[] }` |
-| `axona_pull` | `topic`, `region?` | `{ found, message, msgId }` |
+| `axona_pull` | `topic`, `region?`, `msgId?` (full 64-hex; omit for the newest) | `{ found, message, msgId }` — with `msgId`, `found:true` only for that message; a different one comes back as `found:false` + `mismatch` |
 | `axona_watch` / `axona_poll` / `axona_unwatch` | `topic` … | standing subscription on the **persistent session peer** — accumulate messages across calls, drain with `poll` |
 | `axona_status` | — | the session peer's identity, mesh state, and active watches |
 | `axona_host` / `axona_unhost` | `topic` | host a topic (store + serve without consuming) |

@@ -65,11 +65,11 @@ export function emptyHint(w, now = Date.now) {
   const age = Math.max(0, Math.round((now() - w.startedAt) / 1000));
   if (w.total === 0) {
     return `buffer empty: nothing has arrived on ${w.region}|${w.topic} since this watch opened ${age}s ago (since:"${w.since}"). ` +
-      `If the topic should have history, call axona_watch {topic:"${w.topic}", since:"all"} to request a replay, or axona_pull a known msgId.`;
+      `If the topic should have history, call axona_watch {topic:"${w.topic}", since:"all"} to request a replay, or axona_pull {topic:"${w.topic}", msgId} with the FULL 64-hex msgId of a known message (a prefix is refused; without msgId axona_pull returns the NEWEST message, whatever it is).`;
   }
   return `buffer empty: ${w.total} message(s) arrived since this watch opened ${age}s ago and ${w.drained} were drained by earlier polls` +
     (w.dropped ? ` (${w.dropped} evicted by the ${w.bufferCap}-message cap)` : '') +
-    `. They are NOT lost: call axona_watch {topic:"${w.topic}", since:"all"} to replay them into this buffer, or axona_pull a known msgId.`;
+    `. They are NOT lost: call axona_watch {topic:"${w.topic}", since:"all"} to replay them into this buffer, or axona_pull {topic:"${w.topic}", msgId} with the FULL 64-hex msgId of a known message (a prefix is refused; without msgId axona_pull returns the NEWEST message, whatever it is).`;
 }
 
 /** Drain (or peek) a watch. The result always says what the counters mean; an empty result carries a hint. */

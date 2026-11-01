@@ -32,6 +32,7 @@ import { connectPeer, regionToDescriptor, DEFAULT_BRIDGE } from './ops.js';
 import { createAuthorIdentity } from '../vendor/axona-protocol/src/identity/index.js';
 import { authorClassTopic } from '../vendor/axona-protocol/src/index.js';   // kernel author-class helper
 import { confirmPublished, drainInflight, CONFIRM_TIMEOUT_MS, DRAIN_BUDGET_MS } from './mcp-confirm.js';
+import { pullMessage, PULL_TIMEOUT_MS } from './mcp-pull.js';
 export { authorClassTopic };                                               // re-export for callers/smoke
 import { readFileSync, writeFileSync, mkdirSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -349,38 +350,33 @@ export async function publish({ topic, message, region, handle, authorClass, raw
 //   2. Absence is only ever reported when it was actually OBSERVED. If the read
 //      threw, or ran out the clock, `found` is null and ok is false — never
 //      false. Callers may not read "no answer" as "no message".
-const PULL_TIMEOUT_MS = 8000;
+//
+// 2026-10-31: `msgId` is threaded through to the kernel. The tool schema had no
+// such field, so every "pull a known msgId" read the newest message and reported
+// found:true for it. The rules (refuse anything but a full 64-hex id, never
+// found:true for a non-matching envelope) live in mcp-pull.js; this function
+// only resolves the descriptor and binds the live peer.
 
-export async function pull({ topic, region, owner, write, timeoutMs = PULL_TIMEOUT_MS }) {
+export async function pull({ topic, region, owner, write, msgId, timeoutMs = PULL_TIMEOUT_MS }) {
   const s = await ensureSession();
   const descriptor = descriptorFor(topic, region, resolveOwner(s, owner), write);
-  const startedAt = Date.now();
-  let env = null, failure = null;
-  try {
-    env = await s.peer.pull(null, { topic: descriptor, timeoutMs });
-  } catch (e) {
-    failure = String((e && e.message) || e);
-  }
-  const elapsedMs = Date.now() - startedAt;
-  // Ran the clock out with nothing to show → the network did not answer. The
-  // kernel resolves a timed-out pull to null, same as a real miss, so elapsed
-  // time is the only signal available here to tell them apart.
-  const timedOut = !env && !failure && elapsedMs >= timeoutMs * 0.9;
-  const inconclusive = !!failure || timedOut;
+  const r = await pullMessage({
+    pull: (id, o) => s.peer.pull(id, o),
+    msgId: msgId ?? null,
+    descriptor,
+    timeoutMs,
+  });
+  const { ok, found, message, msgId: gotId, elapsedMs, timeoutMs: t, ...rest } = r;
   return {
-    ok: !inconclusive,
+    ok,
     topic,
     region: region || REGION,
-    found: inconclusive ? null : !!env,      // null = UNKNOWN, never false
-    message: env ? env.message : null,
-    msgId: env?.msgId ?? null,
+    found,
+    message,
+    msgId: gotId,
     elapsedMs,
-    timeoutMs,
-    ...(inconclusive
-      ? { reason: failure
-            ? `pull failed: ${failure} — absence NOT established`
-            : `no answer within ${timeoutMs}ms — absence NOT established, retry or use watch+poll` }
-      : {}),
+    timeoutMs: t,
+    ...rest,
   };
 }
 

@@ -123,8 +123,9 @@ server.tool(
 
 server.tool(
   'axona_pull',
-  'Fetch only the single most recent message on an Axona topic (no listening window). Faster than watch/poll when you just want the latest value. Returns { found, message, msgId }.',
-  { topic: z.string().describe('Topic name'), ...REGION, ...OWNED },
+  'Fetch ONE message from an Axona topic (no listening window): the single most recent message, or — with msgId — that specific message by its FULL 64-hex id. Faster than watch/poll when you just want the latest value, or want to check whether one known message is at the holder. Returns { found, message, msgId }. With msgId: a prefix or any non-64-hex value is refused (ok:false, reason "invalid msgId"); if the holder answers with a different message the result is found:false with `mismatch` naming what came back — found:true only ever means the requested message.',
+  { topic: z.string().describe('Topic name'), ...REGION, ...OWNED,
+    msgId: z.string().optional().describe('FULL 64-char lowercase hex message id to fetch (prefixes are refused). Omit for the newest message.') },
   run(pull),
 );
 
