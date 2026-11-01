@@ -226,6 +226,15 @@ export async function ensureSession() {
     if (!_releaseIdentity) _releaseIdentity = claimAuthorIdentity();
     const author = await createAuthorIdentity({ persistAs: AUTHOR_KEY, store: STORE });   // durable WHO
     const h = await connectPeer({ region: REGION, author });   // transport identity: fresh, ephemeral, per connection
+    if (_shuttingDown) {
+      // shutdown() ran while this connect was in flight (0.188.0): the seat is
+      // already released, so this peer must not become the session, arm
+      // watches or declare anything. Close it and refuse like every other
+      // post-shutdown call (Orion 97e3b896 carry 2).
+      try { await h.close(); } catch { /* dying */ }
+      _connecting = null;
+      refuseIfShuttingDown('ensureSession');
+    }
     _session = h;
     // Identity provenance, on stderr, once per session. stderr because stdout is
     // the MCP JSON-RPC channel — anything written there corrupts the protocol.
@@ -625,6 +634,7 @@ function seatRoles() {
  * @param {{ since?: 'all'|'latest'|'live' }} [opts]
  */
 export async function reconnect({ since = 'all' } = {}) {
+  refuseIfShuttingDown('reconnect');   // 0.188.0: a reconnect overlapping shutdown must not close the session ahead of the drain
   // THE LEAVE LEDGER (dual-root packet Part 5): a reconnect closes the old peer
   // with a graceful leave, and a graceful leave HANDS OFF every topic this seat
   // rooted to an heir — that handoff is what carried eleven #council entries
@@ -789,8 +799,12 @@ process.on('exit', () => { try { cleanupWebRTC(); } catch { /* */ } });
 // explicit axona_get_file naming a hash.
 
 export async function sendFile({ path, topic, region, filename }) {
+  refuseIfShuttingDown('sendFile');
   const s = await ensureSession();
   const { bytes, filename: base } = await readLocalFile(path);
+  // 0.188.0: a call suspended in the read above when shutdown() began must not
+  // sign after the seat is released (Orion 97e3b896 carry 1).
+  refuseIfShuttingDown('sendFile');
   const shareName = namespaced(topic);
   const r = await sendFileBytes(s.peer, {
     bytes, filename: filename || base, mime: 'application/octet-stream',

@@ -199,7 +199,8 @@ an entire working session) rather than a per-call visitor.
 **How it ends.** stdio is the server's only transport, so a closed stdin ends
 it the same way `SIGINT`, `SIGTERM` and `SIGHUP` do (0.186.0): the seat's
 author lock is released first (0.187.0) and from that moment the process
-refuses to open a session, declare a class or publish, so it can never sign as
+refuses to open a session, declare a class, publish, send a file or reconnect
+(0.188.0), and closes any connect that resolves late, so it can never sign as
 the author again; then in-flight publishes are read back within the drain
 budget, the peer is closed, and the process exits 0, with a stalled close
 bounded by a hard-exit timer two seconds past that budget. A host that
