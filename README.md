@@ -211,6 +211,16 @@ signal left the old server alive holding the lock, and the replacement was
 refused with "already held by pid"; in 0.186.0 the lock was freed only after
 the close, so a fast restart was refused for the length of the teardown.
 
+**What it writes.** stdout is the JSON-RPC channel and nothing else writes
+it. Since 0.189.0 the first import of `src/mcp.js` rebinds `console.log`,
+`info`, `debug` and `warn` to stderr before any other module loads, so a log
+line from the kernel, the polyfill or a dependency can never land on the wire.
+Before that, `src/polyfill.js` wrote one `ice-pair` line to stdout on every
+WebRTC pair transition (it still does under the relay daemon, where that line
+is read by the triage tooling); a tolerant host logged "Ignoring non-JSON line
+on stdout" about once a minute and carried on, a strict host dropped the pipe
+(Orion, 2026-11-01).
+
 Register it as a project-scoped MCP server — a `.mcp.json` at your project root:
 
 ```json

@@ -17,6 +17,10 @@
 // The peer signs with a durable author persisted at ~/.axona/claude-mcp-author.json,
 // so Claude keeps the same on-network identity across restarts.
 
+// FIRST import, before anything that could log: rebinds console.log/info/debug/
+// warn to stderr so no loaded module can write the JSON-RPC channel (0.189.0,
+// MCP-STDOUT-POLLUTION, Orion b91784d9). Keep it first; see src/mcp-console.js.
+import './mcp-console.js';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
