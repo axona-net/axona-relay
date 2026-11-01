@@ -20,7 +20,7 @@ import { test, before, after } from 'node:test';
 import { WebSocketServer } from 'ws';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, existsSync } from 'node:fs';
+import { mkdtempSync, existsSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -33,23 +33,27 @@ const EXIT_BUDGET_MS = 8000;
 // its bridge socket, so an un-ended server stays alive.
 let wss, bridgeUrl;
 const held = new Set();
+const tempDirs = [];
 before(async () => {
   wss = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   wss.on('connection', (sock) => { held.add(sock); sock.on('close', () => held.delete(sock)); });
   await new Promise((r) => wss.once('listening', r));
   bridgeUrl = `ws://127.0.0.1:${wss.address().port}`;
 });
-after(async () => { for (const s of held) s.terminate(); await new Promise((r) => wss.close(r)); });
+after(async () => {
+  for (const s of held) s.terminate();
+  await new Promise((r) => wss.close(r));
+  for (const d of tempDirs) rmSync(d, { recursive: true, force: true });
+});
 
-function start() {
-  const dir = mkdtempSync(join(tmpdir(), 'axona-mcp-exit-'));
-  const author = join(dir, 'id.json');
+function start({ author, extraEnv = {} } = {}) {
+  if (!author) { const dir = mkdtempSync(join(tmpdir(), 'axona-mcp-exit-')); tempDirs.push(dir); author = join(dir, 'id.json'); }
   const env = {};
   for (const [k, v] of Object.entries(process.env)) if (!k.startsWith('MCP_') && k !== 'BRIDGE_URL' && k !== 'RELAY_NETWORK') env[k] = v;
   Object.assign(env, {
     MCP_AUTHOR_PATH: author, MCP_HANDLE: 'exit-test', MCP_INBOX: 'off', MCP_STANDING_WATCHES: '',
     MCP_AUTO_CONNECT: '1', BRIDGE_URL: bridgeUrl,   // the silent loopback bridge above; never the network
-  });
+  }, extraEnv);
   const child = spawn(process.execPath, [MCP], { stdio: ['pipe', 'pipe', 'pipe'], env });
   let stderr = '';
   child.stderr.on('data', (b) => { stderr += b.toString(); });
@@ -68,8 +72,9 @@ function start() {
     try { return await Promise.race([exited, guard]); }
     finally { clearTimeout(timer); if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); }
   };
-  return { child, lock: `${author}.lock`, stderr: () => stderr, until, exitWithin };
+  return { child, author, lock: `${author}.lock`, stderr: () => stderr, until, exitWithin };
 }
+const lockPid = (lock) => { try { return JSON.parse(readFileSync(lock, 'utf8')).pid; } catch { return null; } };
 
 async function ready(s) {
   await s.until(() => /axona MCP server v\S+ ready/.test(s.stderr()), 15000, 'ready line');
@@ -106,4 +111,30 @@ test('a second terminate() is a no-op: one exit path, once', async () => {
   assert.equal(r.code, 0);
   assert.equal((s.stderr().match(/\[mcp\] terminating:/g) || []).length, 1, 'terminating logged once');
   assert.equal(existsSync(s.lock), false);
+});
+
+// 0.187.0: THE SEAT IS FREE BEFORE THE TEARDOWN, NOT AFTER IT. The dying server
+// is held in its shutdown for 3 s by the test seam (a slow close()); a
+// replacement spawned inside that window on the SAME author file must claim
+// the seat and come up ready, not be refused "already held by pid". With the
+// entry release removed (lock freed only after the stall), the replacement is
+// refused and this test fails on the lock pid.
+test('a replacement spawned during the dying server\'s teardown claims the seat', async () => {
+  const a = start({ extraEnv: { MCP_TEST_SHUTDOWN_STALL_MS: '3000' } });
+  await ready(a);
+  assert.equal(lockPid(a.lock), a.child.pid, 'first server holds the lock');
+  a.child.stdin.end();
+  await a.until(() => lockPid(a.lock) !== a.child.pid, 2000, 'lock released at shutdown entry');
+  assert.equal(a.child.exitCode, null, 'first server is still in its teardown');
+  const b = start({ author: a.author });
+  await ready(b);
+  assert.equal(lockPid(b.lock), b.child.pid, 'replacement holds the lock while the first server still runs');
+  assert.doesNotMatch(b.stderr(), /REFUSING TO START/);
+  const ra = await a.exitWithin(EXIT_BUDGET_MS, 'first server after its stall');
+  assert.equal(ra.code, 0);
+  assert.equal(lockPid(b.lock), b.child.pid, 'the first server\'s late release did not touch the replacement\'s lock');
+  b.child.stdin.end();
+  const rb = await b.exitWithin(EXIT_BUDGET_MS, 'replacement stdin end');
+  assert.equal(rb.code, 0);
+  assert.equal(existsSync(b.lock), false);
 });

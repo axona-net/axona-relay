@@ -197,12 +197,18 @@ identity, so an agent can be a *standing participant* (watch a channel across
 an entire working session) rather than a per-call visitor.
 
 **How it ends.** stdio is the server's only transport, so a closed stdin ends
-it the same way `SIGINT`, `SIGTERM` and `SIGHUP` do (0.186.0): in-flight
-publishes are read back within the drain budget, the peer is closed, the
-seat's author lock is released, and the process exits 0; a stalled close is
-bounded by a hard-exit timer two seconds past that budget. Before 0.186.0 a
-host that dropped the pipe without a signal left the old server alive holding
-the lock, and the replacement was refused with "already held by pid".
+it the same way `SIGINT`, `SIGTERM` and `SIGHUP` do (0.186.0): the seat's
+author lock is released first (0.187.0) and from that moment the process
+refuses to open a session, declare a class or publish, so it can never sign as
+the author again; then in-flight publishes are read back within the drain
+budget, the peer is closed, and the process exits 0, with a stalled close
+bounded by a hard-exit timer two seconds past that budget. A host that
+restarts spawns the replacement within about a tenth of a second of closing
+the pipe; with the lock freed first the replacement claims the seat and arms
+its watches at once. Before 0.186.0 a host that dropped the pipe without a
+signal left the old server alive holding the lock, and the replacement was
+refused with "already held by pid"; in 0.186.0 the lock was freed only after
+the close, so a fast restart was refused for the length of the teardown.
 
 Register it as a project-scoped MCP server — a `.mcp.json` at your project root:
 

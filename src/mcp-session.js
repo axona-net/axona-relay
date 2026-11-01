@@ -211,7 +211,11 @@ function emitArrival(evt) {
   for (const fn of ARRIVAL_LISTENERS) { try { fn(evt); } catch { /* a bad sink must not break delivery */ } }
 }
 
+const refuseIfShuttingDown = (what) => {
+  if (_shuttingDown) throw new Error(`[axona-mcp] ${what} refused: this server is shutting down; its seat is released and a replacement may hold it`);
+};
 export async function ensureSession() {
+  refuseIfShuttingDown('ensureSession');
   if (_session) return _session;
   if (_connecting) return _connecting;
   _connecting = (async () => {
@@ -254,6 +258,7 @@ export async function ensureSession() {
 // ── author-class: declare (owner-only) + resolve (from the Author ID alone) ──
 /** Publish this author's class attestation to its owner-only profile topic. */
 export async function setAuthorClass({ cls = AUTHOR_CLASS, operator = OPERATOR, label = null } = {}) {
+  refuseIfShuttingDown('setAuthorClass');
   const s = await ensureSession();
   const { attestation } = await s.peer.setAuthorClass(cls, { signWith: s.author, operator, label });   // kernel peer method
   _session.declaredClass = attestation;
@@ -297,6 +302,7 @@ export function inflightPublishes() {
 }
 
 export async function publish({ topic, message, region, handle, authorClass, raw = false, owner, write, confirm = false, confirmTimeoutMs = CONFIRM_TIMEOUT_MS }) {
+  refuseIfShuttingDown('publish');
   const s = await ensureSession();
   // Default to the cross-app std/message shape WITH an in-payload declaration.
   // Chat clients enforce §6.5 at render: a message whose payload lacks
@@ -712,6 +718,20 @@ export async function reconnect({ since = 'all' } = {}) {
 let _shuttingDown = false;
 export async function shutdown() {
   if (_shuttingDown) return; _shuttingDown = true;
+  // FREE THE SEAT FIRST (0.187.0). The guards above now refuse ensureSession(),
+  // setAuthorClass() and publish(), so from this line on this process can never
+  // sign as the author again; what remains (read back in-flight publishes,
+  // unsub, unhost, close) needs no author key. An editor host that restarts
+  // spawns the replacement ~100 ms after closing stdin; with the lock released
+  // only after close() (0.186.0) the replacement was refused "already held by
+  // pid" for the whole teardown, came up connected:false and left its standing
+  // watches and inbox unarmed until its first tool call (Orion 59fa7625).
+  try { _releaseIdentity?.(); } catch { /* */ }
+  // Test seam, OFF unless set: hold the teardown open so a replacement can be
+  // spawned inside it (test/mcp_lifecycle_exit.test.mjs). Bounded by the hard
+  // exit in terminate() whatever the value.
+  const stallMs = Number(process.env.MCP_TEST_SHUTDOWN_STALL_MS || 0);
+  if (stallMs > 0) await new Promise((r) => setTimeout(r, stallMs));
   try {
     if (_session && _inflight.size) {
       // DRAIN BEFORE CLOSING. A publish whose PUB is still routing dies with the
@@ -730,9 +750,9 @@ export async function shutdown() {
     }
   } finally {
     try { cleanupWebRTC(); } catch { /* */ }
-    // Release the author-key lock HERE, not only on 'exit': if close() stalls,
-    // the next server on this seat must not be refused for a lock a dying
-    // process still holds (MCP-STDIN-ORPHAN, Orion f94337df, 2026-11-01).
+    // Second release, idempotent: release() unlinks only a lock that names THIS
+    // pid, so a replacement's lock is never touched (0.186.0 kept the lock until
+    // here; 0.187.0 frees it at entry, above).
     try { _releaseIdentity?.(); } catch { /* */ }
     _session = null; WATCHES.clear(); HOSTED.clear();
   }
