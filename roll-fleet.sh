@@ -118,12 +118,16 @@ for old in "${OLD_PIDS[@]}"; do
   newpid=$!
 
   # The replacement is proven by ITS OWN LOG: banner with the kernel we expect,
-  # then state=open with at least one bound mesh channel. Until both appear,
-  # no old relay dies.
+  # then state=open OR state=graduated with at least one bound mesh channel.
+  # Until both appear, no old relay dies. "graduated" is the bridge degree cap
+  # retiring a healthy relay from its bridge socket (close 4200): it lives on
+  # the mesh and never prints state=open. On 2026-11-02 m1 slot 2 bound 4/4
+  # peers within 3 s, printed only state=graduated, and this gate killed it as
+  # "mesh=0" (relay 0.191.0). relayctl.ps1 has accepted graduated since 0.139.0.
   ok_banner=0; ok_mesh=0
   for _ in $(seq 1 "$INTEGRATE_TIMEOUT"); do
     if [ "$ok_banner" -eq 0 ] && grep -q "kernel v$EXPECT_KERNEL" "$log" 2>/dev/null; then ok_banner=1; fi
-    if [ "$ok_mesh" -eq 0 ] && grep -E 'state=open .*mesh\(open/bound\)=[0-9]+/[1-9]' "$log" >/dev/null 2>&1; then ok_mesh=1; fi
+    if [ "$ok_mesh" -eq 0 ] && grep -E 'state=(open|graduated) .*mesh\(open/bound\)=[0-9]+/[1-9]' "$log" >/dev/null 2>&1; then ok_mesh=1; fi
     [ "$ok_banner" -eq 1 ] && [ "$ok_mesh" -eq 1 ] && break
     kill -0 "$newpid" 2>/dev/null || break   # replacement died — abort below
     sleep 1

@@ -16,7 +16,8 @@
 #
 # Each newcomer is proven by ITS OWN LOG before the next one starts — the same
 # two-part proof roll-fleet.sh uses: the kernel banner we expect, then state=open
-# with at least one BOUND mesh channel. SETTLE caps that wait (default 20s, David
+# or state=graduated (bridge degree cap; see roll-fleet.sh) with at least one
+# BOUND mesh channel. SETTLE caps that wait (default 20s, David
 # 2026-09-08: "20 seconds is enough time for each to settle via the bridge"). A
 # newcomer that misses the gate is left running and reported, not killed — it may
 # simply be slow, and a relay that integrates a second late is still a relay.
@@ -67,7 +68,7 @@ for i in $(seq 1 "$NEED"); do
   ok_banner=0; ok_mesh=0
   for _ in $(seq 1 "$SETTLE"); do
     if [ "$ok_banner" -eq 0 ] && grep -q "kernel v$EXPECT_KERNEL" "$log" 2>/dev/null; then ok_banner=1; fi
-    if [ "$ok_mesh" -eq 0 ] && grep -E 'state=open .*mesh\(open/bound\)=[0-9]+/[1-9]' "$log" >/dev/null 2>&1; then ok_mesh=1; fi
+    if [ "$ok_mesh" -eq 0 ] && grep -E 'state=(open|graduated) .*mesh\(open/bound\)=[0-9]+/[1-9]' "$log" >/dev/null 2>&1; then ok_mesh=1; fi
     [ "$ok_banner" -eq 1 ] && [ "$ok_mesh" -eq 1 ] && break
     kill -0 "$newpid" 2>/dev/null || break
     sleep 1
