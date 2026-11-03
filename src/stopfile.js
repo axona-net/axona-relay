@@ -13,15 +13,19 @@
 // sets RELAY_STOP_FILE for its child and, on stop, writes that file and waits
 // up to its grace for the relay to leave; only then does it terminate the job.
 // This module watches the file and calls onStop once. A stale file at start is
-// removed first, so an old request cannot stop a new process.
+// removed first, so an old request cannot stop a new process — UNLESS the
+// caller says the file is fresh (CB6A-WIN-1, Orion 12a4f349): the wrapper
+// removes stale files itself before it starts the relay and sets
+// RELAY_STOP_FRESH=1, so a file present when the watcher arms is a stop that
+// arrived while node was still booting, and it is honoured, not deleted.
 
 import { existsSync, unlinkSync } from 'node:fs';
 
 export const STOP_FILE_POLL_MS = 500;
 
-export function watchStopFile(path, onStop, { intervalMs = STOP_FILE_POLL_MS } = {}) {
+export function watchStopFile(path, onStop, { intervalMs = STOP_FILE_POLL_MS, fresh = false } = {}) {
   if (typeof path !== 'string' || path.length === 0) return null;
-  try { if (existsSync(path)) unlinkSync(path); } catch { /* best-effort: a stale request */ }
+  if (!fresh) { try { if (existsSync(path)) unlinkSync(path); } catch { /* best-effort: a stale request */ } }
   const timer = setInterval(() => {
     let present = false;
     try { present = existsSync(path); } catch { present = false; }

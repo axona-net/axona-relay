@@ -13,6 +13,9 @@
 //   4  a child process with only the watcher armed exits by itself (unref'd),
 //      and a child told to stop through the file runs its shutdown and exits 0
 //      within 2 s
+//   5  fresh (CB6A-WIN-1, Orion 12a4f349): a file already present when the
+//      watcher arms is a live stop that arrived during boot: it fires once and
+//      is removed; and a child stopped before it armed still shuts down
 // =====================================================================
 import { mkdtempSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -51,6 +54,17 @@ try {
     if (code === 'hung') child.kill('SIGKILL');
     ok('4 the watcher alone holds no process open; a stop request runs shutdown and exits 0 within 2 s',
       idleExit === 0 && code === 0 && /shutdown stop-file/.test(out) && Date.now() - t0 < 2000, JSON.stringify({ idleExit, code, out: out.trim(), ms: Date.now() - t0 })); }
+  { const f = join(dir, 'd.stop'); writeFileSync(f, 'early'); const calls = [];
+    const w = watchStopFile(f, (why) => calls.push(why), { intervalMs: 50, fresh: true });
+    await sleep(250);
+    ok('5 fresh: a file present at arm time fires once and is removed', calls.length === 1 && calls[0] === 'stop-file' && !existsSync(f), JSON.stringify(calls)); w.stop();
+    const mod = join(here, '..', 'src', 'stopfile.js').replace(/\\/g, '/');
+    const g = join(dir, 'e.stop'); writeFileSync(g, 'stop before arm');
+    const child = spawn(process.execPath, ['--input-type=module', '-e', `await new Promise((r) => setTimeout(r, 300)); import('${mod}').then(({ watchStopFile }) => watchStopFile('${g}', (why) => { console.log('shutdown ' + why); process.exit(0); }, { fresh: true })); setInterval(() => {}, 1000);`], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = ''; child.stdout.on('data', (d) => { out += d; });
+    const code = await Promise.race([new Promise((r) => child.on('exit', (c) => r(c))), sleep(4000).then(() => 'hung')]);
+    if (code === 'hung') child.kill('SIGKILL');
+    ok('5b a child stopped while it was still booting shuts down once it arms', code === 0 && /shutdown stop-file/.test(out), JSON.stringify({ code, out: out.trim() })); }
 } finally { rmSync(dir, { recursive: true, force: true }); }
 console.log(`\nfence_stop_file: ${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

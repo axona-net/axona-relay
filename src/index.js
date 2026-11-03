@@ -281,7 +281,7 @@ async function main() {
   // 6a (Closer-Born v0.6): the Windows service wrapper asks for this same
   // graceful shutdown (peer.leave() hands off every root and backup) by
   // writing RELAY_STOP_FILE; it terminates the job only after its grace.
-  watchStopFile(process.env.RELAY_STOP_FILE, (why) => shutdown(why));
+  watchStopFile(process.env.RELAY_STOP_FILE, (why) => shutdown(why), { fresh: process.env.RELAY_STOP_FRESH === '1' });
 
   // OBSERVABILITY (#58/#60): an on-demand health dump, because a headless relay
   // had NO query surface at all. health() carries per-role children counts and

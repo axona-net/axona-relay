@@ -107,6 +107,9 @@ public class RelayService : ServiceBase
         stopFile = Path.Combine(dir, Path.GetFileNameWithoutExtension(log) + ".stop");
         try { if (File.Exists(stopFile)) File.Delete(stopFile); } catch { }
         Environment.SetEnvironmentVariable("RELAY_STOP_FILE", stopFile);
+        // CB6A-WIN-1 (Orion 12a4f349): stale copies are gone, so a file the relay
+        // finds when it arms its watcher is a stop that arrived during its boot.
+        Environment.SetEnvironmentVariable("RELAY_STOP_FRESH", File.Exists(stopFile) ? "0" : "1");
 
         string comspec = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
         string cmd = "\"" + comspec + "\" /d /c node src\\index.js >> \"" + log + "\" 2>&1";
@@ -140,10 +143,14 @@ public class RelayService : ServiceBase
     {
         stopping = true;
         if (proc != IntPtr.Zero && graceMs > 0 && stopFile != null) {
-            try { File.WriteAllText(stopFile, why); Note("stop requested (" + why + "); asked the relay to leave, grace " + graceMs + " ms"); }
-            catch (Exception e) { Note("stop requested (" + why + "); stop file write failed: " + e.Message); }
-            bool gone = WaitForSingleObject(proc, graceMs) == 0;   // WAIT_OBJECT_0
-            Note(gone ? "relay left within the grace" : "grace expired; terminating job");
+            bool wrote = false;
+            try { File.WriteAllText(stopFile, why); wrote = true; Note("stop requested (" + why + "); asked the relay to leave, grace " + graceMs + " ms"); }
+            catch (Exception e) { Note("stop requested (" + why + "); stop file write failed: " + e.Message + "; terminating job"); }
+            // CB6A-WIN-2 (Orion 12a4f349): no request written, nothing to wait for.
+            if (wrote) {
+                bool gone = WaitForSingleObject(proc, graceMs) == 0;   // WAIT_OBJECT_0
+                Note(gone ? "relay left within the grace" : "grace expired; terminating job");
+            }
         } else {
             Note("stop requested (" + why + "); terminating job");
         }
