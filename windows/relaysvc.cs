@@ -9,7 +9,14 @@
 //
 // If the relay exits on its own the wrapper exits non-zero WITHOUT reporting
 // SERVICE_STOPPED; the SCM treats that as a crash and applies the service's
-// failure actions (restart). A service stop terminates the job.
+// failure actions (restart).
+//
+// A service stop ASKS FIRST (Closer-Born v0.6 Part 6a, relay 0.193.0): the
+// wrapper sets RELAY_STOP_FILE for its child, and on stop writes that file and
+// waits up to the grace for the relay to run its own shutdown, whose
+// peer.leave() hands off every root and backup it holds. Only then is the job
+// terminated. A stop gets 30 s (the SCM is asked for more time); a system
+// shutdown gets 4 s, best effort, since Windows bounds service shutdown.
 //
 // Build (on the host, no download):
 //   C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe /nologo /out:relaysvc.exe relaysvc.cs
@@ -63,6 +70,7 @@ public class RelayService : ServiceBase
     const int JobObjectExtendedLimitInformation = 9;
 
     readonly string repo, log;
+    string stopFile;
     IntPtr job = IntPtr.Zero, proc = IntPtr.Zero;
     volatile bool stopping;
 
@@ -94,6 +102,12 @@ public class RelayService : ServiceBase
         if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, ref info, Marshal.SizeOf(info)))
             throw new Exception("SetInformationJobObject failed " + Marshal.GetLastWin32Error());
 
+        // 6a: the graceful-stop channel. A stale request is removed first; the
+        // child inherits RELAY_STOP_FILE (CreateProcess passes no env block).
+        stopFile = Path.Combine(dir, Path.GetFileNameWithoutExtension(log) + ".stop");
+        try { if (File.Exists(stopFile)) File.Delete(stopFile); } catch { }
+        Environment.SetEnvironmentVariable("RELAY_STOP_FILE", stopFile);
+
         string comspec = Environment.GetEnvironmentVariable("ComSpec") ?? @"C:\Windows\System32\cmd.exe";
         string cmd = "\"" + comspec + "\" /d /c node src\\index.js >> \"" + log + "\" 2>&1";
         var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si);
@@ -122,14 +136,21 @@ public class RelayService : ServiceBase
         Environment.Exit(1);
     }
 
-    void Halt(string why)
+    void Halt(string why, uint graceMs)
     {
         stopping = true;
-        Note("stop requested (" + why + "); terminating job");
+        if (proc != IntPtr.Zero && graceMs > 0 && stopFile != null) {
+            try { File.WriteAllText(stopFile, why); Note("stop requested (" + why + "); asked the relay to leave, grace " + graceMs + " ms"); }
+            catch (Exception e) { Note("stop requested (" + why + "); stop file write failed: " + e.Message); }
+            bool gone = WaitForSingleObject(proc, graceMs) == 0;   // WAIT_OBJECT_0
+            Note(gone ? "relay left within the grace" : "grace expired; terminating job");
+        } else {
+            Note("stop requested (" + why + "); terminating job");
+        }
         if (job != IntPtr.Zero) TerminateJobObject(job, 0);
         if (proc != IntPtr.Zero) WaitForSingleObject(proc, 15000);
     }
 
-    protected override void OnStop() { Halt("stop"); }
-    protected override void OnShutdown() { Halt("shutdown"); }
+    protected override void OnStop() { RequestAdditionalTime(50000); Halt("stop", 30000); }
+    protected override void OnShutdown() { Halt("shutdown", 4000); }
 }

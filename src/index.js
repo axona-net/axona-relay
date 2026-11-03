@@ -49,6 +49,7 @@ import { renderCtx } from './logctx.js';
 import { readFile } from 'node:fs/promises';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { buildHealthDump } from './healthdump.js';
+import { watchStopFile } from './stopfile.js';
 
 const RELAY_VERSION = JSON.parse(
   await readFile(new URL('../package.json', import.meta.url), 'utf8')).version;
@@ -277,6 +278,10 @@ async function main() {
   process.on('relay:quit', () => shutdown('quit'));
   process.on('SIGINT',  () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // 6a (Closer-Born v0.6): the Windows service wrapper asks for this same
+  // graceful shutdown (peer.leave() hands off every root and backup) by
+  // writing RELAY_STOP_FILE; it terminates the job only after its grace.
+  watchStopFile(process.env.RELAY_STOP_FILE, (why) => shutdown(why));
 
   // OBSERVABILITY (#58/#60): an on-demand health dump, because a headless relay
   // had NO query surface at all. health() carries per-role children counts and
