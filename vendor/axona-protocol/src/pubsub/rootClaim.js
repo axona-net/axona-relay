@@ -384,6 +384,15 @@ export class RootClaim {
       }
       role._inheritedMetricsOn = 0;
     }
+    // 6c: a promoted backup adopts the standing lease its principal replicated.
+    if (isRoot && role._inheritedStandingUntil) {
+      const now = this.m._now();
+      if (role._inheritedStandingUntil > now && role._inheritedStandingUntil > (role.standingUntil || 0)) {
+        role.standingUntil = role._inheritedStandingUntil;
+        this.m._log('info', 'root-inherited-standing', { topic: idHex(role.topicId).slice(0, 12), until: role.standingUntil });
+      }
+      role._inheritedStandingUntil = 0;
+    }
     return { committed: true, reason: why };
   }
 

@@ -83,7 +83,7 @@ import {
   MERGE_RETENTION_MS, MERGE_OFFER_TIMEOUT_MS, MERGE_WRITE_RESERVE_ENTRIES, MERGE_WRITE_RESERVE_BYTES,
 } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
-import { makeMergeState, RootClaim } from './rootClaim.js';
+import { makeMergeState, RootClaim, makeRole } from './rootClaim.js';
 import { dispatchVerdict } from './dispatch.js';
 import { sha256Hex } from './post.js';
 
@@ -109,7 +109,7 @@ export const mergeMachineMethods = {
    */
   _cutHolds(role, cut) {
     if (!role) return false;
-    if (role.merge?.gate) return false;
+    if (role.merge?.gate && !role.merge.gate.staged) return false;   // 3b: a staged round's gate takes no write away from L
     // DISMANTLING (Topic Lifetime 4.5): a root whose termination began takes no
     // write; a stamped write arriving after the install is refused here and the
     // publisher's own re-send forms the next generation at a clean role.
@@ -165,9 +165,22 @@ export const mergeMachineMethods = {
   _mergeAbort(role, why, extra = {}) {
     if (!role?.merge?.gate) return false;
     const corr = role.merge.gate.corr;
+    this._mergeUnpinDeferred(role, role.sync.openMerges?.get(corr));   // 6BG-2: a deferred round's pins go with it
     this._log('warn', 'merge-abort', { topic: idHex(role.topicId).slice(0, 12), why, corr: corr.slice(0, 8), ...extra });
     this._mergeCloseCorr(role, corr);
+    // 3e step 6 (cutover): an aborted round is RETRIED. The standing candidate
+    // would otherwise refuse its own re-nomination (a claim never wins over
+    // itself) and the next verify would offer nothing, leaving two roots for
+    // good. Clearing it lets the next trigger issue a new OFFER with a new corr.
+    if (this._cutover && role.merge.candidate) role.merge.candidate = null;
     return this._mergeGateClear(role, why, extra);
+  },
+  /** 6BG-2: release the pins a deferred step 5 took, unless completion now owns them. */
+  _mergeUnpinDeferred(role, m) {
+    if (!m?.deferPinned || role.merge?.completing) return;
+    for (const id of m.manifest.bodies) role.merge.pins.delete(id);
+    for (const id of m.manifest.dels) role.merge.pins.delete(id);
+    m.deferPinned = false;
   },
   /** A corr this node ended (abort, refusal, completion) stays closed: a late PULLUP under it is stale, never a fresh open. Bounded. */
   _mergeCloseCorr(role, corr) {
@@ -193,7 +206,13 @@ export const mergeMachineMethods = {
       for (const [corr, m] of role.sync.openMerges || []) {
         if (m.state === 'offered' && now - m.offeredAt >= MERGE_OFFER_TIMEOUT_MS) {
           this._mergeCloseCorr(role, corr);
-          if (m.reached === false || !role.isRoot || role.merge?.gate) {
+          if (this._cutover) {
+            // 3e step 6 (cutover): silence is never a winner. The round closes,
+            // the candidate is cleared so the next verify offers again, and L
+            // keeps its root; no demotion toward a node that never answered.
+            this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null, cutover: true });
+            if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
+          } else if (m.reached === false || !role.isRoot || role.merge?.gate) {
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null });
           } else {
             this._log('warn', 'merge-legacy-fallback', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), cache: role.cache.length });
@@ -206,10 +225,12 @@ export const mergeMachineMethods = {
         if (p.state === 'acked' && now - p.tS >= MERGE_RETENTION_MS) {
           this._mergeReleasePins(role, p, 'retention-expired');
           role.sync.openPulls.delete(corr);
+          this._stageEnd(role, corr, 'retention-expired');
           this._log('warn', 'merge-retention-expired', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), loser: p.loser.slice(0, 10), heldMs: now - p.tS });
         } else if (p.state === 'pulling' && now - p.startedAt >= MERGE_TIMEOUT_MS) {
           this._mergeReleasePins(role, p, 'pull-timeout');
           role.sync.openPulls.delete(corr);
+          this._stageEnd(role, corr, 'pull-timeout');
           this._log('warn', 'merge-pull-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8) });
         }
       }
@@ -264,6 +285,7 @@ export const mergeMachineMethods = {
       return false;
     }
     if (!gate) return false;
+    if (gate.staged) return false;   // 3b: L stamps through a staged round
     return this._mergeGateForward(topicBig, type, payload, role, gate);
   },
   _mergeGateForward(topicBig, type, payload, role, gate) {
@@ -320,6 +342,15 @@ export const mergeMachineMethods = {
   _mergeWinnerReminted(f, gotEpoch) {
     const role = this.axonRoles.get(f.topicBig);
     if (!role?.merge?.gate || role.merge.gate.corr !== f.merge.corr) return;
+    if (this._cutover) {
+      // CUT-1 (Orion c0a842d2): under cutover the abort clears the candidate,
+      // so recording it first lost the new epoch and nothing was offered
+      // again. Abort, then nominate the re-minted winner afresh: a new OFFER
+      // under a new corr carries the new epoch.
+      this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
+      this._mergeCandidate(f.topicBig, f.rootHex, gotEpoch | 0, 'reminted');
+      return;
+    }
     role.merge.candidate = { id: f.rootHex, epoch: gotEpoch | 0, source: 'reminted', at: this._now() };   // the next OFFER carries the new epoch
     this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
   },
@@ -351,17 +382,31 @@ export const mergeMachineMethods = {
     for (const [corr, m] of role.sync.openMerges) {
       if (m.winner === c.id) {
         if (m.loserEpoch >= (role.epoch | 0)) return false;    // standing offer to this winner at this incarnation
-        role.sync.openMerges.delete(corr);                      // superseded by a higher loserEpoch
+        this._mergeCloseCorr(role, corr);                       // superseded by a higher loserEpoch (HB-2: closed, not merely deleted)
       }
     }
     const corr = randomNonce() + randomNonce();
     const timing = this._mergeTiming();
     role.sync.openMerges.set(corr, { winner: c.id, winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, state: 'offered', snapshot: null, manifest: null, lastCursorSent: null, offeredAt: this._now(), boundAt: 0, tB: 0, timing });
     const rec = role.sync.openMerges.get(corr);
-    const sent = this._route(idBig(c.id), T.MERGE_OFFER, {
+    const offer = {
       topicId: idHex(topicBig), corr, loser: idHex(this.nodeId), loserEpoch: role.epoch | 0,
       hw: this._highWater(role), lw: this._lowWater(role), count: role.cache.length, timing,
-    });
+      // Part 7 capability gate: this loser runs the staged handover (3e), so a
+      // candidate with no root role may stage from it. An old loser sends no
+      // `handoff`, and a new candidate then refuses not-root as before.
+      ...(this._cutover ? { handoff: 1 } : {}),
+    };
+    // Part 7 identity binding: a loser with a node identity signs the claim
+    // (handoffBinding.js), so a hop cannot add it to an old loser's offer.
+    // HB-2 (Orion 3046d876): signing is async; an offer whose round was
+    // superseded or closed meanwhile is not sent.
+    const sent = (this._cutover && this._nodeIdentity)
+      ? this._signHandoff(offer, lc(c.id)).then((b) => {
+          if (this.axonRoles.get(topicBig) !== role || !role.isRoot || role.sync.openMerges.get(corr) !== rec) return { consumed: false };
+          return this._route(idBig(c.id), T.MERGE_OFFER, { ...offer, ...(b || {}) });
+        })
+      : this._route(idBig(c.id), T.MERGE_OFFER, offer);
     // Did the offer reach anyone? A failed verdict means W is unreachable, not
     // legacy: the sweep then drops the record instead of falling back.
     Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'failed' ? false : true; });
@@ -372,20 +417,36 @@ export const mergeMachineMethods = {
   // ── step 2 (W): the OFFER arrives; evaluate the relation, then pull ────
   _onMergeOffer(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    this._noteReturn(meta, [meta?.originId, payload?.loser]);          // return route (Closer-Born v0.6)
     if (!this._mergeCapable) return 'consumed';
     let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
     const loser = lc(payload.loser);
     if (!isHexId(loser) || typeof payload.corr !== 'string' || idBig(loser) === this.nodeId) return 'consumed';
     const role = this.axonRoles.get(topicBig);
-    if (!role || !role.isRoot) {
-      // NOT A ROOT HERE: answer, never stay silent. Silence reads as a legacy
-      // winner at the loser (the fallback) and would demote it toward a node
-      // that holds no claim — seen on the sim when a hand-forked root at a
-      // higher epoch had already absorbed the true root and then named it.
+    // NOT A ROOT HERE: answer, never stay silent. Silence reads as a legacy
+    // winner at the loser (the fallback) and would demote it toward a node
+    // that holds no claim — seen on the sim when a hand-forked root at a
+    // higher epoch had already absorbed the true root and then named it.
+    const notRoot = (r) => {
       this._log('info', 'merge-offer-not-root', { topic: idHex(topicBig).slice(0, 12), from: loser.slice(0, 10) });
-      this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: role?.epoch | 0, loser, loserEpoch: Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0, disposition: 'not-root' });
+      this._route(idBig(loser), T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: r?.epoch | 0, loser, loserEpoch: Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0, disposition: 'not-root' });
+    };
+    // Part 7 identity binding: an armed candidate stages only when the loser
+    // itself signed `handoff` (async verify; the role is re-read after it).
+    if ((!role || !role.isRoot) && this._cutover && this._handoffBinding && payload.handoff === 1) {
+      this._verifyHandoff(payload, loser).then((bound) => {
+        const r = this.axonRoles.get(topicBig);
+        // HB-1 (Orion 3046d876): became root meanwhile: the offer is evaluated
+        // root to root (outranked or pull), never dropped in silence.
+        if (r?.isRoot) { this._onMergeOffer(payload, meta); return; }
+        if (bound && this._stageOffer(topicBig, r, loser, payload)) return;
+        if (!bound) this._log('warn', 'merge-stage-unbound', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), loser: loser.slice(0, 10), signed: typeof payload.handoffSig === 'string' });
+        notRoot(r);
+      }, () => notRoot(this.axonRoles.get(topicBig)));
       return 'consumed';
     }
+    if ((!role || !role.isRoot) && this._cutover && this._stageOffer(topicBig, role, loser, payload)) return 'consumed';   // 3b
+    if (!role || !role.isRoot) { notRoot(role); return 'consumed'; }
     const loserEpoch = Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0;
     // THE RELATION FIRST: W pulls only from a claim it wins over. If the
     // offered claim wins over W's own, W is the loser and offers instead.
@@ -415,10 +476,86 @@ export const mergeMachineMethods = {
     this._log('info', 'merge-pull-start', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), loser: loser.slice(0, 10), loserEpoch, offered: payload.count ?? null });
     return 'consumed';
   },
+  // ── 3b (cutover): a closer node with no root role is offered the win ──
+  // It STAGES: a role that serves nothing pulls the loser's whole cache under
+  // corr; it takes ROOT only when the loser's merge-bearing SUB completes the
+  // round (step 5), at one above the larger of its known epoch and the
+  // loser's. Refused (not-root, as before): a bridge, a saturated node, an
+  // offer with no custody, a loser not farther from the topic than this node.
+  // A second contender while staging is refused 'busy'. Returns true when the
+  // offer was answered here.
+  _stageOffer(topicBig, role, loser, payload) {
+    if (this._neverRoot || (typeof this.saturated === 'function' && this.saturated())) return false;
+    // Part 7 capability gate (David 2026-11-03 "go ahead with Part 7"): stage
+    // only from a loser that advertises the staged handover. An old loser
+    // forwards writes to a winner that cannot stamp (no staged-gate
+    // exemption), so its offer takes the existing path: refused not-root.
+    if (payload.handoff !== 1) { this._log('info', 'merge-stage-legacy', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), loser: String(loser).slice(0, 10) }); return false; }
+    const custody = (payload.count | 0) > 0 || Number.isFinite(payload.hw);
+    if (!custody) return false;
+    let loserBig; try { loserBig = idBig(loser); } catch { return false; }
+    if ((this.nodeId ^ topicBig) >= (loserBig ^ topicBig)) return false;
+    const loserEpoch = Number.isInteger(payload.loserEpoch) ? payload.loserEpoch : 0;
+    const refuse = (disposition) => this._route(loserBig, T.REPLAYACK, { topicId: payload.topicId, corr: payload.corr, winner: idHex(this.nodeId), winnerEpoch: role?.epoch | 0, loser, loserEpoch, disposition });
+    if (!this._mergeTimingAccepted(payload.timing)) { this._log('warn', 'merge-refused-timing', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), staging: true }); refuse('refused-timing'); return true; }
+    if (role?.staging && role.staging.corr !== payload.corr) { this._log('info', 'merge-stage-busy', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), staging: role.staging.corr.slice(0, 8) }); refuse('busy'); return true; }
+    if (role?.sync?.openPulls?.has(payload.corr)) return true;
+    let created = false;
+    if (!role) { role = makeRole(topicBig, false, this._now()); this.axonRoles.set(topicBig, role); created = true; }
+    role.staging = { corr: payload.corr, loser, loserEpoch, created, at: this._now() };
+    if (!role.merge) role.merge = makeMergeState();
+    role.sync.openPulls.set(payload.corr, { loser, loserEpoch, cursor: null, framesIn: 0, held: 0, sent: 0, startedAt: this._now(), timing: { ...payload.timing }, state: 'pulling', manifest: { bodies: [], dels: [] }, header: null, tS: 0 });
+    this._mergePull(topicBig, role, payload.corr, null);
+    this._log('info', 'merge-stage-start', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), loser: loser.slice(0, 10), loserEpoch, created, offered: payload.count ?? null });
+    return true;
+  },
+  /** 3b: a role created only to stage serves nothing; SUB and PUB go to the incumbent by name. The loser's own merge-bearing SUB passes (it completes the round). */
+  _stagingIntercept(topicBig, type, payload) {
+    const role = this.axonRoles.get(topicBig);
+    const st = role?.staging;
+    if (!st || role.isRoot) return false;
+    // 3B-1 (Orion 06b0739f): PUB and KILL stop at EVERY staged non-root role;
+    // a CHILD or BACKUP stager keeps seating and renewing its own SUBs.
+    if (type === T.SUB && !st.created) return false;
+    if (type === T.SUB && payload.merge && lc(payload.subscriberId) === st.loser) return false;
+    // 3B-3: a frame this stager already forwarded came back (the loser is
+    // gone or unreachable): it ends here, once, instead of bouncing until
+    // the pull times out. The publisher's own flight retries.
+    if (typeof payload.stageFwd === 'string') {
+      this._log('info', 'merge-stage-return', { topic: idHex(topicBig).slice(0, 12), type });
+      this._undeliverable(type, topicBig, 'merge-stage-return');
+      return true;
+    }
+    this._send(type, { ...payload, via: [st.loser], stageFwd: st.corr.slice(0, 16) });
+    return true;
+  },
+  /** 3b: a staged round that ends without completion; a role created only to stage is discarded. */
+  _stageEnd(role, corr, why) {
+    const st = role?.staging;
+    if (!st || st.corr !== corr) return;
+    role.staging = null;
+    if (st.created && !role.isRoot) this.axonRoles.delete(role.topicId);
+    this._log('warn', 'merge-stage-abandoned', { topic: idHex(role.topicId).slice(0, 12), corr: String(corr).slice(0, 8), why, discarded: !!(st.created && !role.isRoot) });
+  },
+  /** 3b step 5: the loser's merge-bearing SUB completed the round; the stager takes ROOT. */
+  _stagePromote(role, p, corr) {
+    const st = role.staging;
+    if (!st || st.corr !== corr) return;
+    role.staging = null;
+    const flip = this._rootClaim._set(role, true, 'staging-complete');
+    if (!flip.committed) { this._log('warn', 'merge-stage-abandoned', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), why: 'flip-refused' }); return; }
+    // CB-2: one above every epoch this node knows AND the loser's.
+    role.epoch = Math.max(role.epoch | 0, (p.loserEpoch | 0) + 1);
+    this._upstream.delete(role.topicId);
+    role.formedAt = this._now(); role.lastVerify = 0;
+    this._announceRoot(role.topicId);
+    this._log('info', 'merge-stage-promoted', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), epoch: role.epoch, created: st.created });
+    this._noteLoserSuccessor(role, p.loser);   // 6b: the loser served the whole pull (successorGate only)
+  },
   _mergePull(topicBig, role, corr, cursor) {
     const p = role.sync.openPulls.get(corr);
     if (!p) return;
-    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing } });
+    this._emitPullUp(idBig(p.loser), { topicId: idHex(topicBig), corr, parentId: idHex(this.nodeId), winnerEpoch: role.epoch | 0, cursor, sinceHw: 0, timing: { ...p.timing }, ...(role.staging?.corr === corr ? { staged: true, handoff: 1, ...(this._successorGate && this._processKind === 'app' ? { ephemeral: 1, ...(this._hostTag ? { fdHost: this._hostTag } : {}) } : {}) } : {}) });
   },
 
   // ── step 3 (L): the bound PULLUP, the cut, the header, the frames ──────
@@ -447,14 +584,35 @@ export const mergeMachineMethods = {
       // THE BIND. Timing must equal what was offered, as numbers.
       if (!sameTiming(payload.timing, m.timing)) {
         this._log('warn', 'merge-refused-timing', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), offered: m.timing, echoed: payload.timing ?? null });
-        role.sync.openMerges.delete(corr);
+        this._mergeCloseCorr(role, corr);
+        if (this._cutover && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;   // P7-1: the same stuck candidate
         return;
       }
       if (!role.isRoot || role.merge?.gate || role.merge?.completing) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: role.isRoot ? 'busy' : 'not-root' }); return; }
+      // Part 7: a staged pull without the capability is refused, never run
+      // unstaged: the winner IS staged and cannot stamp, so an unstaged gate
+      // would forward writes it never accepts. The winner's pull times out,
+      // its stage is abandoned, and this node keeps the root.
+      if (this._cutover && payload.staged === true && payload.handoff !== 1) {
+        this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'staged-without-handoff' });
+        // P7-1 (Orion 7af4822f): close the round AND clear the candidate, or
+        // the sweep never sees this corr and no later verify offers again.
+        this._mergeCloseCorr(role, corr);
+        if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
+        return;
+      }
       m.winnerEpoch = winnerEpoch;
       // CUT + GATE, then the export, all in this synchronous run.
       const gate = this._mergeCut(topicBig, { winner: requester, winnerEpoch, corr });
       if (!gate) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'cut-refused' }); return; }
+      // 3b/3e step 1: a STAGED winner stamps nothing until it completes, so L
+      // keeps stamping through the round; writes after the cut reach W after
+      // completion by the SUB high-water pull. The gate stays for the round's
+      // bookkeeping and forwards nothing.
+      if (this._cutover && payload.staged === true) gate.staged = true;   // Part 7: handoff checked above, before the cut
+      // 6b gate: the winner says it is an app process (ephemeral) and names its host.
+      m.ephemeral = payload.ephemeral === 1;
+      m.winnerHost = (typeof payload.fdHost === 'string') ? payload.fdHost.slice(0, 32) : null;
       const bodies = role.cache.slice().sort((a, b) => a.publishTs - b.publishTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
         .map((c) => ({ json: c.json, publishTs: c.publishTs, msgId: c.msgId, seq: c.seq, bytes: c.bytes }));
       const dels = this._activeDels(role).sort((a, b) => a.killTs - b.killTs || (a.msgId < b.msgId ? -1 : a.msgId > b.msgId ? 1 : 0))
@@ -541,6 +699,7 @@ export const mergeMachineMethods = {
     if (payload.refused) {
       this._log('warn', 'merge-pull-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: payload.refused });
       role.sync.openPulls.delete(corr);
+      this._stageEnd(role, corr, 'pull-refused');
       return;
     }
     if (payload.header) {
@@ -555,6 +714,7 @@ export const mergeMachineMethods = {
         this._log('warn', 'refused-capacity', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), baselineN, baselineB, bodies: h.bodies, bytes: h.bytes, cacheMax: this._cacheMax, cacheBytes: this._cacheBytes });
         this._route(idBig(p.loser), T.REPLAYACK, { topicId: payload.topicId, corr, winner: idHex(this.nodeId), winnerEpoch: role.epoch | 0, loser: p.loser, loserEpoch: p.loserEpoch, disposition: 'refused-capacity', retained: 0, delsActive: 0 });
         role.sync.openPulls.delete(corr);
+        this._stageEnd(role, corr, 'refused-capacity');
         return;
       }
       p.header = { ...h };
@@ -601,6 +761,7 @@ export const mergeMachineMethods = {
   // ── step 5 (L): the terminal ack; the lease; the flip with the token ───
   _onReplayAck(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    if (payload?.disposition === 'no-role') { this._onProbeNack(payload); return 'consumed'; }   // 3a: a probe NACK, not a merge frame
     let topicBig; try { topicBig = idBig(payload.topicId); } catch { return 'consumed'; }
     const role = this.axonRoles.get(topicBig);
     const corr = payload.corr;
@@ -610,7 +771,7 @@ export const mergeMachineMethods = {
     // the epoch the offer named (a non-root has none), so the six-field match
     // below is for the terminal ack only.
     const three = lc(payload.winner) === m.winner && lc(payload.loser) === lc(idHex(this.nodeId)) && lc(payload.topicId) === idHex(topicBig);
-    if (payload.disposition === 'refused-timing' || payload.disposition === 'refused-capacity' || payload.disposition === 'not-root' || payload.disposition === 'outranked') {
+    if (payload.disposition === 'refused-timing' || payload.disposition === 'refused-capacity' || payload.disposition === 'not-root' || payload.disposition === 'outranked' || (this._cutover && payload.disposition === 'busy')) {
       if (!three) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: 'refusal-fields' }); return 'consumed'; }
       this._log('warn', 'merge-refused', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), why: payload.disposition });
       this._mergeCloseCorr(role, corr);
@@ -618,7 +779,13 @@ export const mergeMachineMethods = {
       // A winner that holds no claim is no candidate: drop the record so the
       // next trigger evaluates afresh instead of re-offering to a child. A
       // winner our claim outranks is no candidate either: it offers to us.
-      if ((payload.disposition === 'not-root' || payload.disposition === 'outranked') && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
+      // CUT-2 (Orion c0a842d2): under cutover a TRANSIENT refusal clears it
+      // too, or the standing candidate refuses its own re-nomination and the
+      // two roots stand for good.
+      const transient = this._cutover && (payload.disposition === 'refused-capacity' || payload.disposition === 'refused-timing' || payload.disposition === 'busy');
+      // 3b: a refusing nominee's beacon, if one was planted, is withdrawn.
+      if (this._cutover && this._rootBeacons.get(topicBig)?.root === m.winner) this._rootBeacons.delete(topicBig);
+      if ((payload.disposition === 'not-root' || payload.disposition === 'outranked' || transient) && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
       return 'consumed';
     }
     const six = three && (payload.winnerEpoch | 0) === (m.winnerEpoch | 0) && (payload.loserEpoch | 0) === (m.loserEpoch | 0);
@@ -642,9 +809,32 @@ export const mergeMachineMethods = {
       this._mergeAbort(role, 'ack-short');
       return 'consumed';
     }
-    // STEP 5, synchronous from here to the flip: re-check the lease, pin the
-    // export, mint the token, demote with it. The SUB demote() sends is an
-    // ordinary renewal; completion is claimed AFTER the flip, below.
+    // 6b GATE (Closer-Born v0.6; David 2026-11-03 "go ahead with 6b as the
+    // gate"; successorGate): an EPHEMERAL winner (an app process) takes the
+    // root only once a second holder is current. The loser holds step 5 —
+    // the demote, the release, the winner's promotion — until one of its own
+    // backups other than the winner, on another host, renewed within RENEW_MS
+    // at or above this root's high-water; _step5Tick re-runs it. The lease
+    // still bounds the round: past it, step 5 aborts and this node keeps the root.
+    if (this._successorGate && m.ephemeral && !this._secondHolderCurrent(role, m)) {
+      if (!m.deferred) this._log('info', 'merge-step5-deferred', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), why: 'no-second-holder' });
+      // 6BG-2 (Orion 12a4f349): the export is pinned while it waits, or its
+      // bodies and tombstones could expire at this live root before step 5.
+      if (!m.deferPinned) {
+        for (const id of m.manifest.bodies) role.merge.pins.add(id);
+        for (const id of m.manifest.dels) role.merge.pins.add(id);
+        m.deferPinned = true;
+      }
+      m.deferred = { leaseOk };
+      return 'consumed';
+    }
+    return this._mergeStep5(role, topicBig, corr, m, leaseOk);
+  },
+
+  // STEP 5, synchronous from here to the flip: re-check the lease, pin the
+  // export, mint the token, demote with it. The SUB demote() sends is an
+  // ordinary renewal; completion is claimed AFTER the flip, below.
+  _mergeStep5(role, topicBig, corr, m, leaseOk) {
     if (!leaseOk()) { this._log('warn', 'merge-ack-expired', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), at: 'commit' }); this._mergeAbort(role, 'ack-expired'); return 'consumed'; }
     for (const id of m.manifest.bodies) role.merge.pins.add(id);
     for (const id of m.manifest.dels) role.merge.pins.add(id);
@@ -693,6 +883,7 @@ export const mergeMachineMethods = {
     role.sync.openPulls.delete(corr);
     this._route(idBig(subHex), T.MERGE_CLOSED, { topicId: idHex(role.topicId), corr, winnerEpoch: role.epoch | 0 });
     this._log('info', 'merge-complete', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), loser: subHex.slice(0, 10), held: p.held, sent: p.sent, sinceAckMs: this._now() - p.tS });
+    this._stagePromote(role, p, corr);   // 3b: no-op unless this round was staged
     return true;
   },
   _onMergeClosed(payload, meta) {

@@ -60,11 +60,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'LEASE_ESTABLISHED',
       retry: Retry.IDEMPOTENT, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: 'regionOk+admitRole+meshBareSelfRootGuard',
-      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach'] },   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
-      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string' } },
+      projection: { payload: ['topicId', 'subscriberId', 'since', 'latest', 'hw', 'lw', 'merge', 'standby', 'demand', 'gen', 'attach', 'unpinned', 'fd', 'standing'] },   // standing: 6c, the lease (ms) a standing subscription asks for   // fd: 6b, the sender's failure domain { kind, host } (successorGate only)   // unpinned: 3d, the sender holds no pin (attachEcho; Orion 3D-2)   // attach: the attachment nonce the reply echoes (Topic Lifetime 4.1, armed only)   // merge: the completion block while a loser is completing (dual-root 4(d)); standby/demand/gen: the seat declaration (Topic Lifetime 4.3, armed only)root 4(d))
+      schema: { require: ['topicId', 'subscriberId'], types: { topicId: 'string', subscriberId: 'string', standby: 'boolean', demand: 'number', gen: 'obj', attach: 'string', unpinned: 'boolean', fd: 'obj', standing: 'number' } },
       idempotency: { from: ['topicId', 'subscriberId'] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(11),
+      errorContract: ['refuse-region', 'refuse-role-budget', 'merge-stale', 'refuse-dismantling'], traceFields: ['topicId', 'subscriberId'], budget: budget(14),
       note: 'establishes/renews a delivery lease routed toward topicId; advertises the subscriber replay cursor (hw/lw)',
     }),
     ({
@@ -241,12 +241,12 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'REPLAY_SENT',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: NA, replayCursorType: 'HIGHWATER', orderingModel: 'ARRIVAL',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing'] },   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
+      projection: { payload: ['topicId', 'sinceHw', 'parentId', 'corr', 'winnerEpoch', 'cursor', 'timing', 'staged', 'handoff', 'probe', 'ephemeral', 'fdHost'] },   // ephemeral/fdHost: 6b gate, an app-process winner and its host   // probe: 3a, the try's nonce a role-less node echoes in its NACK   // staged/handoff: a staged pull and its capability (Closer-Born 3b, Part 7)   // corr/winnerEpoch/cursor/timing: a merge pull (dual-root 4(d))
       schema: { require: ['topicId', 'parentId'], types: { topicId: 'string', parentId: 'string', corr: 'string' } },
       // catch-up conversation; parentId is the return destination the REPLAYUP is routed back to (its routing target).
       conversation: { role: REQ, opposite: 'pubsub:replayup', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'parentId', remote: 'targetId' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(7),
+      errorContract: ['no-newer-history', 'merge-stale', 'merge-cursor-invalid', 'refused-timing', 'refused-export-bound'], traceFields: ['topicId', 'parentId'], budget: budget(12),
       note: 'catch-up trigger to the parent holder from cursor sinceHw; answered by REPLAYUP routed back to parentId',
     }),
     ({
@@ -280,11 +280,11 @@ function rowDefs() {
       evidence: EvidenceLevel.ROUTED, proves: Proves.ROUTING, outcome: 'RoutingOutcome', terminalOutcome: 'MERGE_PULL_STARTED',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
       authGuard: NA, admissionGuard: 'mergeTimingLimits', placementGuard: 'claimWins',
-      projection: { payload: ['topicId', 'corr', 'loser', 'loserEpoch', 'hw', 'lw', 'count', 'timing'] },
+      projection: { payload: ['topicId', 'corr', 'loser', 'loserEpoch', 'hw', 'lw', 'count', 'timing', 'handoff', 'handoffSig', 'handoffPub'] },   // handoffSig/handoffPub: the loser's signature over the claim (Part 7 binding)   // handoff: the loser runs the staged handover (Closer-Born Part 7)
       schema: { require: ['topicId', 'corr', 'loser'], types: { topicId: 'string', corr: 'string', loser: 'string' } },
       conversation: { role: REQ, opposite: 'pubsub:replayack', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'corr', remote: 'corr' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refused-timing', 'merge-offer-loses'], traceFields: ['topicId', 'corr'], budget: budget(8),
+      errorContract: ['refused-timing', 'merge-offer-loses'], traceFields: ['topicId', 'corr'], budget: budget(11),
       note: 'dual-root 4(d) step 1: the loser offers its claim; the winner evaluates the Part 3 relation and timing, then pulls under corr',
     }),
     ({
@@ -292,11 +292,11 @@ function rowDefs() {
       evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'EXPORT_RETAINED',
       retry: Retry.NONE, topicProfile: PROFILE, eventIdScheme: 'CORR_ID', replayCursorType: NA, orderingModel: 'NONE',
       authGuard: NA, admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'corr', 'winner', 'winnerEpoch', 'loser', 'loserEpoch', 'retained', 'delsActive', 'hash', 'disposition'], meta: ['targetId'] },
+      projection: { payload: ['topicId', 'corr', 'winner', 'winnerEpoch', 'loser', 'loserEpoch', 'retained', 'delsActive', 'hash', 'disposition', 'from'], meta: ['targetId'] },   // from: 3a, the node answering no-role
       schema: { require: ['topicId', 'corr'], types: { topicId: 'string', corr: 'string' } },
       conversation: { role: RESP, opposite: 'pubsub:mergeoffer', pairing: [{ local: 'topicId', remote: 'topicId' }, { local: 'corr', remote: 'corr' }] },
       capabilityRange: { profile: PROFILE },
-      errorContract: ['refused-capacity', 'refused-timing', 'not-root', 'outranked', 'merge-ack-short', 'merge-ack-expired', 'merge-stale'], traceFields: ['topicId', 'corr'], budget: budget(11),
+      errorContract: ['refused-capacity', 'refused-timing', 'not-root', 'outranked', 'merge-ack-short', 'merge-ack-expired', 'merge-stale', 'no-role'], traceFields: ['topicId', 'corr'], budget: budget(12),
       note: 'dual-root 4(d) step 4: the winner\'s TERMINAL ack of the whole export under corr (counts against the manifest + hash) or a refusal; step 5 at the loser matches all six fields and the retention check',
     }),
     ({
@@ -368,12 +368,12 @@ function rowDefs() {
       evidence: EvidenceLevel.RETAINED, proves: Proves.RETENTION, outcome: 'RetentionOutcome', terminalOutcome: 'REPLICA_UNION_APPLIED',
       retry: Retry.NATURAL, topicProfile: PROFILE, eventIdScheme: 'MSGID_CONTENT_V1', replayCursorType: NA, orderingModel: 'UNION_IDEMPOTENT',
       authGuard: 'verifyEnvelope', admissionGuard: NA, placementGuard: NA,
-      projection: { payload: ['topicId', 'from', 'msgs', 'dels', 'gen', 'issuedAt'] },   // gen/issuedAt: the appointment's generation + issue stamp (Topic Lifetime 4.4, armed only)
-      schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr', gen: 'obj', issuedAt: 'number' } },
+      projection: { payload: ['topicId', 'from', 'msgs', 'dels', 'gen', 'issuedAt', 'standingRemainingMs'] },   // standingRemainingMs: 6c, the lease a promoted backup inherits   // gen/issuedAt: the appointment's generation + issue stamp (Topic Lifetime 4.4, armed only)
+      schema: { require: ['topicId'], types: { topicId: 'string', from: 'string', msgs: 'arr', dels: 'arr', gen: 'obj', issuedAt: 'number', standingRemainingMs: 'number' } },
       // No correlation and no conversation: a cohort spray keyed by an unsigned `from` is not an authenticated holder
       // subject and has no request/response pairing (F3). COUNT_HIGHWATER_HINT is rate gating, never an equality proof.
       capabilityRange: { profile: PROFILE, summaryStrategy: 'COUNT_HIGHWATER_HINT' },
-      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(6),
+      errorContract: ['drop-bad-envelope-entry'], traceFields: ['topicId'], budget: budget(7),
       note: 'cohort spray to K-closest; empty msgs+dels = liveness keepalive; union ingest is order-independent',
     }),
 

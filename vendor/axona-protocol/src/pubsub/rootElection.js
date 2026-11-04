@@ -288,6 +288,40 @@ export const rootElectionMethods = {
                 if (r && Array.isArray(r.path) && r.path.length) id = r.path[r.path.length - 1];
               } catch { /* keep the local result — greedy stays in effect */ }
             }
+            // 3d HINT REFRESH (Closer-Born v0.6; David 2026-11-03 "go ahead with
+            // 3d's hint refresh"; option hintRefresh). The network was asked
+            // only when the local closest was null or self, so a subscriber
+            // whose neighbour looks closer kept that guess however long it
+            // stayed unattached. Past the claim window unattached, ask the
+            // network (the DHT walk where the adapter has one, else the
+            // lookup) and take the closest node it visited when that is closer
+            // than the local guess and than this node.
+            const since = this._unattachedSince?.get(topicBig);
+            let refreshed = false;
+            if (this._hintRefresh && since != null && this._now() - since >= ROOT_CLAIM_MS
+                && (typeof this.dht.walk === 'function' || typeof this.dht.lookup === 'function')) {
+              try {
+                const r = await (typeof this.dht.walk === 'function' ? this.dht.walk(topicBig) : this.dht.lookup(topicBig));
+                const path = (r && Array.isArray(r.path)) ? r.path : [];
+                let cur = null; try { cur = id != null ? idBig(id) : null; } catch { cur = null; }
+                const bridge = this._closerBornBridge();   // VW-1: never the bridge
+                let best = null, bd = this.nodeId ^ topicBig;
+                // HR-1 (Orion 867c3048): the local guess may itself be the bridge.
+                const curIsBridge = cur != null && bridge != null && cur === bridge;
+                if (cur != null && cur !== this.nodeId && !curIsBridge && (cur ^ topicBig) < bd) { best = cur; bd = cur ^ topicBig; }
+                for (const p of path) {
+                  let b; try { b = idBig(p); } catch { continue; }
+                  if (b === this.nodeId || (bridge != null && b === bridge)) continue;
+                  const d = b ^ topicBig;
+                  if (d < bd) { bd = d; best = b; }
+                }
+                if ((best != null && best !== cur) || curIsBridge) {
+                  this._log('info', 'hint-refresh', { topic: idHex(topicBig).slice(0, 12), from: localHex ? localHex.slice(0, 10) : null, to: best != null ? lc(idHex(best)).slice(0, 10) : null, visited: path.length, ...(curIsBridge ? { dropped: 'bridge' } : {}) });
+                  id = best;   // null when the walk found nothing better than the dropped bridge: route greedily
+                  refreshed = best != null;
+                }
+              } catch { /* keep the local result */ }
+            }
             // Self-closest → leave the hint null so we route greedily toward the
             // bare topic id and become root as the terminus (don't via-pin to self).
             let hex = null;
@@ -304,7 +338,10 @@ export const rootElectionMethods = {
             // neuromorphic restructuring on the very next renewal.
             if (hex && this.mySubscriptions.has(topicBig) &&
                 !(this._upstream.get(topicBig) || []).length) {
-              this._emitSubscribe(topicBig, []);
+              // HR-2 (Orion 867c3048): a hint the refresh found came from a
+              // noCache walk (VW-3) that warmed no hop cache, so a greedy SUB
+              // strands at the same local minimum; name the hint instead.
+              this._emitSubscribe(topicBig, refreshed ? [hex] : []);
             }
             // Heal (publish/kill): a stranded publish/kill is RE-SENT toward the
             // true root by the persistent retry loop in refreshTick (until the
@@ -345,6 +382,18 @@ export const rootElectionMethods = {
     } catch { /* greedy fallback; background heal still applies */ }
   },
 
+  // The bridge's node id for the closer-born paths, which never nominate it
+  // (CB-1; the 3d hint refresh). The adapter's bridgeNodeId when it has one,
+  // else bridgeId; null when neither knows.
+  _closerBornBridge() {
+    let b = null;
+    try {
+      b = (typeof this.dht.bridgeNodeId === 'function') ? this.dht.bridgeNodeId()
+        : (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
+    } catch { b = null; }
+    try { return (b != null) ? idBig(b) : null; } catch { return null; }
+  },
+
   // Root self-verification (see the ROOT_VERIFY_* constants). Launch up to
   // BATCH iterative lookups per tick, NON-BLOCKING, for roots due a check. A
   // strictly-closer live node ⇒ this claim is spurious (or was overtaken):
@@ -365,9 +414,22 @@ export const rootElectionMethods = {
       if (!due) continue;
       role.lastVerify = now; launched++;
       this._verifyInflight.add(t);
+      const walkToo = this._verifyWalk && typeof this.dht.walk === 'function';
       Promise.resolve()
-        .then(() => this.dht.lookup(t))
+        .then(() => (walkToo
+          // Both, in parallel; the visited sets are united, and the closest
+          // node either one visited is the candidate below.
+          ? Promise.allSettled([this.dht.lookup(t), this.dht.walk(t)]).then(([a, b]) => {
+              const pa = a.status === 'fulfilled' && Array.isArray(a.value?.path) ? a.value.path : [];
+              const pb = b.status === 'fulfilled' && Array.isArray(b.value?.path) ? b.value.path : [];
+              if (pb.length) this._log('info', 'verify-walk', { topic: idHex(t).slice(0, 12), kclosest: pa.length, walk: pb.length, hops: b.value?.hops ?? null });
+              return { path: [...pa, ...pb] };
+            })
+          : this.dht.lookup(t)))
         .then((r) => {
+          // VW-2 (Orion 7908492c): a verify that settles after peer.stop() or
+          // leave() (both clear _verifyInflight) acts on nothing.
+          if (!this._verifyInflight.has(t)) return;
           this._verifyInflight.delete(t);
           // THE TERMINUS IS THE CLOSEST NODE THE WALK VISITED, NOT ITS LAST HOP
           // (dual-root packet (b), axona-docs 14a6bd8). The walk is greedy with no
@@ -378,19 +440,40 @@ export const rootElectionMethods = {
           // read hop 41, which was farther than self, so the claim stood. Reading
           // the closest visited node ends that split on the first verify.
           const path = (r && Array.isArray(r.path)) ? r.path : [];
+          // CB-1 (Orion 34db5e6d, packet 3b): under cutover the verify never
+          // nominates the bridge, which holds no root and no backup.
+          // VW-1 (Orion 7908492c): read the transport's real bridge id; bridgeId()
+          // is null on a real AxonaPeer (David's 2026-09-19 experiment).
+          const bridge = this._cutover ? this._closerBornBridge() : null;
           let cBig = null, cD = null;
           for (const id of path) {
             let b; try { b = idBig(id); } catch { continue; }
             if (b === this.nodeId) continue;
+            if (bridge != null && b === bridge) continue;
             const d = b ^ t;
             if (cD === null || d < cD) { cD = d; cBig = b; }
+          }
+          // 3c: the root keeps what this verify visited, for the replica pick.
+          if (this._replicaInherit) {
+            const live0 = this.axonRoles.get(t);
+            if (live0?.isRoot) {
+              // RI-1 (Orion 867c3048): dedup, never self or the bridge, CLOSEST
+              // first, then the bound; the raw path is in traversal order.
+              const skip = this._closerBornBridge();
+              const seen = new Map();
+              for (const id of path) { let b; try { b = idBig(id); } catch { continue; } if (b === this.nodeId || (skip != null && b === skip)) continue; seen.set(b, true); }
+              const ids = [...seen.keys()].sort((a, b) => ((a ^ t) < (b ^ t) ? -1 : 1)).slice(0, 16).map((b) => lc(idHex(b)));
+              live0.verifySeen = { at: this._now(), ids };
+            }
           }
           if (cBig === null) return;                              // nobody but self was visited: confirmed
           if (cD >= (this.nodeId ^ t)) return;                    // nothing strictly closer visited → keep the claim
           const live = this.axonRoles.get(t);
           if (!live || !live.isRoot) return;                      // already demoted meanwhile
           const hex = lc(idHex(cBig));
-          this._rootBeacons.set(t, { root: hex, at: this._now(), exp: this._now() + 2 * ROOT_VERIFY_MS, verified: true });
+          // 3b: under cutover no beacon is planted for a nominee before it
+          // accepts; the handover itself re-points this node.
+          if (!this._cutover) this._rootBeacons.set(t, { root: hex, at: this._now(), exp: this._now() + 2 * ROOT_VERIFY_MS, verified: true });
           this._rootVerifyCandidate(t, hex);
         })
         .catch(() => this._verifyInflight.delete(t));

@@ -26,7 +26,7 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS } from './constants.js';
+import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS, STANDING_LEASE_MAX_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
 import { makeRole } from './rootClaim.js';
 
@@ -128,14 +128,14 @@ export const syncEngineMethods = {
   // produces ({consumed, …}, or undefined from a non-reporting adapter) and
   // never rejects (_route contains that). The empty-root probe awaits it so a
   // try that reached nobody is not counted as a try.
-  _syncPullAwait(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null } = {}) {
+  _syncPullAwait(targetBig, topicBig, policyName, { sinceHw = 0, lw = null, role = null, probe = null } = {}) {
     if (policyName === 'SPLIT_UNION') {
       const peerHex = lc(idHex(targetBig));
       const prev = role.sync.pulledLw.get(peerHex);
       if (!(prev === undefined || lw < prev)) return false;
       role.sync.pulledLw.set(peerHex, lw);
     }
-    return this._emitPullUp(targetBig, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId) });
+    return this._emitPullUp(targetBig, { topicId: idHex(topicBig), sinceHw, parentId: idHex(this.nodeId), ...(typeof probe === 'string' ? { probe } : {}) });   // probe: 3a, a role-less target NACKs
   },
   // THE ONE PULLUP EMISSION SITE and THE ONE REPLAYUP EMISSION SITE
   // (smoke_emission_sites pins each verb to one `_route` in this engine). The
@@ -197,6 +197,8 @@ export const syncEngineMethods = {
     // backup's inherited value rather than letting a last-seen expiry outlive demand.
     if (full && this._replicateSubs && role.isRoot) {
       payload.metricsRemainingMs = role.metricsOn > this._now() ? (role.metricsOn - this._now()) : 0;
+      // 6c: the standing lease rides the same full push, so a promoted backup keeps it.
+      if (this._standingLease) payload.standingRemainingMs = role.standingUntil > this._now() ? (role.standingUntil - this._now()) : 0;
     }
     // TOPIC LIFETIME (4.1, 4.4; armed only): a REPLICATE names the generation it
     // appoints to and carries its own issue stamp, so the receiver can drop a
@@ -292,6 +294,7 @@ export const syncEngineMethods = {
         return;
       }
       if (!this._rootReplicas) return;                  // backup duty disabled on this node
+      if (this._neverRoot) return;                      // RI-2: a bridge never holds a backup
       let from = null;
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }
@@ -370,6 +373,10 @@ export const syncEngineMethods = {
       // remaining can never arm a longer-than-legal lease (Aster guard 1). Receiver-now
       // + remaining adds at most handoff transit, bounded by latency not clock offset —
       // soft-state tolerance, not exact expiry preservation. Never acted on as a backup.
+      if (this._standingLease && Number.isFinite(payload.standingRemainingMs)) {
+        const rs = Math.min(Math.max(0, payload.standingRemainingMs), STANDING_LEASE_MAX_MS);
+        role._inheritedStandingUntil = rs > 0 ? (this._now() + rs) : 0;   // 6c: adopted on promotion (rootClaim._set)
+      }
       if (this._replicateSubs && Number.isFinite(payload.metricsRemainingMs)) {
         const rem = Math.min(Math.max(0, payload.metricsRemainingMs), METRICS_LEASE_MS);
         role._inheritedMetricsOn = rem > 0 ? (this._now() + rem) : 0;

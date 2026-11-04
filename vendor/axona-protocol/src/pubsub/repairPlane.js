@@ -197,6 +197,8 @@ export const repairPlaneMethods = {
     // 1b-rep. Singleton-root replication (warm backup roots) — push each root's full
     //         cache to its ROOT_REPLICAS nearest neighbours so a successor is always
     //         warm.
+    this._successorTick();            // 6b (successorGate): an app-held root with no current successor re-seats before this push
+    this._step5Tick();                // 6b gate: a handover to an ephemeral winner completes once a second holder is current
     this._replicateRoots();
     this._emptyRootProbeSweep(now);   // v4.24.0: empty self-roots re-pull the cohort (bounded)
     // TOPIC LIFETIME (axona-docs 11288d7; behind TOPIC_LIFETIME): the standby
@@ -306,12 +308,15 @@ export const repairPlaneMethods = {
       // the same seat the dead reaper would have taken, just later.
       const backupSeat = role.backupOf !== null || this._backupTopics.has(t);
       const custodyAlive = this._custodyAlive(role, now);   // dual-root 4(d) v0.14: never reaped while it holds
+      // A root with a fresh metrics lease keeps publishing snapshots (read below).
+      // 6c (Orion 6C-2): a standing root publishes nothing, so the 24 h idle
+      // reaper must read the lease too; a metrics root never reached it only
+      // because its snapshots refresh lastTs.
+      const metricsLeased = role.isRoot && (role.metricsOn > now || this._standingLeased(role, now));   // 6c: a standing lease is held exactly as the metrics lease is
       const idleReap = this._roleIdleTtlMs > 0 && role.cache.length === 0
-        && !backupSeat && !custodyAlive && !role.dismantling
+        && !backupSeat && !custodyAlive && !role.dismantling && !metricsLeased
         && !this.mySubscriptions.has(t) && !this._hostedTopics.has(t)
         && this._roleIdleMs(role, now) > this._roleIdleTtlMs;
-      // A root with a fresh metrics lease keeps publishing snapshots (read below).
-      const metricsLeased = role.isRoot && role.metricsOn > now;
       // EMPTY-ROLE GRACE (David 2026-10-19, "address the root issue with unreaped
       // topics raised by Aster"). Measured on sfo3 grizzly1 over seven days of
       // 4.114.1: the reapers fire exactly as specified — 1,315 idle root reaps,
@@ -668,7 +673,11 @@ export const repairPlaneMethods = {
   // the tick (the 4.18.1 lesson).
   _emptyRootProbeSweep(now) {
     for (const [t, role] of this.axonRoles) {
-      if (!role.isRoot || role.cache.length) continue;
+      if (!role.isRoot || role.cache.length) {
+        if (role.holderDegraded && role.cache.length) { role.holderDegraded = null; this._log('info', 'holder-found', { topic: idHex(t).slice(0, 12), cache: role.cache.length }); }
+        continue;
+      }
+      if (role.holderDegraded === 'no-holder-found') continue;   // 3a: the probe budget is spent
       if (role.sync.probeInflight) continue;
       if (role.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) continue;
       if (role.sync.probeDeferred) {
@@ -709,6 +718,7 @@ export const repairPlaneMethods = {
   async _emptyRootProbe(topicBig) {
     const pre = this.axonRoles.get(topicBig);
     if (!pre || !pre.isRoot || pre.cache.length) return;      // filled meanwhile / demoted / gone
+    if (this._probeBudgetSpent(pre, topicBig)) return;        // HP-2 (Orion 3046d876): 3a's budget before any lookup
     if (pre.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) return;
     if (pre.sync.probeInflight) return;                        // (a): one try at a time; its verdicts decide whether it counted
     pre.sync.probeInflight = true; pre.sync.probeAt = this._now();
@@ -729,7 +739,8 @@ export const repairPlaneMethods = {
     //  · local findKClosest: cheap, but a cold node's thin table may know nobody
     //  · iterative lookup PATH: the traversal's hops; its tail is the closest
     //    node the network routed through before us = the likely prior holder
-    const cand = new Set();
+    const cand = new Set(), pathSet = new Set();
+    for (const h of (pre?.sync?.probeEvidence ?? [])) { try { const b = idBig(h); if (b !== this.nodeId) cand.add(b); } catch { /* */ } }   // 3a: evidence first
     if (typeof this.dht.findKClosest === 'function') {
       try {
         for (const id of (await this.dht.findKClosest(topicBig, EMPTY_ROOT_PROBE_FANOUT + 1)) || []) {
@@ -743,13 +754,15 @@ export const repairPlaneMethods = {
         const r = await this.dht.lookup(topicBig);
         for (const id of (r && Array.isArray(r.path) ? r.path : [])) {
           let b; try { b = idBig(id); } catch { continue; }
-          if (b !== this.nodeId) cand.add(b);
+          if (b !== this.nodeId) { cand.add(b); pathSet.add(b); }
         }
       } catch { /* best-effort */ }
     }
     // Re-check after the awaits: a REPLAYUP/HANDOFF may have landed meanwhile.
     const role = this.axonRoles.get(topicBig);
-    if (!role || !role.isRoot || role.cache.length || !cand.size) return;
+    if (!role || !role.isRoot || role.cache.length) return;
+    if (this._probeBudgetSpent(role, topicBig)) return;   // HP-2: also when nobody is left to ask
+    if (!cand.size) return;
     // Candidate hardening (#364-A2, diagnosis 2026-07-21): the probe chain
     // itself is sound (smoke_ghost_read: ungraceful root death heals from
     // backups) — live failures came from WHERE the probes went. Two rules:
@@ -762,12 +775,16 @@ export const repairPlaneMethods = {
     //    remain (a responder would have filled the cache and ended probing).
     if (!(role.sync.probed instanceof Set)) role.sync.probed = new Set();
     const reach = (b) => { try { return typeof this._isReachableId === 'function' && this._isReachableId(lc(idHex(b))); } catch { return false; } };
-    const ordered = [...cand].sort((a, b) => (reach(b) ? 1 : 0) - (reach(a) ? 1 : 0));
+    if (this._probeBudgetSpent(role, topicBig)) return;   // 3a: the probe stops; degraded: no-holder-found
+    const ordered = this._holderProbe ? this._orderProbeCandidates(role, cand, pathSet, reach)
+      : [...cand].sort((a, b) => (reach(b) ? 1 : 0) - (reach(a) ? 1 : 0));
     const fresh = ordered.filter((b) => !role.sync.probed.has(b));
     const targets = (fresh.length ? fresh : ordered).slice(0, EMPTY_ROOT_PROBE_FANOUT);
+    if (!targets.length) return;
+    const out = this._holderProbe ? this._openProbeTry(role, targets) : null;
     const sends = [];
     for (const b of targets) {
-      try { sends.push({ b, p: Promise.resolve(this._syncPullAwait(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0 })) }); }
+      try { sends.push({ b, p: Promise.resolve(this._syncPullAwait(b, topicBig, 'EMPTY_ROOT_PROBE', { sinceHw: 0, probe: out?.nonce ?? null })) }); }
       catch { /* best-effort */ }
     }
     const n = sends.length;
@@ -785,6 +802,11 @@ export const repairPlaneMethods = {
     }
     const live = this.axonRoles.get(topicBig);
     if (!live || !live.isRoot) return;                      // demoted or gone while the pulls were out
+    // HP-1 (Orion 3046d876): a target the pull never reached cannot answer
+    // no-role; it must not hold the refund hostage. Reached targets only.
+    if (out && declares && reached > 0) {
+      results.forEach((r, i) => { const v = (r.status === 'fulfilled') ? r.value : null; if (!(v && typeof v === 'object' && v.consumed === true)) out.targets.delete(lc(idHex(sends[i].b))); });
+    }
     if (declares && reached === 0) {
       // DEFERRED: not counted against EMPTY_ROOT_PROBE_MAX, targets stay eligible,
       // the sweep re-arms it once the node can route or after a wait.
@@ -795,7 +817,16 @@ export const repairPlaneMethods = {
         { topic: idHex(topicBig).slice(0, 12), fanout: n, deferrals: live.sync.probeDeferrals });
       return;
     }
+    // 3a: a try every target of which already answered no-role is not
+    // counted; one whose NACKs complete later is refunded (_onProbeNack).
+    if (out && live.sync.probeOut === out && out.nacked.size === out.targets.size) {
+      live.sync.probeDeferred = false;
+      for (const x of sends) live.sync.probed.add(x.b);
+      this._log('info', 'empty-root-probe-refunded', { topic: idHex(topicBig).slice(0, 12), nacked: out.nacked.size, tries: live.sync.probeTries | 0 });
+      return;
+    }
     live.sync.probeTries++;
+    if (out) out.counted = true;
     live.sync.probeDeferred = false;
     for (const x of sends) live.sync.probed.add(x.b);
     this._log('info', 'empty-root-probe',
@@ -971,13 +1002,14 @@ export const repairPlaneMethods = {
       // The closest reachable nodes fill the replica cohort, whatever their region.
       // findKClosest already returns them closest-first; region is a placement hint
       // folded into the id, never a selection gate.
-      want = cand.slice(0, this._rootReplicas);
+      want = this._replicaInherit ? this._inheritCohort(t, role, cand, bridge) : cand.slice(0, this._rootReplicas);
     } else {
       // Case 4: neighbours() throwing used to propagate out of a function that
       // catches everywhere else. Caught here so it lands as UNKNOWN rather than
       // as a rejection some caller has to re-interpret.
       try { want = this._nearestReachable(t, this._rootReplicas, bridge); }     // sim/fallback: neighbour-based
       catch { want = []; discoveryFailed = true; }
+      if (this._replicaInherit) want = this._inheritCohort(t, role, want, bridge);
     }
     const wantSet = new Set(want);
     for (const hex of [...role.replicas.keys()]) if (!wantSet.has(hex)) role.replicas.delete(hex);   // retire those no longer in the cohort
@@ -1090,9 +1122,11 @@ export const repairPlaneMethods = {
     for (const { hex, verdict } of await Promise.all(sent)) {
       if (verdict === 'consumed') {
         out.verified++;
+        role.inheritRefused?.delete(hex);
         role.replicas.set(hex, { at: now, via: 'consumed' });        // the ONLY crediting path
         continue;
       }
+      if (this._replicaInherit) (role.inheritRefused ??= new Map()).set(hex, now);   // RI-2: read only by _inheritCohort
       out[verdict]++;
       out.failures.push({ id: hex.slice(0, 12), v: verdict });   // WHO the push failed to + its dispatch verdict — replication-failure attribution (#45/#432/#397)
       role.attempted.set(hex, { at: now, via: verdict });
@@ -1108,6 +1142,53 @@ export const repairPlaneMethods = {
     // present one.
     if (full) { role.sync.sig = sig; role.sync.lastFullAt = now; }
     return out;
+  },
+
+  // 3c REPLICAS INHERIT (Closer-Born v0.6; David 2026-11-03 "go ahead with
+  // 3c"; option replicaInherit). The candidate set is condition C1's: the
+  // nodes that hold a role for the topic (this root's seated subscribers,
+  // whatever their kind) plus the nodes its walks visited, beside the
+  // discovery list. Closest first; the farthest current replica is displaced
+  // by any closer candidate and, no longer pushed to, lapses on its standby
+  // lease. Never self, never the bridge.
+  _inheritCohort(t, role, discovered, bridge) {
+    const K = this._rootReplicas;
+    if (K <= 0) return [];
+    const skip = new Set();
+    for (const b of [bridge, (typeof this._closerBornBridge === 'function') ? this._closerBornBridge() : null]) {
+      if (b != null) { try { skip.add(lc(idHex(idBig(b)))); } catch { /* */ } }
+    }
+    const selfHex = lc(idHex(this.nodeId));
+    const pool = new Map();   // hex -> source
+    const add = (id, src) => {
+      let hex; try { hex = lc(idHex(idBig(id))); } catch { return; }
+      if (hex === selfHex || skip.has(hex) || pool.has(hex)) return;
+      pool.set(hex, src);
+    };
+    for (const id of (Array.isArray(discovered) ? discovered : [])) add(id, 'discovered');
+    // RI-2 (Orion 867c3048): a seated or walked candidate whose last push
+    // failed (a remote bridge refuses REPLICATE) is not re-picked for RENEW_MS,
+    // so it cannot hold a cohort slot that never credits. Discovery keeps its
+    // existing semantics.
+    const refused = role.inheritRefused;
+    if (refused) for (const [h, at] of [...refused]) if (this._now() - at >= RENEW_MS) refused.delete(h);   // RI-3 (Orion 7af4822f): bounded under churn
+    const fresh = (h) => !(refused && refused.has(h));
+    for (const h of (role.subscribers?.keys?.() ?? [])) if (fresh(lc(h))) add(h, 'seated');
+    const seen = role.verifySeen;
+    if (seen && (this._now() - seen.at) <= 2 * ROOT_VERIFY_MS) for (const h of seen.ids) if (fresh(h)) add(h, 'walked');
+    const ranked = [...pool.keys()].sort((a, b) => ((idBig(a) ^ t) < (idBig(b) ^ t) ? -1 : 1));
+    const want = ranked.slice(0, K);
+    const before = [...(role.replicas?.keys?.() ?? [])];
+    const entering = want.filter((h) => !role.replicas?.has(h));
+    if (entering.length && before.length) {
+      this._log('info', 'replica-inherit', {
+        topic: idHex(t).slice(0, 12),
+        in: entering.map((h) => `${h.slice(0, 10)}:${pool.get(h)}`),
+        out: before.filter((h) => !want.includes(h)).map((h) => h.slice(0, 10)),
+        pool: pool.size,
+      });
+    }
+    return want;
   },
 
   _nearestReachable(tBig, n, bridge) {
@@ -1519,6 +1600,7 @@ export const repairPlaneMethods = {
 
   stop() {
     if (this._timer) { clearInterval(this._timer); this._timer = null; }
+    this._verifyInflight?.clear?.();   // VW-2 note (Orion 867c3048): a verify settling after a standalone stop acts on nothing
     for (const h of this._burstTimers) clearTimeout(h);
     this._burstTimers.clear();
   },

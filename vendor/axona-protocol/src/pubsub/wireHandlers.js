@@ -259,10 +259,14 @@ export const wireHandlersMethods = {
   async _onSub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    // Return route (Closer-Born v0.6). Below the forward test (RR-2, Orion
+    // ab295b9b): a relay that only passes the SUB on keeps no breadcrumb.
+    this._noteReturn(meta, [meta?.originId, payload?.subscriberId]);
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.SUB, payload)) return 'consumed';   // step-down hold (4.102.0)
+    if (this._stagingIntercept(topicBig, T.SUB, payload)) return 'consumed';   // 3b: a staged role serves nothing
     // Root-beacon last-mile correction (SUB). A stranded subscribe must not
     // (re)root a near-miss node while a strictly-closer live NEIGHBOUR root is
     // beaconing — defer the seat to that root. Without this only PUB carried the
@@ -332,6 +336,7 @@ export const wireHandlersMethods = {
     // The root's own renewal self-loops here. Don't seat self as a subscriber
     // (no self-fan); just replay locally if the app subscribes.
     if (idBig(subHex) === this.nodeId) {
+      this._noteStandingSub(role, payload);   // 6c: the root's own standing renewal (standingLease only)
       if (this.mySubscriptions.has(topicBig)) this._replayLocal(role, since, !!payload.latest);
       return 'consumed';
     }
@@ -356,6 +361,18 @@ export const wireHandlersMethods = {
     // that matches an acked pull on all five fields completes; everything else
     // is an ordinary renewal here.
     if (payload.merge && typeof payload.merge === 'object') this._mergeCompleteOnSub(role, subHex, payload);
+    // 6b: a successor's hw and failure domain (successorGate only). After the
+    // completion above, so the loser's completing SUB, which promotes this
+    // stager, also records the loser's host (SG-1, Orion 7af4822f).
+    this._noteSuccessorSub(role, subHex, payload, seat);
+    this._noteProbeEvidence(role, subHex, payload);   // 3a: who this SUB says holds history (holderProbe only)
+    // 3B-4 / 3B-4a (Orion 620dbf95): a role created only to stage seats no one,
+    // whatever the SUB's shape. A completed round has already promoted it.
+    if (role.staging?.created && !role.isRoot) return 'consumed';
+    // 6c: a standing lease (standingLease only). After the staging return, so a
+    // stager is not leased by an uncompleted SUB and a completing SUB is noted
+    // on the promoted root (6C-3, Orion d8fe2183).
+    this._noteStandingSub(role, payload);
     const myHw = this._highWater(role);
     if (Number.isFinite(payload.hw) && payload.hw > myHw) {
       this._syncPull(idBig(subHex), topicBig, 'REPLAY_UP', { sinceHw: myHw });
@@ -366,7 +383,7 @@ export const wireHandlersMethods = {
       // or to this pull from a log, instead of argued from the count of entries.
       if (sent !== false) this._log('info', 'split-union-pull', { topic: idHex(topicBig).slice(0, 12), from: subHex.slice(0, 12), policy: 'SPLIT_UNION', lw: payload.lw, myLw: this._lowWater(role) });
     }
-    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null);
+    this._accept(role, subHex, since, !!payload.latest, seat, typeof payload.attach === 'string' ? payload.attach : null, payload.unpinned === true);
     return 'consumed';
   },
 
@@ -393,7 +410,7 @@ export const wireHandlersMethods = {
   // A reader SUB and a child SUB with n > 0 stamp lastDemandAt; a standby SUB
   // never does. A standby seat is never delegated to a child: it exists to be
   // at the root.
-  _accept(role, subHex, since, latest = false, seat = null, attach = null) {
+  _accept(role, subHex, since, latest = false, seat = null, attach = null, unpinned = false) {
     const kind = seat?.kind || 'reader';
     const demand = seat ? (seat.demand | 0) : 1;
     const stampsDemand = kind === 'reader' || (kind === 'child' && demand > 0);
@@ -402,7 +419,10 @@ export const wireHandlersMethods = {
       existing.lastRenewed = this._now();
       existing.kind = kind; existing.demand = demand;
       if (stampsDemand) role.lastDemandAt = this._now();
-      this._replayTo(role, subHex, since, false, latest, attach);
+      // 3d: an attach-bearing or unpinned renewal is always answered, so the
+      // subscriber re-pins to the node actually serving it.
+      const echo = this._attachEcho && (!!attach || unpinned);
+      this._replayTo(role, subHex, since, echo, latest, attach);
       return;
     }
     if (role.subscribers.size >= this.maxDirect && kind !== 'standby') {    // overloaded → delegate
@@ -590,6 +610,7 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.PUB, payload)) return 'consumed';   // step-down hold (4.102.0)
     if (this._mergeGateIntercept(topicBig, T.PUB, payload)) return 'consumed';   // merge gate (dual-root 4(d)): forwarded to W by name, or a returned forward
+    if (this._stagingIntercept(topicBig, T.PUB, payload)) return 'consumed';   // 3b: a staged role stamps nothing
     // Root-beacon last-mile correction. At this point I'm the acting target for
     // the publish (bare-topic terminus, or via-pinned to me). If a fresh beacon
     // names a different root genuinely CLOSER to the topic than me, forward to it
@@ -637,6 +658,9 @@ export const wireHandlersMethods = {
   // fall-through can return here in a split) and never stamped here.
   _cutDisposition(topicBig, type, payload) {
     const role = this.axonRoles.get(topicBig);
+    // 3b: in a staged round L keeps stamping; a write caught by the cut is
+    // re-run here by name, past the new generation, never sent to the stager.
+    if (role?.merge?.gate?.staged && role.isRoot) { this._send(type, { ...payload, via: [idHex(this.nodeId)] }); return; }
     if (role?.merge?.gate) { this._mergeGateForward(topicBig, type, payload, role, role.merge.gate); return; }
     const up = this._upstream.get(topicBig);
     if (up && up[0]) { this._forwardToRoot(topicBig, type, payload, lc(up[0])); return; }
@@ -918,7 +942,9 @@ export const wireHandlersMethods = {
   // adopting history must not resurrect a killed message).
   _onPullUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    this._noteReturn(meta, [meta?.originId, payload?.parentId]);       // return route (Closer-Born v0.6)
     if (typeof payload.corr === 'string') { this._mergeAnswerPull(payload, meta); return 'consumed'; }   // dual-root 4(d) step 3
+    if (this._answerRolelessPull(payload)) return 'consumed';   // 3a: a role-less node NACKs a probe (holderProbe only)
     this._syncAnswerPull(payload);
     return 'consumed';
   },
@@ -931,6 +957,7 @@ export const wireHandlersMethods = {
   // pump so a storm of pushes can't starve mesh liveness.
   async _onReplayUp(payload, meta) {
     if (meta.targetId !== this.nodeId) return;
+    this._noteReturn(meta, [meta?.originId]);   // RR-2: each page of a pull refreshes the puller's way back to its source
     // DEPENDENCY (row 4): none. A child's history pushed up to its root
     // installs no role toward the child; nothing is owed when it drains.
     // One enqueue (the duty gate pins exactly two callers in this file): a frame
@@ -1087,6 +1114,9 @@ export const wireHandlersMethods = {
   // time-sliced pump. Role state is read at PROCESSING time, not arrival time.
   async _onReplicate(payload, meta) {
     if (meta.targetId !== this.nodeId) return;          // routed to me as the backup
+    // RI-2 (Orion 867c3048): a bridge never holds a backup (_neverRoot). Not
+    // consumed, so the sender credits no replica and its verdict is 'failed'.
+    if (this._neverRoot) return;
     // Root-side: UNION_AT_ROOT (keep the claim, converge to the union). Else:
     // enter the BACKUP nature. Both are the REPLICATE policy hooks in
     // _syncIngest; the body drains through the time-sliced pump (I-11).
@@ -1463,6 +1493,7 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
     if (this._mergeGateIntercept(topicBig, T.KILL, payload)) return 'consumed';   // merge gate (dual-root 4(d))
+    if (this._stagingIntercept(topicBig, T.KILL, payload)) return 'consumed';   // 3B-2: a staged role takes no tombstone
     // Root-beacon last-mile correction (KILL) — same one-shot semantics as PUB:
     // a kill landing on a near-miss node must reach the true root, not mint a
     // competing root that the rest of the tree never consults.
@@ -1574,18 +1605,23 @@ export const wireHandlersMethods = {
     if (role && role.cache.length) {
       const hit = payload.postHash ? role.cache.find(c => c.msgId === payload.postHash)
                                    : role.cache[role.cache.length - 1];
-      if (hit) { this._answerPull(payload, hit); return 'consumed'; }
+      if (hit) { this._answerPull(payload, hit, meta); return 'consumed'; }
     }
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
     if (d === 'reroute') { this._reroute(T.PULL, payload); return 'consumed'; }
     // Terminus (root/closest) fall-through: answer if we hold it, else a genuine null.
     const hit = role ? (payload.postHash ? role.cache.find(c => c.msgId === payload.postHash) : role.cache[role.cache.length - 1]) : null;
-    this._answerPull(payload, hit || null);
+    this._answerPull(payload, hit || null, meta);
     return 'consumed';
   },
 
-  _answerPull(payload, hit) {
+  _answerPull(payload, hit, meta = null) {
+    // Return route (Closer-Born v0.6, David 2026-11-03 "go ahead with the return
+    // routes for reads"): the node that ANSWERS a read records the way back, at
+    // the replica's early answer and at the terminus alike; a relay that only
+    // forwards the PULL keeps nothing. The PULLRESP below then takes it.
+    this._noteReturn(meta, [meta?.originId, payload?.requesterId]);
     const resp = { corrId: payload.corrId, json: hit ? hit.json : null, publishTs: hit ? hit.publishTs : null, requesterId: payload.requesterId };
     if (idBig(payload.requesterId) === this.nodeId) this._onPullResp(resp, { targetId: this.nodeId });
     else this._route(idBig(payload.requesterId), T.PULLRESP, resp);

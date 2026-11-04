@@ -71,7 +71,13 @@ import { writeFlightMethods }   from './writeFlight.js';
 import { tombstoneAuthWiringMethods, makeTombstoneAuthority } from './tombstoneAuthWiring.js';
 import { mergeMachineMethods }  from './mergeMachine.js';
 import { topicLifetimeMethods } from './topicLifetime.js';
+import { successorGateMethods } from './successorGate.js';
+import { holderProbeMethods } from './holderProbe.js';
+import { handoffBindingMethods } from './handoffBinding.js';
+import { standingLeaseMethods } from './standingLease.js';
 import buildBoundary1Registry from './boundary1Registry.js';
+// Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
+const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
 import { shadowEnabled } from '../registry/index.js';
 import { envNum, envStr } from '../utils/env.js';
 
@@ -113,6 +119,18 @@ export class AxonaManager {
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
+    cutover = null,
+    hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
+    replicaInherit = null,         // Closer-Born v0.6 3c (David 2026-11-03 "go ahead with 3c"): DEFAULT OFF; null = env REPLICA_INHERIT
+    standingLease = null,          // Closer-Born v0.6 6c (David 2026-11-03 "go ahead with 6c"): DEFAULT OFF; null = env STANDING_LEASE
+    handoffBinding = null,         // Closer-Born v0.6 Part 7 (David 2026-11-03 "go ahead with the handoff identity binding"): DEFAULT OFF; null = env HANDOFF_BINDING
+    holderProbe = null,            // Closer-Born v0.6 3a (David 2026-11-03 "go ahead with 3a"): DEFAULT OFF; null = env HOLDER_PROBE
+    successorGate = null,          // Closer-Born v0.6 6b (David 2026-11-03 "go ahead with 6b"): DEFAULT OFF; null = env SUCCESSOR_GATE
+    processKind = null,            // 6b: 'service' (default) | 'app' (a tab, a seat whose host app quits); null = env PROCESS_KIND
+    hostTag = null,                // 6b: opaque failure-domain tag the embedder names (<= 32 chars); null = env HOST_TAG, else none
+    verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
+    attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
+    returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -328,6 +346,58 @@ export class AxonaManager {
     // refused without the release token the machine mints. Release and arming
     // are separate words from David; neither is this option's default.
     this._mergeCapable    = !!(mergeCapable ?? envNum('MERGE_CAPABLE', MERGE_CAPABLE_DEFAULT));
+    this._cutover         = !!(cutover ?? envNum('CUTOVER', 0));
+    // RETURN ROUTES (Closer-Born Relay Inherits the Root v0.6, 3a/3d/Part 7).
+    // A SUB, MERGE_OFFER or PULLUP that arrives leaves a breadcrumb: the
+    // reverse of the hops it came over, keyed by its route originator and by
+    // the requester it names. A frame this node then routes to that node goes
+    // back along those hops (each hop honours the next id only while a channel
+    // to it is open, else greedy), and the own lookup is the fallback. The
+    // breadcrumb is a hint: authority rests on signed envelopes and corr.
+    this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
+    // produced no DELIVER, so a subscriber that lost its pin, or whose pin
+    // named a node that has since handed off, never heard the echo that pins
+    // it. Armed: a renewal carrying an attachment nonce, or marked unpinned by
+    // its sender, is always answered with a DELIVER (empty when there is no
+    // history) that echoes the nonce. A pinned unarmed renewal stays silent.
+    this._attachEcho      = !!(attachEcho ?? envNum('ATTACH_ECHO', 0));
+    // FARTHER-REACHING VERIFY (Closer-Born v0.6, "What would make this wrong"):
+    // the root self-verify's lookup on standalone peers is findKClosest, which
+    // reaches two channel-hops. Armed, the verify also runs the DHT walk
+    // (dht.walk, hop-by-hop over each hop's own channels) and nominates the
+    // closest node either one visited.
+    this._verifyWalk      = !!(verifyWalk ?? envNum('VERIFY_WALK', 0));
+    // 3d HINT REFRESH: a subscriber unattached past ROOT_CLAIM_MS asks the
+    // network for the root even when a local neighbour looks closer
+    // (rootElection._rootHint_).
+    this._hintRefresh     = !!(hintRefresh ?? envNum('HINT_REFRESH', 0));
+    // 3c REPLICAS INHERIT: the root picks its backup cohort from findKClosest
+    // AND the nodes it knows hold a role for the topic (its seated
+    // subscribers: seats, clients, child relays) AND the nodes its last
+    // verify visited, closest first (repairPlane._replicateRole). A node born
+    // closer than the farthest replica takes the slot; the displaced backup
+    // stops receiving REPLICATE and lapses on its standby lease.
+    this._replicaInherit  = !!(replicaInherit ?? envNum('REPLICA_INHERIT', 0));
+    // 6b SUCCESSOR GATE (successorGate.js): an 'app' process holding a root
+    // reports degraded: no-successor while no replica is current, and re-seats.
+    this._successorGate   = !!(successorGate ?? envNum('SUCCESSOR_GATE', 0));
+    // 3a HOLDER PROBE (holderProbe.js): role-less nodes NACK a probe, the probe
+    // asks holders first, and a frame/time budget bounds it.
+    this._holderProbe     = !!(holderProbe ?? envNum('HOLDER_PROBE', 0));
+    // HANDOFF BINDING (handoffBinding.js): a candidate stages only on an offer
+    // whose `handoff` the loser signed with the key its node id hashes.
+    this._handoffBinding  = !!(handoffBinding ?? envNum('HANDOFF_BINDING', 0));
+    // 6c STANDING LEASE (standingLease.js): a standing topic's root is kept
+    // alive across the gap between a vanished holder and the next fresh read.
+    this._standingLease   = !!(standingLease ?? envNum('STANDING_LEASE', 0));
+    { const env = (typeof process !== 'undefined' && process.env) ? process.env : {};
+      const k = processKind ?? env.PROCESS_KIND ?? 'service';
+      this._processKind = (k === 'app') ? 'app' : 'service';
+      const h = hostTag ?? env.HOST_TAG ?? null;
+      this._hostTag = (typeof h === 'string' && h.length) ? h.slice(0, 32) : null; }
+    this._retRoutes       = new Map();
+    this._returnRouteStats = { recorded: 0, used: 0, delivered: 0, fellBack: 0 };
     // TOPIC LIFETIME (axona-docs architecture/Axona-Topic-Lifetime-v0.1.md v0.9
     // @ 11288d7; David "Build" 2026-10-20). OFF by default. Armed (option
     // `topicLifetime` or env TOPIC_LIFETIME=1): a standby appointment is a lease
@@ -416,13 +486,61 @@ export class AxonaManager {
   // A caller that ignores the result is safe; a caller that reads it gets the truth.
   _route(targetBig, type, payload) {
     const fail = (e) => ({ consumed: false, error: String((e && e.message) || e), transportError: true });
+    const opts = { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET };
+    const send = (o) => Promise.resolve(this.dht.routeMessage(targetBig, type, payload, o)).catch(fail);
     try {
-      return Promise.resolve(
-        this.dht.routeMessage(targetBig, type, payload, { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET }),
-      ).catch(fail).then((r) => this._tallyRoute(targetBig, r));
+      const rpath = this._returnRoute ? this._returnFor(targetBig) : null;
+      if (!rpath) return send(opts).then((r) => this._tallyRoute(targetBig, r));
+      // The return route first; a reply it does not deliver goes by the own
+      // lookup. A duplicate is safe: replies are idempotent by msgId or corr.
+      const RS = this._returnRouteStats; RS.used++;
+      return send({ ...opts, rpath }).then((r) => {
+        if (r && r.consumed) { RS.delivered++; return r; }
+        RS.fellBack++;
+        // RR-3 (Orion ab295b9b): a breadcrumb that failed once is dropped, so a
+        // broken reverse path is walked at most once, not for its whole TTL.
+        const k = lc(idHex(targetBig));
+        if (this._retRoutes.get(k)?.rpath === rpath) this._retRoutes.delete(k);
+        return send(opts);
+      }).then((r) => this._tallyRoute(targetBig, r));
     } catch (e) {
       return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
     }
+  }
+
+  /** Record the reverse of an arriving request's hops for each node it names. */
+  _noteReturn(meta, keys) {
+    if (!this._returnRoute || !meta || !Array.isArray(meta.path) || !meta.path.length) return;
+    const base = meta.path.filter((h) => typeof h === 'string' && isHexId(h)).slice(-RETURN_RPATH_MAX).reverse();
+    if (!base.length) return;
+    const now = this._now(), self = lc(idHex(this.nodeId)), exp = now + RETURN_ROUTE_TTL_MS;
+    const seen = new Set();
+    for (const k of keys) {
+      if (typeof k !== 'string' || !isHexId(k)) continue;
+      const key = lc(k);
+      if (key === self || seen.has(key)) continue;        // RR-1: one write per node
+      seen.add(key);
+      // ANCHORED: the path ends at the node itself (it sent this request). A
+      // node merely NAMED in an unsigned field (subscriberId, loser, parentId)
+      // goes last, honoured only where a channel to it is open, else that
+      // hop's own routing finishes the last leg; such an entry never replaces
+      // a fresh anchored one (RR-1, Orion ab295b9b).
+      const anchored = lc(base[base.length - 1]) === key;
+      const prev = this._retRoutes.get(key);
+      if (!anchored && prev?.anchored && prev.exp > now) continue;
+      const rpath = anchored ? base : [...base.slice(0, RETURN_RPATH_MAX - 1), key];
+      this._retRoutes.delete(key);
+      this._retRoutes.set(key, { rpath, exp, anchored });
+      this._returnRouteStats.recorded++;
+      while (this._retRoutes.size > RETURN_ROUTE_CAP) this._retRoutes.delete(this._retRoutes.keys().next().value);
+    }
+  }
+  _returnFor(targetBig) {
+    let key; try { key = lc(idHex(targetBig)); } catch { return null; }
+    const r = this._retRoutes.get(key);
+    if (!r) return null;
+    if (r.exp <= this._now()) { this._retRoutes.delete(key); return null; }
+    return r.rpath;
   }
 
   // OBSERVABILITY (#58 D3): routing reports failure by RESOLVING {consumed:false}
@@ -816,6 +934,7 @@ export class AxonaManager {
   // is promoted here — without this it would reroute bare-topic publishes to
   // itself forever. Rules + defer gate live in the state machine.
   _maybePromoteRoot(role, payload, meta) {
+    if (role?.staging) return;   // 3b: a staged role becomes root only on its completion, never by a terminal SUB/PUB
     this._rootClaim.promote(role, payload, meta);
   }
 
@@ -1450,6 +1569,13 @@ export class AxonaManager {
       hw: role ? this._highWater(role) : 0,   // a cache-bearing relay advertises its history (§6)
       lw: role ? this._lowWater(role) : 0,    // …and its OLDEST stamp, so a root missing the pre-transition half pulls it
       latest,
+      // 3d: an unpinned sender says so; via alone cannot (an unpinned SUB with a
+      // warm hint names it in via, exactly as a pinned SUB names its pin).
+      ...(this._attachEcho && !((this._upstream.get(topicBig) || []).length) ? { unpinned: true } : {}),
+      // 6b: the sender's failure domain, so a root can tell a successor on its own host.
+      ...(this._successorGate ? { fd: this._fdBlock() } : {}),
+      // 6c: the standing lease this subscription or relay role carries upward.
+      ...((st) => (st > 0 ? { standing: st } : {}))(this._standingForSub(role, sub)),
       // COMPLETION IS CORRELATED (dual-root 4(d)): while this loser is completing a
       // handover, every SUB carries the merge block; an ordinary renewal completes nothing.
       ...(role?.merge?.completing ? { merge: { corr: role.merge.completing.corr, winner: role.merge.completing.winner, winnerEpoch: role.merge.completing.winnerEpoch, loserEpoch: role.merge.completing.loserEpoch, hash: role.merge.completing.hash } } : {}),
@@ -1529,6 +1655,7 @@ export class AxonaManager {
       createdAt: this._now(),
       since, lastRenewSent: this._now(), interval: this.renewFastMs,
       replayLatest: !!opts.replayLatest,
+      standing: !!opts.standing,   // 6c: this subscription declares a standing lease (standingLease only)
     });
     // If this node already HOLDS the topic's cache (it is the root, or a
     // cache-bearing relay), no wire replay can serve it: the outgoing SUB
@@ -1936,6 +2063,10 @@ Object.assign(
   tombstoneAuthWiringMethods,  // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow observers (no-op unless the tombstoneAuth flag is set)
   mergeMachineMethods,   // dual-root reconciliation 4(d) (axona-docs 14a6bd8): the cut, the gate, the forward to the winner — behind mergeCapable
   topicLifetimeMethods,  // Topic Lifetime (axona-docs 11288d7): standby lease, termination, thin-branch step-down — behind topicLifetime
+  successorGateMethods,  // Closer-Born v0.6 6b: an app-held root counts its current successors — behind successorGate
+  holderProbeMethods,    // Closer-Born v0.6 3a: holder-first empty-root probe with role-less NACKs — behind holderProbe
+  handoffBindingMethods, // Closer-Born v0.6 Part 7: the loser signs `handoff`; an armed candidate verifies — behind handoffBinding
+  standingLeaseMethods,  // Closer-Born v0.6 6c: a standing topic's root lease — behind standingLease
 );
 
 export default AxonaManager;

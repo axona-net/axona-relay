@@ -426,6 +426,12 @@ export const ROOT_VERIFY_BATCH    = 3;          // max verify lookups launched p
 // second requester's METRICSON short-circuits (the root already knows). The lease
 // self-expires when the last metric subscriber stops renewing → metrics turn off,
 // no orphan load.
+// 6c (Closer-Born v0.6, standingLease only): a standing subscription asks for
+// this lease on each SUB; a root holds at most the MAX. Product parameters,
+// set 2026-11-03 on David's "go ahead with 6c": hours, not minutes, because
+// the gap they bridge is a vanished holder to the next fresh read.
+export const STANDING_LEASE_MS     = 6 * 3_600_000;    // 6 h
+export const STANDING_LEASE_MAX_MS = 24 * 3_600_000;   // 24 h
 export const METRICS_LEASE_MS = 70_000;   // root keeps publishing this long after the last METRICSON (~= dropMs; renewed by the subscriber's refresh tick)
 export const METRICS_PUB_MS   = 20_000;   // snapshot cadence at the root while the lease is fresh
 export const METRICS_COALESCE_MS = 8_000; // a path node re-forwards METRICSON upstream at most this often (fan-in dedup; still keeps the root's lease alive)
@@ -494,6 +500,11 @@ export const EMPTY_ROOT_PROBE_DELAY_MS    = 800;    // wait before first probe (
 export const EMPTY_ROOT_PROBE_MAX         = 3;      // total probes per role while empty
 export const EMPTY_ROOT_PROBE_INTERVAL_MS = 5_000;  // min gap between probes (via refreshTick)
 export const EMPTY_ROOT_PROBE_FANOUT      = 4;      // candidates contacted per probe
+// 3a + Part 7 (Closer-Born v0.6, holderProbe only): a try every target of which
+// answered no-role is refunded, so the try cap no longer bounds the probe;
+// this budget does. Pulls per role, and time from the first try.
+export const HOLDER_PROBE_FRAMES         = 32;
+export const HOLDER_PROBE_WINDOW_MS      = 300_000;
 
 // ── Leave-handoff confirmation (v4.24.0) ─────────────────────────────────────
 // The graceful-leave HANDOFF was fire-and-forget: a failed heir delivery

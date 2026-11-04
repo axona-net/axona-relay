@@ -241,6 +241,7 @@ export const topicLifetimeMethods = {
       if (this._custodyOpen(role, now)) continue;
       if (this.mySubscriptions.has(t) || this._hostedTopics.has(t)) continue;   // local intent
       if (role.metricsOn > now) continue;                                       // a lease is intent too
+      if (this._standingLeased(role, now)) continue;                            // 6c: so is a standing lease
       if (this._roleDemand(role) > 0) continue;
       const anchor = Number.isFinite(role.lastDemandAt) ? role.lastDemandAt : (role.createdAt || 0);
       if (now - anchor <= this.dropMs) continue;
