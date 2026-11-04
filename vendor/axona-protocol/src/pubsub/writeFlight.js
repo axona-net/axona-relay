@@ -28,6 +28,7 @@
 import { T, BEACON_TTL_MS } from './constants.js';
 import { idHex, idBig } from './ids.js';
 import { rootPubMatchesNodeHash } from './ackProof.js';
+import { checkFreshness } from './envelope.js';
 
 const lc = (s) => String(s).toLowerCase();
 
@@ -50,6 +51,22 @@ export const INGEST_ACK_MS = 4_000;
 export const FLIGHT_PROBE_MS = 3_000;
 export const FLIGHT_MAX_ROUNDS = 2;
 export const ROOT_TOMBSTONE_TTL_MS = Math.max(600_000, BEACON_TTL_MS * 12);
+// 4.129.1: a write is promoted past at most this many evictions. Each
+// promotion skips every root the chain was already evicted from, so this is
+// also the number of distinct live candidates one write may try. Before it,
+// a write no root would ingest (a PUB past MAX_PUBLISH_SKEW_MS, dropped
+// `drop-stale` with no ack) circled two neighbours for ever: one tombstone
+// per topic let the second eviction re-admit the first root (2026-11-04,
+// axona-win svc-15, Orion c2735cc0).
+export const FLIGHT_MAX_PROMOTIONS = 4;
+// The chain ledger (Orion WF-1): a promotion records the write's chain by its
+// correlation key, and every later _flightOpen for the SAME write inherits it,
+// whichever path re-forwards it — a held node's own ingest re-forwards through
+// _holdIntercept, a reroute, a merge gate. Without it, promotion to SELF on a
+// held node opened a fresh flight at promotions 0 and the cap never bit.
+// Bounded by size (oldest out) and by age.
+const FLIGHT_CHAIN_MAX = 1024;
+const FLIGHT_CHAIN_TTL_MS = ROOT_TOMBSTONE_TTL_MS;
 
 const corrKey = (topicHex, msgId, op) => `${lc(topicHex)}|${msgId}|${op}`;
 const flightKey = (topicBig, rootHex, epoch) => `${topicBig.toString(16)}|${lc(rootHex)}|${epoch}`;
@@ -80,7 +97,18 @@ export const writeFlightMethods = {
   // missing or stale beacon cannot make the flight accept an ack at any
   // epoch. Without it the flight takes its epoch from the beacon record, or
   // 0 (unversioned), as before.
-  _flightOpen(topicBig, rootHex, type, payload, attemptId = null, expectedEpoch = null) {
+  //
+  // `chain` (4.129.1) carries a promoted entry's history into its new flight:
+  // `promotions` (how many evictions this write has been promoted past) and
+  // `tried` (every root it was evicted from). _flightEvict reads both — the
+  // cap ends the chain, `tried` keeps an evicted root out of the next pick.
+  // The stored payload never keeps a `holdFwd`: that nonce is hop-local to
+  // the held node that minted it, and a promotion or nack-retry re-sending
+  // it would be dropped on sight at any held node as a foreign return.
+  _flightOpen(topicBig, rootHex, type, payload, attemptId = null, expectedEpoch = null, chain = null) {
+    if (payload && typeof payload === 'object' && 'holdFwd' in payload) {
+      const { holdFwd: _hop, ...rest } = payload; payload = rest;
+    }
     const msgId = writeMsgId(type, payload);
     if (!msgId) return null;                              // malformed write — verification refuses it downstream
     if (!this._writeFlights) this._writeFlights = new Map();
@@ -99,8 +127,14 @@ export const writeFlightMethods = {
     const ck = corrKey(idHex(topicBig), msgId, op);
     let entry = f.entries.get(ck);
     if (!entry) {
-      entry = { type, payload, msgId, op, attemptId: (attemptId ? lc(attemptId) : rand16hex()) };
+      entry = { type, payload, msgId, op, attemptId: (attemptId ? lc(attemptId) : rand16hex()), promotions: 0, tried: [] };
       f.entries.set(ck, entry);
+    }
+    for (const c of [chain, this._flightChainGet(ck)]) {
+      if (!c) continue;
+      const p = Number.isInteger(c.promotions) ? c.promotions : 0;
+      if (p > entry.promotions) entry.promotions = p;
+      for (const r of (c.tried || [])) { const h = lc(r); if (!entry.tried.includes(h)) entry.tried.push(h); }
     }
     return { ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: entry.attemptId };
   },
@@ -269,6 +303,30 @@ export const writeFlightMethods = {
       const h = this._stepDownHold?.get(f.topicBig); if (h && h.to === f.rootHex) this._stepDownHold.delete(f.topicBig);
       this._log('info', 'merge-record-cleared', { topic: idHex(f.topicBig).slice(0, 12), winner: f.rootHex.slice(0, 10), why: 'root-evicted' });
     }
+    // 4.129.1: end the chain before choosing a candidate. A write at the
+    // promotion cap, or a PUB whose envelope ts is outside the publish skew
+    // (every root drops it `drop-stale` and never acks), is undeliverable
+    // here. A missing ts is left to the root's own check, as before.
+    const now = this._now();
+    for (const [ck, e] of [...f.entries]) {
+      let why = null;
+      if (e.promotions >= FLIGHT_MAX_PROMOTIONS) why = 'write-flight-promotion-cap';
+      else if (e.type === T.PUB) {
+        let env = null; try { env = JSON.parse(e.payload?.json); } catch { /* malformed — the root refuses it */ }
+        if (env && checkFreshness(env, { now }).reason === 'stale') why = 'write-flight-stale';
+      }
+      if (!why) continue;
+      f.entries.delete(ck);
+      this._undeliverable(e.type, f.topicBig, why);
+      this._log('warn', 'write-flight-ended', {
+        topic: idHex(f.topicBig).slice(0, 12), why, promotions: e.promotions, tried: e.tried.length + 1,
+      });
+    }
+    if (f.entries.size === 0) return;
+    // Every root this chain was evicted from stays out of the pick — not only
+    // the one just convicted (`_rootTombstones` keeps one per topic).
+    const excluded = new Set([f.rootHex]);
+    for (const e of f.entries.values()) for (const r of e.tried) excluded.add(r);
     // Retry-promote: the closest LIVE candidate gets the write via-pinned;
     // its own terminal machinery roots, ingests, and acks. Same closest-live
     // rule as everywhere; the tombstone keeps the corpse out of the pool.
@@ -280,7 +338,7 @@ export const writeFlightMethods = {
         let nb; try { nb = idBig(n); } catch { continue; }
         if (nb === this.nodeId) continue;
         if (bridge != null && nb === bridge) continue;
-        if (lc(idHex(nb)) === f.rootHex) continue;        // the tombstoned incarnation's node
+        if (excluded.has(lc(idHex(nb)))) continue;        // the tombstoned incarnation, and every root this chain left
         const d = nb ^ tBig;
         if (bestD === null || d < bestD) { bestD = d; best = nb; }
       }
@@ -297,7 +355,9 @@ export const writeFlightMethods = {
     }
     if (best === this.nodeId) {
       // Closest live holder is US — ingest through the normal terminal path.
-      for (const e of f.entries.values()) {
+      // The ledger carries the chain into any flight that ingest re-opens.
+      for (const [ck, e] of f.entries) {
+        this._flightChainNote(ck, { promotions: e.promotions + 1, tried: [...e.tried, f.rootHex] });
         const handler = e.type === T.KILL ? this._onKill : this._onPub;
         Promise.resolve(handler.call(this, e.payload, { fromId: idHex(this.nodeId), isTerminal: true })).catch(() => {});
       }
@@ -312,14 +372,31 @@ export const writeFlightMethods = {
     // reads it); the new flight generation gets its own flightNonce. A second
     // flapper thus gets the same receipt-bound treatment, bounded by its own
     // rounds cap.
-    for (const e of f.entries.values()) {
-      const m = this._flightOpen(f.topicBig, bestHex, e.type, e.payload, e.attemptId);
+    for (const [ck, e] of f.entries) {
+      const chain = { promotions: e.promotions + 1, tried: [...e.tried, f.rootHex] };
+      this._flightChainNote(ck, chain);
+      const m = this._flightOpen(f.topicBig, bestHex, e.type, e.payload, e.attemptId, null, chain);
       if (!m) { this._send(e.type, { ...e.payload, via: [bestHex] }); continue; }  // malformed — forward unstamped, unsigned recovery
       this._send(e.type, { ...e.payload, via: [bestHex], ackTo: m.ackTo, flightNonce: m.flightNonce, attemptId: m.attemptId });
     }
     this._log('info', 'write-flight-promoted', {
       topic: idHex(f.topicBig).slice(0, 12), to: bestHex.slice(0, 12),
     });
+  },
+
+  // ── the chain ledger (4.129.1, Orion WF-1) ───────────────────────────
+  _flightChainNote(ck, chain) {
+    if (!this._flightChains) this._flightChains = new Map();
+    this._flightChains.delete(ck);                       // re-insert: newest last
+    this._flightChains.set(ck, { promotions: chain.promotions, tried: [...chain.tried], exp: this._now() + FLIGHT_CHAIN_TTL_MS });
+    while (this._flightChains.size > FLIGHT_CHAIN_MAX) this._flightChains.delete(this._flightChains.keys().next().value);
+  },
+
+  _flightChainGet(ck) {
+    const c = this._flightChains?.get(ck);
+    if (!c) return null;
+    if (this._now() >= c.exp) { this._flightChains.delete(ck); return null; }
+    return c;
   },
 
   // Tombstone check for the closer-root gate: a beacon naming a tombstoned
