@@ -31,7 +31,18 @@
       "PEER_EXCHANGE": "1",
       "RELAY_SYNAPTOME_MAINTAIN": "1",
       "RELAY_ATTEMPT_GUARD": "1",
-      "RELAY_ADMISSION_GATE": "1"
+      "RELAY_ADMISSION_GATE": "1",
+      "CUTOVER": "1",
+      "RETURN_ROUTE": "1",
+      "SIGNAL_RETURN_ROUTE": "1",
+      "ATTACH_ECHO": "1",
+      "VERIFY_WALK": "1",
+      "HINT_REFRESH": "1",
+      "REPLICA_INHERIT": "1",
+      "SUCCESSOR_GATE": "1",
+      "HOLDER_PROBE": "1",
+      "HANDOFF_BINDING": "1",
+      "STANDING_LEASE": "1"
     }
   },
   "services": {
