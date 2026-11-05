@@ -172,7 +172,12 @@ export const mergeMachineMethods = {
     // would otherwise refuse its own re-nomination (a claim never wins over
     // itself) and the next verify would offer nothing, leaving two roots for
     // good. Clearing it lets the next trigger issue a new OFFER with a new corr.
-    if (this._cutover && role.merge.candidate) role.merge.candidate = null;
+    // 4.130.0: on EVERY abort, not only under cutover. _mergeCandidate is
+    // _mergeOffer's only caller, and it refuses the same winner again (a claim
+    // never wins over itself), so with the candidate kept an aborted round was
+    // never retried and two roots stood for good (2026-11-04: Orion's seat and
+    // win svc-04 on 89c699443362 / 89c37667cd05, Orion 1f81ed10).
+    if (role.merge.candidate) role.merge.candidate = null;
     return this._mergeGateClear(role, why, extra);
   },
   /** 6BG-2: release the pins a deferred step 5 took, unless completion now owns them. */
@@ -212,8 +217,16 @@ export const mergeMachineMethods = {
             // keeps its root; no demotion toward a node that never answered.
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null, cutover: true });
             if (role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
-          } else if (m.reached === false || !role.isRoot || role.merge?.gate) {
+          } else if (m.reached !== true || !role.isRoot || role.merge?.gate) {
             this._log('warn', 'merge-offer-timeout', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), reached: m.reached ?? null });
+            // 4.130.0 (Orion SCW-2, cca38450): an offer whose route FAILED is
+            // retried on the next trigger (above), so it must not leave the
+            // candidate behind: _mergeCandidate refuses the same winner again.
+            // (Aster 80e77561) A route still UNRESOLVED at the timeout is not a
+            // reach: a first-hop channel open can wait 15 s and a send 5 s,
+            // past this 10 s bound. Only a confirmed reach takes the legacy
+            // fallback; an unknown one keeps custody and retries like a failure.
+            if (m.reached !== true && !role.merge?.gate && role.merge?.candidate?.id === m.winner) role.merge.candidate = null;
           } else {
             this._log('warn', 'merge-legacy-fallback', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), cache: role.cache.length });
             role.merge.releaseToken = randomNonce() + randomNonce();
@@ -342,17 +355,13 @@ export const mergeMachineMethods = {
   _mergeWinnerReminted(f, gotEpoch) {
     const role = this.axonRoles.get(f.topicBig);
     if (!role?.merge?.gate || role.merge.gate.corr !== f.merge.corr) return;
-    if (this._cutover) {
-      // CUT-1 (Orion c0a842d2): under cutover the abort clears the candidate,
-      // so recording it first lost the new epoch and nothing was offered
-      // again. Abort, then nominate the re-minted winner afresh: a new OFFER
-      // under a new corr carries the new epoch.
-      this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
-      this._mergeCandidate(f.topicBig, f.rootHex, gotEpoch | 0, 'reminted');
-      return;
-    }
-    role.merge.candidate = { id: f.rootHex, epoch: gotEpoch | 0, source: 'reminted', at: this._now() };   // the next OFFER carries the new epoch
+    // CUT-1 (Orion c0a842d2): the abort clears the candidate, so recording it
+    // first lost the new epoch and nothing was offered again. Abort, then
+    // nominate the re-minted winner afresh: a new OFFER under a new corr
+    // carries the new epoch. Since 4.130.0 every abort clears the candidate,
+    // so this order holds with cutover off as well as on.
     this._mergeAbort(role, 'winner-reminted', { got: gotEpoch | 0, want: f.epoch });
+    this._mergeCandidate(f.topicBig, f.rootHex, gotEpoch | 0, 'reminted');
   },
   /** A merge flight passed INGEST_ACK_MS with no ack from W: the round ends. */
   _mergeFlightSilent(f) {
@@ -409,7 +418,10 @@ export const mergeMachineMethods = {
       : this._route(idBig(c.id), T.MERGE_OFFER, offer);
     // Did the offer reach anyone? A failed verdict means W is unreachable, not
     // legacy: the sweep then drops the record instead of falling back.
-    Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'failed' ? false : true; });
+    // (Orion d9c11a54) 'violation' is no evidence of a reach (dispatch.js: silence
+    // is never evidence), so it counts as not reached; 'unsupported' keeps the
+    // legacy reading for adapters that report no verdicts at all.
+    Promise.resolve(sent).then((r) => { const v = dispatchVerdict(r, this.dht?.verdictsSupported); rec.reached = v === 'consumed' || v === 'unsupported'; });
     this._log('info', 'merge-offer', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), winner: c.id.slice(0, 10), winnerEpoch: c.epoch | 0, loserEpoch: role.epoch | 0, count: role.cache.length });
     return true;
   },
@@ -623,6 +635,9 @@ export const mergeMachineMethods = {
         this._log('warn', 'refused-export-bound', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), bytes, bound: EXPORT_BYTES_MAX });
         this._mergeCloseCorr(role, corr);
         this._mergeGateClear(role, 'export-bound');
+        // 4.130.0 (Orion SCW-3): free the candidate so a later trigger retries
+        // once TTL expiry has shrunk the cache under the bound.
+        if (role.merge?.candidate) role.merge.candidate = null;
         this._emitReplayUp(idBig(requester), { topicId: payload.topicId, corr, loserEpoch: role.epoch | 0, refused: 'export-bound', msgs: [], dels: [] });
         return;
       }

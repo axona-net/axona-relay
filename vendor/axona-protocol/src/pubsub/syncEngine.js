@@ -26,9 +26,9 @@
 // there. It joins the engine only if it earns its way in.
 // =====================================================================
 
-import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS, STANDING_LEASE_MAX_MS } from './constants.js';
+import { T, METRICS_LEASE_MS, APPOINTMENT_SKEW_MS, STANDING_LEASE_MAX_MS, STANDBY_LEASE_MS } from './constants.js';
 import { idHex, idBig, lc, isHexId } from './ids.js';
-import { makeRole } from './rootClaim.js';
+import { makeRole, RootClaim } from './rootClaim.js';
 
 // ── The typed policy table ──────────────────────────────────────────────
 // Fields (all required — smoke_sync_engine.mjs asserts completeness):
@@ -321,6 +321,17 @@ export const syncEngineMethods = {
           this._grantsRefused++;
           this._log('info', 'grant-refused', { topic, why: 'left-record', gen: gen.root.slice(0, 10), epoch: gen.epoch });
           return;
+        } else if (!(gen.epoch >= 1)) {
+          // 4.130.0 (Orion SCW-1, cca38450): every root incarnation mints
+          // epoch >= 1 (rootClaim._set / become); a grant naming epoch 0 or no
+          // epoch is malformed. Admitted, it would turn off claimWins' epoch
+          // order on this backup: a closer epoch-0 grant usurps a higher-epoch
+          // principal and locks it out for the lease, and three roots can
+          // cycle. Checked here, not in _genValid, so the current principal's
+          // malformed grant is not read as a legacy renewal either.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'invalid-epoch', gen: gen.root.slice(0, 10), epoch: gen.epoch });
+          return;
         } else if (!Number.isFinite(payload.issuedAt)) {
           // A gen-bearing grant with NO issue stamp cannot be aged and is not a
           // legacy renewal either (Aster c5adedec TL-B03): refused, created or renewed.
@@ -345,6 +356,18 @@ export const syncEngineMethods = {
           // re-principals as today (stated in the packet).
           this._grantsRefused++;
           this._log('info', 'grant-refused', { topic, why: 'obsolete-grant', gen: gen.root.slice(0, 10), issuedAt: payload.issuedAt, have: role.standbyIssuedAt });
+          return;
+        } else if (role && role.backupOf !== null && role.standbyGen && role.standbyGen.root !== gen.root
+                   && now - (role.lastReplicaAt || 0) < STANDBY_LEASE_MS
+                   && !RootClaim.claimWins(topicBig, { id: gen.root, epoch: gen.epoch }, { id: role.standbyGen.root, epoch: role.standbyGen.epoch })) {
+          // 4.130.0 (Orion SYNC-STANDBY-CLAIMWINS, 1f81ed10): while the current
+          // appointment's lease is live, a DIFFERENT root re-principals this
+          // backup only if it outranks the current principal. Two live roots
+          // both pass the skew rule above on every tick, and the backup used
+          // to flip to whichever sent last (2026-11-04: 7,356 flips on one
+          // relay). Once the lease lapses, any surviving root may appoint it.
+          this._grantsRefused++;
+          this._log('info', 'grant-refused', { topic, why: 'outranked', gen: gen.root.slice(0, 10), epoch: gen.epoch, have: role.standbyGen.root.slice(0, 10), haveEpoch: role.standbyGen.epoch | 0 });
           return;
         }
       }
