@@ -29,6 +29,7 @@ const randomNonce = () => {
 };
 import { verifyEnvelope, checkFreshness } from './envelope.js';
 import { makeMergeState } from './rootClaim.js';
+import { authorAfter } from './topicStore.js';
 import { verifyKill } from './kill.js';
 import { deriveTopicIdBig } from './post.js';
 import { signAckProof, verifyAckProof, PURPOSE, OP } from './ackProof.js';
@@ -709,7 +710,8 @@ export const wireHandlersMethods = {
     // settled state — an ack is what stops the writer's flight from probing a
     // root that is doing its job.
     if (role.cacheIds.has(env.msgId)) return { ok: true, msgId: env.msgId, dup: true };
-    if (this._tombstoned(role, env.msgId, json)) return { ok: true, msgId: env.msgId, suppressed: true };
+    const tv = this._tombstoneVerdict(role, env.msgId, json);           // 4.131.0: decide now, commit a supersede only after the cache write (Aster R1)
+    if (tv?.kind === 'suppress') { if (tv.viaClaim) this._promoteClaim(role, env.msgId, tv); return { ok: true, msgId: env.msgId, suppressed: true }; }   // verified above
 
     // W'S OWN WRITES DURING A ROUND, FAIL CLOSED (dual-root 4(d)): they draw on
     // the reserve admitted with the header; past it the write is refused and
@@ -731,6 +733,7 @@ export const wireHandlersMethods = {
     const seq = ++role.seq;                                              // dense per-topic counter (gap detection)
     const msg = { json, publishTs: ts, msgId: env.msgId, seq };
     this._cachePush(role, { msgId: env.msgId, publishTs: ts, json, seq }, cut);
+    if (tv && role.cacheIds.has(env.msgId)) this._tombstoneCommit(role, env.msgId, tv);   // revoke or supersede, only once admitted and cached (Orion D3)
     if (role.merge?.reserve) { role.merge.reserve.entries--; role.merge.reserve.bytes -= json.length + 80; }
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope above)
     // ONLY if it survived the cache write (an immediate byte-cap eviction must not
@@ -1032,8 +1035,14 @@ export const wireHandlersMethods = {
     this._noteMetricRole(role, env.topic);                               // bound above: stid === role.topicId
     if (m.publishTs > this._now() + FUTURE_TOLERANCE_MS) { this._log('warn', 'drop-future-replayup'); return 'rejected'; } // §5 bad-clock
     if (role.cacheIds.has(m.msgId)) return 'held';                       // already have it
-    if (this._tombstoned(role, m.msgId, m.json)) return 'held';          // killed → don't resurrect via replay-up
+    const tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs);   // 4.131.0: commit a supersede only after the cache write (Aster R1)
+    if (tv?.kind === 'suppress' && tv.unvouchedNewer) {                  // Orion P2: not held — a HANDOFFACK must not claim it
+      this._log('warn', 'stamped-republish-unvouched', { msgId: String(m.msgId).slice(0, 12), publishTs: m.publishTs, killTs: tv.tomb?.killTs });
+      return 'unvouched';
+    }
+    if (tv?.kind === 'suppress') { if (tv.viaClaim) this._promoteClaim(role, m.msgId, tv); return 'held'; }   // killed → don't resurrect via replay-up (verified above)
     if (!this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq }, cut)) return 'refused';
+    if (tv && role.cacheIds.has(m.msgId)) this._tombstoneCommit(role, m.msgId, tv);   // revoke or supersede, only once cached (Orion D3)
     // Phase 3 shadow: observe the VERIFIED body (env passed verifyEnvelope + the
     // topic-binding check above) if it survived the cache write. The observer
     // independently re-binds the topic too (defense in depth). No-op flag-off.
@@ -1263,11 +1272,35 @@ export const wireHandlersMethods = {
         // be retained or re-fanned (Aster B1). A proof that fails is stripped, so
         // _applyKill installs the tombstone WITHOUT an unverified/cross-carrier proof.
         let mm = m;
-        if (this._tombAuthority && m.kill && !(await this._taVerifyBoundKill(topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
+        if (this._killProofs && m.kill && !(await this._verifyKillProof(role, topicBig, m))) { const { kill, ...rest } = m; mm = rest; }
+        else if (!this._killProofs && m.kill) { const { kill, ...rest } = m; mm = rest; }
+        if (mm.claims) { const { claims, ...rest } = mm; mm = this._killProofs ? { ...rest, claims: await this._verifyKillClaims(role, topicBig, mm) } : rest; }
         this._applyKill(role, topicBig, mm, null, (deliverAccepted && decision) ? decision.g : null);
         continue;
       }
-      if (this._tombstoned(role, m.msgId, m.json)) continue;          // killed → suppress (don't cache/deliver/re-fan)
+      // 4.131.0 (Aster 61bad8a8 R2): DELIVER bodies are not verified on this
+      // path, so a frame may only remove a tombstone (revoke or supersede) after
+      // its envelope verifies and binds to the msgId. The verdict is re-read
+      // after the await; a supersede commits only once the body is cached.
+      let tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs, { stampTrusted: !!(this._topicLifetime && deliverAccepted) });
+      if (tv?.kind === 'suppress') continue;                               // killed → suppress (don't cache/deliver/re-fan)
+      if (tv) {
+        let ok = false;
+        // ...and binds to THIS topic: the msgId omits the topic, so the same
+        // signed content on another topic carries the same msgId (Orion D2).
+        try {
+          const env = JSON.parse(m.json);
+          ok = env?.msgId === m.msgId && (await verifyEnvelope(env))?.ok === true
+            && (await deriveTopicIdBig({ region: env.topic?.region, owner: env.topic?.owner, name: env.topic?.name, write: env.topic?.write })) === topicBig;
+        } catch { ok = false; }
+        if (!ok) { this._log('warn', 'tombstone-unverified-body', { msgId: String(m.msgId).slice(0, 12), kind: tv.kind }); continue; }
+        tv = this._tombstoneVerdict(role, m.msgId, m.json, m.publishTs, { stampTrusted: !!(this._topicLifetime && deliverAccepted) });
+        if (tv?.kind === 'suppress') continue;
+        // Provenance (Orion e47eb97c, D1): armed, a supersede is taken only
+        // from an ACCEPTED current-generation DELIVER (as TL-B08 credits
+        // custody); a data-only or ungated frame cannot lift a kill.
+        if (tv?.kind === 'supersede' && this._topicLifetime && !deliverAccepted) { this._log('warn', 'tombstone-unaccepted-deliver', { msgId: String(m.msgId).slice(0, 12) }); continue; }
+      }
       // the CURRENT upstream SENT this body: it holds it (Topic Lifetime 4.7, TL-B02/B05). Armed only; the set is bound to the attachment above and pruned with the cache.
       if (deliverAccepted && role.upstreamHeldFrom === lc(payload.from)) { (role.upstreamHeld ??= new Set()).add(m.msgId); }   // credited only by an ACCEPTED current-generation DELIVER (TL-B08)
       if (role && !role.cacheIds.has(m.msgId)) {       // relay: cache once + re-fan once
@@ -1280,6 +1313,10 @@ export const wireHandlersMethods = {
           } catch { /* undecided: cached as an ordinary topic until a bound body arrives */ }
         }
         this._cachePush(role, { msgId: m.msgId, publishTs: m.publishTs, json: m.json, seq: m.seq });
+        if (tv) {                                        // a tombstone stood: it falls only with a cached body (Orion D3)
+          if (!role.cacheIds.has(m.msgId)) continue;     // not cached: no fan-out, no app delivery, the tombstone stands
+          this._tombstoneCommit(role, m.msgId, tv);
+        }
         if (Number.isFinite(m.seq) && m.seq > role.seq) role.seq = m.seq;   // keep counter ready if we're promoted to root
         this._fanout(role, m, lc(payload.from));       // exclude the sender (m carries seq)
       }
@@ -1354,7 +1391,7 @@ export const wireHandlersMethods = {
     // set. Carries killTs+signer so the receiver's tombstone matches.
     const dels = [];
     for (const [tgt, tomb] of role.tombstones) {
-      if ((tomb?.exp ?? 0) > this._now()) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, publishTs: tomb.killTs, seq: tomb.seq, ...(this._tombAuthority && tomb.kill ? { kill: tomb.kill } : {}) });
+      if ((tomb?.exp ?? 0) > this._now()) dels.push({ del: true, msgId: tgt, killTs: tomb.killTs, signer: tomb.signer ?? null, publishTs: tomb.killTs, seq: tomb.seq, ...(this._killProofs && tomb.kill ? { kill: tomb.kill } : {}), ...(this._killProofs && tomb.claims?.size ? { claims: [...tomb.claims.values()] } : {}) });
     }
     if (dels.length) {
       sent = true;
@@ -1399,6 +1436,80 @@ export const wireHandlersMethods = {
       this._log('info', 'cut-refused', { topic: idHex(topicBig).slice(0, 12), at: 'applyKill', msgId: String(target).slice(0, 12), gated: !!role.merge?.gate, gen: role.gen | 0, gen0: cut ? cut.gen0 : null });
       return false;
     }
+    // 4.131.0 (Orion KP-2/KP-3, CL-3): a carried proof (kill OR claim) that is NOT
+    // after the kill this node already superseded (role.superseded, RAK-1a) is
+    // that old kill again, whatever stamp the carrier gives it. Once a
+    // republication superseded a kill here, the only kill that can retract that
+    // msgId is one by the republication's author signed after the superseded
+    // kill; a foreign or older one is dropped.
+    const sup = role?.superseded?.get(target);
+    const supLive = !!(sup && sup.exp > this._now());
+    const staleK = (k) => supLive && ((sup.signer && lc(k?.signerPubkey ?? '') !== sup.signer) || !authorAfter(k?.ts, k?.seq, sup.authorTs, sup.authorSeq));
+    let mKill = (role && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) ? m.kill : null;
+    let staleProof = !!(mKill && staleK(mKill));
+    if (supLive && Array.isArray(m.claims)) m = { ...m, claims: m.claims.filter(k => !staleK(k)) };
+    // Orion CL-7a: a stale kill may ride with a VALID claim by the republication's
+    // author (a merged loser's {signer: foreign, kill: stale, claims: [kill2]}).
+    // The stale kill is dropped; the surviving author claim decides.
+    if (staleProof && this._killProofs && sup?.signer && Array.isArray(m.claims)) {
+      const sc = m.claims.find(k => lc(k?.signerPubkey ?? '') === sup.signer) || null;
+      if (sc) {
+        const { kill: _stale, ...rest } = m; m = rest; mKill = null; staleProof = false;
+        if (!role.cache.some(c => c.msgId === target)) { m = { ...m, signer: sup.signer, kill: sc, claims: [] }; mKill = sc; }
+      }
+    }
+    if (role && !role.tombstones.has(target)) {
+      if (staleProof) {
+        this._log('info', 'kill-superseded-ignored', { msgId: String(target).slice(0, 12), killAuthorTs: mKill.ts, supersededTs: sup.authorTs });
+        return;
+      }
+      // A body held here proves its author (msgId binds the publisher), so the
+      // body decides whether this deletion is for it:
+      //  - CL-3b: it must come from that author: their proof, their claim, or
+      //    (proof-less legacy carrier) their signer. Any other is refused.
+      //  - CL-6: an author proof or claim must be AFTER the held body on the
+      //    author's clock; an older one retracts an earlier publication of the
+      //    same msgId, whatever stamp it carries (no superseded record needed:
+      //    a handoff heir or new backup holds none).
+      //  - CL-5b: a verified author proof or claim is authoritative, so the
+      //    root-stamp test (RAK-1b) does not apply to it: it becomes this
+      //    marker's signer and kill, stamped past the held body.
+      //  - RAK-1b: a proof-less legacy carrier stamped BELOW the held body
+      //    retracts an earlier publication. Ignore it.
+      const held = role.cache.find(c => c.msgId === target);
+      if (held) {
+        let heldAuthor = null, hTs = null, hSeq = null;
+        try { const e = JSON.parse(held.json); heldAuthor = lc(e?.signerPubkey ?? '') || null; hTs = e?.ts; hSeq = e?.seq; } catch { heldAuthor = null; }
+        if (heldAuthor) {
+          const byProof = !!(mKill && lc(mKill.signerPubkey) === heldAuthor);
+          const authorClaim = (!byProof && this._killProofs && Array.isArray(m.claims)) ? (m.claims.find(k => lc(k?.signerPubkey ?? '') === heldAuthor) || null) : null;
+          const byLegacy = !mKill && !authorClaim && lc(m.signer ?? '') === heldAuthor;
+          if (!byProof && !authorClaim && !byLegacy) {
+            this._log('warn', 'del-not-by-body-author', { msgId: String(target).slice(0, 12), signer: String(m.signer ?? '').slice(0, 10) });
+            return;
+          }
+          const ak = byProof ? mKill : authorClaim;
+          if (ak) {
+            if (Number.isFinite(hTs) && authorAfter(hTs, hSeq, ak.ts, ak.seq)) {   // the held body is strictly AFTER this kill
+              this._log('info', 'kill-predates-held-body', { msgId: String(target).slice(0, 12), killAuthorTs: ak.ts, bodyTs: hTs });
+              return;
+            }
+            let kts = m.killTs, kseq = m.seq;
+            if (!(Number.isFinite(kts) && Number.isFinite(held.publishTs) && kts > held.publishTs)) {
+              if (role.isRoot) { kts = Math.max(role.lastTs + 1, this._now(), (Number.isFinite(held.publishTs) ? held.publishTs : 0) + 1); role.lastTs = kts; kseq = ++role.seq; }   // Orion CL-7a: never at or below the held body
+              else kts = (Number.isFinite(held.publishTs) ? held.publishTs : 0) + 1;
+            }
+            m = { ...m, signer: heldAuthor, kill: ak, killTs: kts, publishTs: kts, seq: kseq, claims: [] };
+          } else if (Number.isFinite(m.killTs) && Number.isFinite(held.publishTs) && m.killTs < held.publishTs) {
+            this._log('info', 'tombstone-predates-body', { msgId: String(target).slice(0, 12), killTs: m.killTs, publishTs: held.publishTs });
+            return;
+          }
+        } else if (Number.isFinite(m.killTs) && Number.isFinite(held.publishTs) && m.killTs < held.publishTs) {
+          this._log('info', 'tombstone-predates-body', { msgId: String(target).slice(0, 12), killTs: m.killTs, publishTs: held.publishTs });
+          return;
+        }
+      }
+    }
     // A retracted message has no durability obligation left. Cancel it BEFORE
     // the tombstone/fan-out work below, so no retry can outlive the retraction
     // (Aster: the kill must cancel atomically and preserve the tombstone).
@@ -1413,17 +1524,65 @@ export const wireHandlersMethods = {
     // also checks the signer and STRIPS an unverified proof before it reaches here). This
     // is the synchronous binding gate; a mismatched proof is never retained or re-fanned.
     let proof = null;
-    if (this._tombAuthority && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
+    if (this._killProofs && !staleProof && m.kill && typeof m.kill.msgId === 'string' && m.kill.msgId === target) {
       try { if (m.kill.topicId != null && idBig(m.kill.topicId) === topicBig) proof = m.kill; } catch { proof = null; }
     }
     // When a proof is retained, the proof's VERIFIED signer is authoritative and stamps
     // the tombstone + every proof-bearing marker we emit, so a receiver's _taVerifyBoundKill
     // (which now requires a present matching carrier signer) always accepts it — never an
     // internally inconsistent carrier (Aster S1/S2). Flag-off / proof-less keeps m.signer.
-    const proofSigner = proof ? lc(proof.signerPubkey) : null;
+    let proofSigner = proof ? lc(proof.signerPubkey) : null;
     const existing = role ? role.tombstones.get(target) : null;
     if (existing) own(existing);                      // a second obligation delivering the same deletion owns it too
-    if (role && existing && proof && !existing.kill) {
+    // Claims: verified kills of this msgId by signers OTHER than the tombstone's.
+    // Recorded, carried, never promoted to the tombstone's signer (Orion KP-1);
+    // the arriving body's author decides between them (see _tombstoneVerdict).
+    const addClaims = (tomb, list) => {
+      let added = 0;
+      for (const k of list) {
+        const s = lc(k?.signerPubkey ?? '');
+        if (!s || s === lc(tomb.signer ?? '')) continue;
+        const map = (tomb.claims ??= new Map());
+        const cur = map.get(s);
+        if (cur) { if (authorAfter(k.ts, k.seq, cur.ts, cur.seq)) { map.set(s, k); added++; } continue; }   // Orion CL-1c: a claimant's newer kill advances its claim
+        if (map.size < 4) { map.set(s, k); added++; }
+      }
+      return added;
+    };
+    const carried = (this._killProofs && Array.isArray(m.claims)) ? m.claims : [];
+    if (role && existing) {
+      const conflict = proof && existing.signer && lc(existing.signer) !== proofSigner ? [proof] : [];
+      const added = addClaims(existing, [...conflict, ...carried]);
+      if (conflict.length) { proof = null; proofSigner = null; }   // a foreign proof is a claim, never this tombstone's proof
+      // Orion CL-7b: the tombstone's OWN author's newer kill can arrive as a claim
+      // on a foreign-signed marker. addClaims skips the tombstone's signer, so use
+      // it as this tombstone's proof: the advance / upgrade below then applies it.
+      if (!proof && existing.signer) {
+        const own = carried.find(k => lc(k?.signerPubkey ?? '') === lc(existing.signer) && k?.msgId === target);
+        if (own) { proof = own; proofSigner = lc(own.signerPubkey); }
+      }
+      if (added) {
+        this._log('info', 'tombstone-claim-added', { msgId: String(target).slice(0, 12), claims: existing.claims.size });
+        this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, ...(existing.kill ? { kill: existing.kill } : {}), claims: [...existing.claims.values()] }, null);
+        if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
+      }
+    }
+    // Orion CL-1b: the SAME author's NEWER kill advances the standing tombstone
+    // (proof, stamp, expiry): otherwise a node holding kill1 ignores kill2 and a
+    // delayed copy of the killed republication supersedes the stale kill1.
+    if (role && existing && proof && existing.kill && lc(existing.signer ?? '') === proofSigner && authorAfter(proof.ts, proof.seq, existing.kill.ts, existing.kill.seq)) {
+      existing.kill = proof;
+      if (Number.isFinite(killTs) && killTs > (existing.killTs ?? 0)) { existing.killTs = killTs; if (Number.isFinite(seq)) existing.seq = seq; }
+      if (Number.isFinite(existing.authorTs)) { existing.authorTs = proof.ts; existing.authorSeq = proof.seq; }
+      existing.exp = this._now() + TTL_MS;
+      this._log('info', 'tombstone-advanced', { msgId: String(target).slice(0, 12), killAuthorTs: proof.ts });
+      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);
+      if (role.isRoot && this._rootReplicas) { const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null; this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {}); }
+      this._confirmPending(topicBig, target);          // Orion RAK-APP(c): the advanced kill confirms and reaches the app
+      this._deliverKillToApp(topicBig, target, existing.killTs, existing.seq);
+      return;
+    }
+    if (role && existing && proof && !existing.kill && (!existing.signer || lc(existing.signer) === proofSigner)) {   // Orion KP-1: never re-attribute a tombstone
       // B2 UPGRADE — a proof-less tombstone gains a verified, bound proof. Attach it and
       // converge it downstream (re-fan now + re-replicate; the replay / replicate /
       // handoff / pull emitters read tomb.kill). The destructive/idempotent side effects
@@ -1431,7 +1590,7 @@ export const wireHandlersMethods = {
       // so this is a PURE proof-attach and must not repeat them.
       existing.kill = proof;
       existing.signer = proofSigner;   // the proof's verified signer becomes authoritative (Aster S2) — no stale/conflicting carrier
-      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof }, null);
+      this._fanout(role, { del: true, msgId: target, killTs: existing.killTs, signer: existing.signer, publishTs: existing.killTs, seq: existing.seq, kill: proof, ...(existing.claims?.size ? { claims: [...existing.claims.values()] } : {}) }, null);   // Orion CL-2: claims ride every fan-out
       if (role.isRoot && this._rootReplicas) {
         const bridge = (typeof this.dht.bridgeId === 'function') ? this.dht.bridgeId() : null;
         this._replicateRole(topicBig, role, bridge, this._now()).catch(() => {});
@@ -1440,7 +1599,9 @@ export const wireHandlersMethods = {
     }
     if (role && !existing) {
       const tomb = { exp: this._now() + TTL_MS, killTs, signer: proof ? proofSigner : (m.signer ?? null), seq };
+      if (Number.isFinite(m.authorTs)) { tomb.authorTs = m.authorTs; if (Number.isFinite(m.authorSeq)) tomb.authorSeq = m.authorSeq; }   // 4.131.0: the verified kill's own signed (ts, seq) (direct kill at the root only; never from the wire)
       if (proof) tomb.kill = proof;                    // retain only the bound, caller-verified proof
+      addClaims(tomb, carried);                        // claims carried with the marker (verified by the funnel)
       // DELETION OWNERSHIP (Topic Lifetime 4.6; Aster b0748c4c X1): a tombstone
       // belongs to the generation that delivered it, so an obligation's end
       // drops only its own. Armed only; a root's own and a legacy carrier's are untagged.
@@ -1452,7 +1613,7 @@ export const wireHandlersMethods = {
       // fan the delete down — carries killTs + signer + seq so each receiver records
       // an identical tombstone (consistent replay + ordering + provisional authorship);
       // flag-on it also carries the BOUND signed kill + its verified signer so receivers verify it.
-      this._fanout(role, { del: true, msgId: target, killTs, signer: tomb.signer, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}) }, null);
+      this._fanout(role, { del: true, msgId: target, killTs, signer: tomb.signer, publishTs: killTs, seq, ...(proof ? { kill: proof } : {}), ...(tomb.claims?.size ? { claims: [...tomb.claims.values()] } : {}) }, null);   // Orion CL-2
       // Replicas/cohort aren't subscribers/children — they don't see the fan-out. Push the
       // new tombstone to the cohort EAGERLY (not on the next tick) so a co-hosting root or a
       // backup that promotes mid-window can't serve the killed body it already holds (the
@@ -1530,11 +1691,31 @@ export const wireHandlersMethods = {
     // (ingest checks the tombstone's signer; a forged kill is revoked on mismatch).
     const cached = role.cache.find(c => c.msgId === target);
     if (cached) {
-      let author = null; try { author = JSON.parse(cached.json)?.signerPubkey ?? null; } catch { /* */ }
+      let author = null, bTs = null, bSeq = null; try { const e = JSON.parse(cached.json); author = e?.signerPubkey ?? null; bTs = e?.ts; bSeq = e?.seq; } catch { /* */ }
       if (!author || lc(author) !== lc(kill.signerPubkey)) {
         this._log('warn', 'drop-unauthorized-kill', { target: String(target).slice(0, 12) });
         return 'consumed';
       }
+      // 4.131.0 (Orion RAK-1a): when the held body REPUBLISHED a msgId whose
+      // tombstone it superseded, a kill that is not after THAT superseded kill
+      // on the author's clock is a re-sent copy of it (or older): settled, acked,
+      // never stamped or applied.
+      // Orion CL-6 at a root that holds no superseded record (a promoted heir, a
+      // new backup): a kill the cached body is strictly AFTER, on the author's
+      // clock, retracts an earlier publication of this msgId. Settled, acked.
+      if (Number.isFinite(bTs) && Number.isFinite(kill.ts) && authorAfter(bTs, bSeq, kill.ts, kill.seq)) {
+        this._log('info', 'kill-predates-body', { target: String(target).slice(0, 12), killTs: kill.ts, bodyTs: bTs });
+        this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
+        return 'consumed';
+      }
+      const sup = role.superseded?.get(target);
+      if (sup && sup.exp > this._now()) {
+        if (!authorAfter(kill.ts, kill.seq, sup.authorTs, sup.authorSeq)) {
+          this._log('info', 'kill-predates-body', { target: String(target).slice(0, 12), killTs: kill.ts, supersededTs: sup.authorTs });
+          this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
+          return 'consumed';
+        }
+      } else if (sup) role.superseded.delete(target);
     }
     // STAMP the kill like a publish (monotonic + dense counter) so it orders +
     // replays via `since` AND occupies a seq slot (a missed kill shows as a gap).
@@ -1550,10 +1731,32 @@ export const wireHandlersMethods = {
     // generation or a retirement during the verify await refuses it, and a
     // refused duplicate is forwarded and NOT acked, exactly like a refused
     // fresh kill (Aster edfdd869).
-    const existingTomb = role.tombstones.get(target);
+    let existingTomb = role.tombstones.get(target);
+    // Orion CL-1a: the SAME author's NEWER kill is not a duplicate. It takes a
+    // fresh stamp below (its own authorTs), keeping the standing tombstone's
+    // claims; the old tombstone comes back if the cut refuses the new one.
+    let replacedTomb = null;
+    if (existingTomb && lc(existingTomb.signer ?? '') === lc(kill.signerPubkey)) {
+      const eTs = Number.isFinite(existingTomb.authorTs) ? existingTomb.authorTs : existingTomb.kill?.ts;
+      const eSeq = Number.isFinite(existingTomb.authorTs) ? existingTomb.authorSeq : existingTomb.kill?.seq;
+      if (Number.isFinite(eTs) && authorAfter(kill.ts, kill.seq, eTs, eSeq)) {
+        replacedTomb = existingTomb; role.tombstones.delete(target); existingTomb = null;
+      }
+    }
+    // A kill from a signer other than the tombstone's (Orion KP-1) takes the
+    // duplicate path below: _applyKill records it as a CLAIM, never as the
+    // tombstone's signer or proof, and the body's author decides on arrival.
     if (existingTomb) {
       if (this._applyKill(role, topicBig, { msgId: target, killTs: existingTomb.killTs, signer: lc(kill.signerPubkey), seq: existingTomb.seq, kill }, cut) === false) {
         this._cutDisposition(topicBig, T.KILL, payload);        // forwarded, not ingested: no ack from here
+        return 'consumed';
+      }
+      // Orion CL-4: a foreign signer's kill is acked only if it was RECORDED as a
+      // claim. Refused at the claim cap, it is not acked, so that sender's flight
+      // keeps retrying (the arriving body's author settles it).
+      const ks = lc(kill.signerPubkey);
+      if (lc(existingTomb.signer ?? '') !== ks && !role.tombstones.get(target)?.claims?.has(ks)) {
+        this._log('warn', 'kill-claim-not-recorded', { target: String(target).slice(0, 12), claims: role.tombstones.get(target)?.claims?.size ?? 0 });
         return 'consumed';
       }
       this._sendIngestAck(meta?.fromId, role, target, 'kill', payload);
@@ -1567,8 +1770,9 @@ export const wireHandlersMethods = {
     // Pass the COMPLETE signed kill so _applyKill can retain + transport the proof
     // (blocker b). The root re-stamps ts/seq for replay ordering; the signed kill
     // keeps the author's own ts/seq for verifyKill() at every downstream node.
-    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill }, cut) === false) {
+    if (this._applyKill(role, topicBig, { msgId: target, killTs: ts, signer: lc(kill.signerPubkey), seq, kill, authorTs: kill.ts, authorSeq: kill.seq, ...(replacedTomb?.claims?.size ? { claims: [...replacedTomb.claims.values()] } : {}) }, cut) === false) {
       role.seq = prevSeq; role.lastTs = prevTs; role.lastDemandAt = prevDemandAt;   // the stamp above did not commit
+      if (replacedTomb && !role.tombstones.has(target)) role.tombstones.set(target, replacedTomb);   // CL-1a: the old tombstone stands
       this._cutDisposition(topicBig, T.KILL, payload);          // forwarded, not ingested: no ack from here
       return 'consumed';
     }

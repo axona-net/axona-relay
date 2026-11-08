@@ -760,7 +760,7 @@ export const mergeMachineMethods = {
     let retained = 0, delsActive = 0;
     const now = this._now();
     for (const id of p.manifest.bodies) if (role.cacheIds.has(id) || (role.tombstones.get(id)?.exp ?? 0) > now) retained++;
-    for (const id of p.manifest.dels) if ((role.tombstones.get(id)?.exp ?? 0) > now) delsActive++;
+    for (const id of p.manifest.dels) if ((role.tombstones.get(id)?.exp ?? 0) > now || role.cacheIds.has(id)) delsActive++;   // 4.131.0 (Orion): a del superseded by a held republication is retained, as on the bodies line
     const full = retained === man.bodies && delsActive === man.dels && p.manifest.bodies.length === man.bodies && p.manifest.dels.length === man.dels && hash === man.hash;
     p.state = 'acked'; p.tS = now; p.hash = hash; p.full = full;
     this._route(idBig(p.loser), T.REPLAYACK, { topicId: payload.topicId, corr, winner: idHex(this.nodeId), winnerEpoch: role.epoch | 0, loser: p.loser, loserEpoch: p.loserEpoch, retained, delsActive, hash, disposition: full ? 'full' : 'short' });

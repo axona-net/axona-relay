@@ -118,6 +118,7 @@ export class AxonaManager {
     neverRoot = false,             // HARD refusal: a bridge is a bridge (transport + introduction only)
     identity = null,               // node TRANSPORT identity {pubkey, sign} — signs D1 INGEST-ACK proofs
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
+    killProofs = null,             // 4.131.0: carry + retain the author's signed kill proof with every tombstone (DEFAULT-ON; null = env KILL_PROOFS, default 1)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
@@ -239,6 +240,14 @@ export class AxonaManager {
     // is byte-identical to today. Enforcement (making this the source of truth) is
     // a SEPARATE gate that also needs the signed exp from the envelope flag day.
     this._tombAuthority = tombstoneAuth ? makeTombstoneAuthority() : null;
+    // SIGNED-KILL PROOF CARRIAGE (4.131.0, David 2026-11-06 "build the proof
+    // carriage"; Orion e862068e P1/P3, Aster d165d9ce). Independent of the shadow
+    // authority above: a verified, bound proof is retained in the tombstone and
+    // carried on every propagation path (fan-out, replay, replicate, handoff,
+    // merge), so every holder knows the author's own kill (ts, seq) and decides a
+    // republication exactly as the root that verified the kill. Off: proof-less
+    // tombstones fail closed (4.130.0 behaviour at every non-root holder).
+    this._killProofs = !!(killProofs ?? envNum('KILL_PROOFS', 1)) || !!this._tombAuthority;
 
     // REF-1.1 E2.1: the Boundary-1 registry is now the SOLE registration door for
     // the 19 routed handlers — _registerHandlers() calls registerFrame() at each

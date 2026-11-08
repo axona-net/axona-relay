@@ -46,7 +46,14 @@ export class DurabilityLedger {
   // A root stamped a message. The durability obligation opens here and can only
   // be discharged by evidence — never by the message being seen locally.
   open(msgId, topicBig) {
-    if (!msgId || this._m.has(msgId)) return;
+    if (!msgId) return;
+    // 4.131.0 (Orion P5): a msgId is content-derived, so an author's republication
+    // after a kill stamps the SAME msgId again. A terminal entry from the killed
+    // copy (verified / cancelled / undurable) must not stand in for the new one;
+    // only a still-pending obligation is kept.
+    const prior = this._m.get(msgId);
+    if (prior && prior.state === 'pending') return;
+    if (prior) this._m.delete(msgId);
     this._m.set(msgId, { topicBig, state: 'pending', attempts: 0, at: this._now() });
     this._prune();
   }
