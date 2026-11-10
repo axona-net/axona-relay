@@ -49,6 +49,8 @@ import { renderCtx } from './logctx.js';
 import { readFile } from 'node:fs/promises';
 import { appendFileSync, mkdirSync } from 'node:fs';
 import { buildHealthDump } from './healthdump.js';
+import { buildPeerDump } from './peerdump.js';
+import { watchDumpRequest } from './dumprequest.js';
 import { watchStopFile } from './stopfile.js';
 
 const RELAY_VERSION = JSON.parse(
@@ -296,7 +298,12 @@ async function main() {
   //     systemctl kill -s SIGUSR1 axona-relay@<region>.service
   // then read the `health-dump` line from journalctl. Read-only; it cannot
   // change relay behaviour, and a throw here must never reach the relay.
-  process.on('SIGUSR1', () => {
+  //
+  // PEER DUMP (0.198.0, David 2026-11-09): the same request also prints
+  // `peer-dump`, this relay's own node id and the node ids it holds a channel
+  // to (src/peerdump.js). It is a SECOND line so `health-dump` keeps its size
+  // and its readers. Each line fails alone: a throw in one never costs the other.
+  const emitDumps = () => {
     try {
       if (!peer) { onLog('warn', 'health-dump-unavailable', { why: 'peer not yet connected' }); return; }
       const h = peer.health();
@@ -324,10 +331,25 @@ async function main() {
       try { ledger = transport?.channelLedgerStats?.() ?? null; } catch { ledger = null; }
       try { mesh = transport?.mesh?.degreeStats?.() ?? null; } catch { mesh = null; }
       onLog('info', 'health-dump', buildHealthDump(h, { ledger, mesh }));
+      try { onLog('info', 'peer-dump', buildPeerDump(h, transport, { relay: RELAY_VERSION, kernel: KERNEL_VERSION })); }
+      catch (e) { try { onLog('warn', 'peer-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ } }
     } catch (e) {
       try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ }
     }
-  });
+  };
+  process.on('SIGUSR1', emitDumps);
+  // Windows has no SIGUSR1, and a service has no console. There the request is
+  // a file (src/dumprequest.js): rewrite `dump-requests/request` in the checkout
+  // and every relay sharing it dumps once. RELAY_DUMP_DIR arms the same watcher
+  // on any platform; unset, only win32 polls.
+  {
+    const dumpDir = process.env.RELAY_DUMP_DIR
+      || (process.platform === 'win32' ? joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'dump-requests') : null);
+    if (dumpDir) {
+      const w = watchDumpRequest(dumpDir, emitDumps);
+      if (w) onLog('info', 'dump-request-armed', { path: w.path });
+    }
+  }
 
   // Resilient startup: a bridge that's down or restarting (ECONNREFUSED / 502 /
   // handshake timeout) must not kill the relay. webTransport's reconnect:true
