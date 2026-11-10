@@ -10,19 +10,22 @@
 #   ... relayctl.ps1 roll    -Kernel 4.101.0    # pull, install, then restart slot by slot behind a gate
 #   ... relayctl.ps1 start|stop -Slot 7
 #   ... relayctl.ps1 uninstall                  # stop and delete every service
+#   ... relayctl.ps1 dump                       # READ-ONLY: ask every relay for its health-dump and peer-dump lines, print them
 #
 # Every mutating command writes a transcript to relay-logs\relayctl-<UTC>.out on
 # the host, so the result is read there, never from a buffered ssh stream.
 # Status lines go to the host stream (Write-Host) so Status can return a bool.
+# `status` and `dump` change no service: they take no lock and write no transcript.
 # Exit code: 0 = done and verified, 1 = stopped by a gate or a check.
 
 param(
   [Parameter(Position = 0, Mandatory = $true)]
-  [ValidateSet('status', 'install', 'cutover', 'roll', 'start', 'stop', 'uninstall')]
+  [ValidateSet('status', 'install', 'cutover', 'roll', 'start', 'stop', 'uninstall', 'dump')]
   [string]$Command,
   [int]$Slot = 0,
   [string]$Kernel = '',
   [int]$AdvanceCap = 90,
+  [int]$DumpWaitSec = 6,
   [string]$HostName = 'axona-win'
 )
 $ErrorActionPreference = 'Stop'
@@ -212,6 +215,66 @@ function Status {
   return ($running -eq $Count -and $inv.Bare.Count -eq 0)
 }
 
+# ---- dump request (READ-ONLY, relay 0.198.0) ---------------------------------
+# NOT DumpSlot above: that writes a MINIDUMP of a stalled process. This asks
+# running relays for two LOG LINES, `health-dump` and `peer-dump`.
+#
+# Windows has no SIGUSR1, so a relay here is asked by rewriting ONE file,
+# dump-requests\request, in the relay checkout. Every relay polls that file's
+# modification time every 2 s and logs its dumps once per change
+# (src/dumprequest.js). This verb notes each log's length, rewrites the file,
+# waits, and prints only what each relay logged AFTER the request, one line per
+# dump, prefixed with the slot:
+#     svc-07 health-dump {...}
+#     svc-07 peer-dump {...}
+#     svc-07 no-dump            (stopped, or a relay older than 0.198.0)
+# A relay on 0.198.0 answers with both lines. A line already in the log from an
+# earlier request is never printed: a stale view must not be read as current.
+# It starts, stops and reconfigures nothing, takes no lock, writes no transcript.
+function ReadFrom([string]$path, [long]$offset) {
+  $fs = New-Object System.IO.FileStream($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+  try {
+    if ($offset -gt $fs.Length) { $offset = 0 }   # the log was replaced under us (a restart)
+    [void]$fs.Seek($offset, [System.IO.SeekOrigin]::Begin)
+    $sr = New-Object System.IO.StreamReader($fs, [System.Text.Encoding]::UTF8)
+    return $sr.ReadToEnd()
+  } finally { $fs.Dispose() }
+}
+function RequestDumps {
+  $dir = Join-Path $RelayDir 'dump-requests'
+  if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir | Out-Null }
+  $before = @{}
+  for ($i = 1; $i -le $Count; $i++) {
+    $log = LogPath $i
+    $before[$i] = if (Test-Path $log) { [long](Get-Item $log).Length } else { [long]0 }
+  }
+  Set-Content -Path (Join-Path $dir 'request') -Value ([DateTime]::UtcNow.ToString('o')) -Encoding ASCII
+  Start-Sleep -Seconds $DumpWaitSec
+  $health = 0; $peers = 0
+  for ($i = 1; $i -le $Count; $i++) {
+    $slot = 'svc-' + $i.ToString('00')
+    $log = LogPath $i
+    $h = $null; $p = $null
+    if (Test-Path $log) {
+      $text = $null
+      try { $text = ReadFrom $log ([long]$before[$i]) } catch { $text = $null }
+      if ($text) {
+        foreach ($line in ($text -split "`n")) {
+          $at = $line.IndexOf('] health-dump {')
+          if ($at -ge 0) { $h = $line.Substring($at + 2).TrimEnd(); continue }
+          $at = $line.IndexOf('] peer-dump {')
+          if ($at -ge 0) { $p = $line.Substring($at + 2).TrimEnd() }
+        }
+      }
+    }
+    if ($h) { $health++; Write-Output "$slot $h" }
+    if ($p) { $peers++;  Write-Output "$slot $p" }
+    if (-not $h -and -not $p) { Write-Output "$slot no-dump" }
+  }
+  Write-Output ("SUMMARY dumps health={0}/{1} peer={2}/{1} waited={3}s" -f $health, $Count, $peers, $DumpWaitSec)
+  return
+}
+
 function WithLock([scriptblock]$body) {
   $mutex = New-Object System.Threading.Mutex($false, 'Global\axona-relayctl')
   $got = $false
@@ -229,6 +292,8 @@ function WithLock([scriptblock]$body) {
 $script:rc = 0
 switch ($Command) {
   'status' { if (-not (Status)) { $script:rc = 1 } }
+  # READ-ONLY, beside status and outside WithLock on purpose (see RequestDumps).
+  'dump'   { RequestDumps }
 
   'install' { WithLock {
     BuildWrapper

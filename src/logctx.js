@@ -81,7 +81,9 @@ export const EVIDENCE_CAP = 4_000;  // structured ctx — bounded, but never sev
 // on a hot path. `armed-*` is a prefix because the canary runbook reads its
 // thresholds out of a family of them; `health-dump` is exact, because guessing
 // at suffixes is how an allowlist quietly grows to cover things nobody checked.
-const FULL_FIDELITY_EVENTS = new Set(['health-dump']);
+// `peer-dump` (0.198.0) is the same case: asked for, off the hot path, and a
+// peer list severed at 4000 characters names half a relay's neighbours.
+const FULL_FIDELITY_EVENTS = new Set(['health-dump', 'peer-dump']);
 
 /** True when `event` is emitted at full fidelity regardless of size or shape. */
 export function isFullFidelity(event) {
