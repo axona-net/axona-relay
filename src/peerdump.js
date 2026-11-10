@@ -21,8 +21,19 @@
 // is transport.boundPeers(), the union of the bridge socket (at most one) and
 // the WebRTC mesh. It is NOT the synaptome: the synaptome is routing-table
 // membership and can name a node whose channel has closed. Synaptome entries
-// with no bound channel are listed apart, in `unbound`, so the two are never
+// with no bound channel are COUNTED apart, in `unbound`, so the two are never
 // counted as one.
+//
+// `unbound` IS A NUMBER (0.200.0, David 2026-11-10 UTC: "build the 0.200.0 with
+// the unbound count"). 0.198.0 and 0.199.0 printed the ids themselves. No
+// reader used them: the collector kept their count and the viewer draws live
+// channels only (Orion, council e5591be8). An id in a relay's log is a
+// correlator on disk, and one that names a node this relay holds no channel
+// to is the stalest kind. The line now names bound peers and nobody else.
+// `unbound` is null when either list could not be read: the synaptome, or the
+// bound channels it is subtracted from. Without the bound list every synaptome
+// member would count as unbound, and that number is the synaptome size under
+// a wrong name. A count that could not be made is never zero.
 //
 // LINK KIND. `ws` = the bridge socket and no mesh channel. `turn` = a mesh
 // channel whose nominated candidate pair has a `relay` end (mesh.js getPeers:
@@ -100,12 +111,16 @@ export function buildPeerDump(h, transport, meta = {}) {
   }
 
   // Synaptome members with no bound channel: routing-table entries, not links.
-  const unbound = [];
-  if (Array.isArray(h?.peers)) {
+  // Counted, never listed. The set lives for this call and is not returned.
+  // No count without the bound list: there is nothing to subtract.
+  let unbound = null;
+  if (complete && Array.isArray(h?.peers)) {
+    const loose = new Set();
     for (const p of h.peers) {
       const hex = idHex(p);
-      if (hex && hex !== self && !seen.has(hex) && !unbound.includes(hex)) unbound.push(hex);
+      if (hex && hex !== self && !seen.has(hex)) loose.add(hex);
     }
+    unbound = loose.size;
   }
 
   return {

@@ -12,7 +12,8 @@
 //      upper-case and short strings are null
 //   2  faithful: one row per bound channel, link kind from the candidate
 //      types (webrtc, turn, mesh, ws, null), rtt, state, class, open age
-//   3  unbound = synaptome ids with no bound channel; self and bound ids out
+//   3  unbound = the COUNT of synaptome ids with no bound channel; self and
+//      bound ids out; no such id appears anywhere in the line (0.200.0)
 //   4  no transport, a throwing boundPeers: complete false, count NULL (a
 //      list that could not be read is never an empty list)
 //   5  throwing getPeers / meshIdFor / classOf / getLatency: rows survive
@@ -74,7 +75,8 @@ ok('1c idHex: negative, oversized, number, object, upper-case, short are null',
   ok('2e the bridge socket: link ws, bridge true', br && br.link === 'ws' && br.bridge === true && br.rttMs === 7, JSON.stringify(br));
   ok('2f only the bridge row carries the bridge flag once serialised', JSON.parse(JSON.stringify(d)).peers.filter((p) => 'bridge' in p).length === 1);
   // 3
-  ok('3 unbound: the synaptome id with no channel, and only that', d.unbound.length === 1 && d.unbound[0] === hx(20), JSON.stringify(d.unbound));
+  ok('3 unbound: a count of 1, the synaptome id with no channel', d.unbound === 1, JSON.stringify(d.unbound));
+  ok('3a the unbound id itself is nowhere in the line; a bound id is (control)', !JSON.stringify(d).includes(hx(20)) && !renderCtx('peer-dump', d).includes(hx(20)) && renderCtx('peer-dump', d).includes(hx(10)));
   ok('3b a mesh row with no bound node (mZ) adds no peer', d.peers.length === 5);
 }
 
@@ -84,13 +86,15 @@ ok('1c idHex: negative, oversized, number, object, upper-case, short are null',
     ['a throwing boundPeers', transport({ boundPeers: () => { throw new Error('boom'); } })],
     ['a boundPeers that returns a non-array', transport({ boundPeers: () => 'nope' })]]) {
     let d = null, threw = null; try { d = buildPeerDump(h, t, { now: NOW }); } catch (e) { threw = e; }
-    ok(`4 ${name}: complete false, count NULL, no rows, synaptome ids kept as unbound`,
-      !threw && d.complete === false && d.count === null && d.peers.length === 0 && d.unbound.length === 2 && d.unbound.includes(hx(10)) && d.unbound.includes(hx(20)), String(threw || JSON.stringify(d)));
+    ok(`4 ${name}: complete false, count NULL, no rows, unbound NULL (nothing to subtract from), synaptome size kept, no id printed`,
+      !threw && d.complete === false && d.count === null && d.peers.length === 0 && d.unbound === null && d.synaptome === 4 && !JSON.stringify(d).includes(hx(10)) && !JSON.stringify(d).includes(hx(20)), String(threw || JSON.stringify(d)));
   }
   let d = null, threw = null; try { d = buildPeerDump(null, null); } catch (e) { threw = e; }
-  ok('4b no health object either: every field null or empty, nothing thrown', !threw && d.nodeId === null && d.complete === false && d.count === null && d.synaptome === null && d.peers.length === 0 && d.unbound.length === 0 && d.relay === null && d.kernel === null, String(threw || JSON.stringify(d)));
+  ok('4b no health object either: every field null or empty, nothing thrown', !threw && d.nodeId === null && d.complete === false && d.count === null && d.synaptome === null && d.peers.length === 0 && d.unbound === null && d.relay === null && d.kernel === null, String(threw || JSON.stringify(d)));
   const e = buildPeerDump(health([]), transport({ boundPeers: () => [] }), { now: NOW });
-  ok('4c control: a READ empty list is complete true, count 0', e.complete === true && e.count === 0);
+  ok('4c control: a READ empty list is complete true, count 0, unbound 0', e.complete === true && e.count === 0 && e.unbound === 0);
+  const np = buildPeerDump({ nodeId: hx(1), synaptomeSize: 3, peers: 'nope' }, transport(), { now: NOW });
+  ok('4d a synaptome list that is not an array: unbound NULL, never 0; rows survive', np.unbound === null && np.count === 5);
 }
 
 // 5 ---------------------------------------------------------------------
@@ -110,8 +114,9 @@ ok('1c idHex: negative, oversized, number, object, upper-case, short are null',
 { const d = buildPeerDump(health([hx(1), 'junk', 42, null, hx(20), hx(20)]),
     transport({ boundPeers: () => [SELF, A, A, hx(10), 'junk', 42, null, undefined, -1n, 1n << 264n, {}, [], B] }), { now: NOW });
   ok('6 hostile bound list: self, duplicates (bigint and hex), junk and bad bigints dropped', d.count === 2 && d.peers.map((p) => p.id).join() === [hx(10), hx(11)].join(), JSON.stringify(d.peers.map((p) => p.id.slice(-4))));
-  ok('6b hostile synaptome list: junk dropped, duplicates collapsed, self out', d.unbound.length === 1 && d.unbound[0] === hx(20), JSON.stringify(d.unbound));
-  ok('6c every id in the dump is 66 lower-case hex', [d.nodeId, ...d.peers.map((p) => p.id), ...d.unbound].every((s) => /^[0-9a-f]{66}$/.test(s)));
+  ok('6b hostile synaptome list: junk dropped, duplicates collapsed, self out: count 1', d.unbound === 1, JSON.stringify(d.unbound));
+  ok('6c every id in the dump is 66 lower-case hex', [d.nodeId, ...d.peers.map((p) => p.id)].every((s) => /^[0-9a-f]{66}$/.test(s)));
+  ok('6d the line holds exactly the ids it should: own id + one per bound row', (JSON.stringify(d).match(/[0-9a-f]{66}/g) || []).length === 1 + d.peers.length);
 }
 
 // 7 ---------------------------------------------------------------------
@@ -152,7 +157,8 @@ ok('1c idHex: negative, oversized, number, object, upper-case, short are null',
   const line = renderCtx('peer-dump', d);
   const bytes = Buffer.byteLength(`[2026-11-10T00:00:00.000Z] peer-dump ${line}`);
   let back = null; try { back = JSON.parse(line); } catch { /* */ }
-  ok('8 120 bound + 50 unbound renders whole: every row parses back', back && back.peers.length === 120 && back.unbound.length === 50 && back.count === 120, `len ${line.length}`);
+  ok('8 120 bound + 50 unbound renders whole: every row parses back, unbound is the number 50', back && back.peers.length === 120 && back.unbound === 50 && back.count === 120, `len ${line.length}`);
+  ok('8a the rendered line holds 121 ids: own id + 120 bound, no unbound id', (line.match(/[0-9a-f]{66}/g) || []).length === 121 && !line.includes(hx(5000)));
   ok(`8b the line is under the journald limit of 49152 bytes (${bytes})`, bytes < 49152, String(bytes));
   const cut = renderCtx('peer-dump-like', d);
   let cutBack = null; try { cutBack = JSON.parse(cut); } catch { /* */ }
