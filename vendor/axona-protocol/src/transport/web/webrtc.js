@@ -573,6 +573,13 @@ export class WebRTCTransport extends Transport {
     return meshId ? this._mesh.getLatency(meshId) : -1;
   }
 
+  /** 4.148.0 — smoothed round trip of the bound channel to `nodeId`, or null. Read-only. */
+  getRtt(nodeId) {
+    const meshId = this._meshIdByNodeId.get(nodeId);
+    if (!meshId || typeof this._mesh.getRtt !== 'function') return null;
+    return this._mesh.getRtt(meshId);
+  }
+
   // ─── Internal: route incoming frames ─────────────────────────────────
 
   async _onMessage(fromMeshId, msg) {

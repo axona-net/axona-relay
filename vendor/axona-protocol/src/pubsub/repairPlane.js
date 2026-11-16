@@ -621,6 +621,14 @@ export const repairPlaneMethods = {
   // failing" — the same move that made replicate-all-failed attributable in
   // 4.76.2. Non-reporting adapters resolve no verdict and appear nowhere.
   _reportRouteOutcomes() {
+    // 4.149.0 per-type tally: one line per tick while anything was counted,
+    // drained on report. `la` is the lookahead answer count so far (cumulative).
+    const tt = this._typeTally;
+    if (tt && (tt.out.size || tt.in.size)) {
+      const la = this.dht?._lookaheadAnswerStats;
+      this._log('info', 'route-type-tally', { out: Object.fromEntries(tt.out), in: Object.fromEntries(tt.in), ...(la ? { la: { answers: la.answers, skipped: la.skipped } } : {}) });
+      tt.out.clear(); tt.in.clear();
+    }
     const s = this._routeStats;
     if (!s || s.fail === 0) { if (s) { s.ok = 0; s.by.clear(); } return; }
     const top = [...s.by.entries()]
@@ -864,6 +872,7 @@ export const repairPlaneMethods = {
     // legit relay/backup role is never ours to repair-pull into.
     if (role && (role.isRoot || role.cache.length || role.backupOf || this._backupTopics.has(topicBig))) return;
     const now = this._now();
+    if (!role && this._regionIneligible(topicBig)) return;           // REGION ROLES: a read holder is a role-table entry that holds bodies
     if (!role) { role = makeRole(topicBig, false, this._now()); role.readHolder = true; this.axonRoles.set(topicBig, role); }
     if (!role.readHolder) return;
     if (role.sync.probeTries >= EMPTY_ROOT_PROBE_MAX) return;
@@ -996,12 +1005,13 @@ export const repairPlaneMethods = {
       for (const id of (Array.isArray(arr) ? arr : [])) {
         let b; try { b = idBig(id); } catch { continue; }
         if (b === this.nodeId || (bridge != null && b === bridge)) continue;   // never self / bridge
+        if (this._regionRoles && !this._roleRegionOk(t, b)) continue;          // REGION ROLES: a backup is in the topic's region
         const hex = lc(idHex(b)); if (seen.has(hex)) continue; seen.add(hex);
         cand.push(hex);
       }
       // The closest reachable nodes fill the replica cohort, whatever their region.
       // findKClosest already returns them closest-first; region is a placement hint
-      // folded into the id, never a selection gate.
+      // folded into the id, never a selection gate. (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
       want = this._replicaInherit ? this._inheritCohort(t, role, cand, bridge) : cand.slice(0, this._rootReplicas);
     } else {
       // Case 4: neighbours() throwing used to propagate out of a function that
@@ -1163,6 +1173,7 @@ export const repairPlaneMethods = {
     const add = (id, src) => {
       let hex; try { hex = lc(idHex(idBig(id))); } catch { return; }
       if (hex === selfHex || skip.has(hex) || pool.has(hex)) return;
+      if (this._regionRoles && !this._roleRegionOk(t, hex)) return;           // REGION ROLES
       pool.set(hex, src);
     };
     for (const id of (Array.isArray(discovered) ? discovered : [])) add(id, 'discovered');
@@ -1197,6 +1208,7 @@ export const repairPlaneMethods = {
     for (const nb of (this.dht.neighbors() || [])) {
       let b; try { b = idBig(nb); } catch { continue; }
       if (b === this.nodeId || (bridge != null && b === bridge)) continue;
+      if (this._regionRoles && !this._roleRegionOk(tBig, b)) continue;        // REGION ROLES
       cand.push(b);
     }
     cand.sort((a, b) => (a ^ tBig) < (b ^ tBig) ? -1 : 1);
@@ -1300,12 +1312,13 @@ export const repairPlaneMethods = {
   // live node) so the history isn't lost when we go. Best-effort; never throws.
   // Pick heir + runner-up from a candidate id list (closest-first as supplied).
   // The heir adopts the root claim; any reachable node is a valid, findable root,
-  // so region is not a selection gate — it is only a placement hint in the id.
+  // so region is not a selection gate — it is only a placement hint in the id. (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
   _pickHeirs(topicBig, ids) {
     const ordered = [];
     for (const id of (Array.isArray(ids) ? ids : [])) {
       let b; try { b = idBig(id); } catch { continue; }
       if (b === this.nodeId) continue;
+      if (this._regionRoles && !this._roleRegionOk(topicBig, b)) continue;    // REGION ROLES: the heir is in the topic's region, or there is none
       ordered.push(b);
     }
     const heir = ordered.length > 0 ? ordered[0] : null;
@@ -1452,11 +1465,12 @@ export const repairPlaneMethods = {
           try {
             const arr = await this.dht.findKClosest(j.t, 8);
             // Reachability first: a reachable heir can adopt the claim now. Region
-            // is not a selection gate — only a placement hint folded into the id.
+            // is not a selection gate — only a placement hint folded into the id. (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
             const reachTier = [], rest = [];
             for (const id of (Array.isArray(arr) ? arr : [])) {
               let b; try { b = idBig(id); } catch { continue; }
               if (b === this.nodeId) continue;
+              if (this._regionRoles && !this._roleRegionOk(j.t, b)) continue;   // REGION ROLES
               let hex = null; try { hex = lc(idHex(b)); } catch { continue; }
               const reach = typeof this._isReachableId === 'function' && this._isReachableId(hex);
               (reach ? reachTier : rest).push(b);

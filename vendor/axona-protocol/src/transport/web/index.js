@@ -170,6 +170,9 @@ export function webTransport({
   // treat graduation as a misjudgement and reconnect normally. A graduated node
   // re-dials the bridge if its bound-peer count later falls below this floor.
   graduationMeshFloor = 3,
+  // 4.140.0: how long the last peer-list is kept for a kernel handler that
+  // registers after it arrived (see composite.onPeerList below).
+  peerListReplayMs = 60_000,
   serveMeshFloor = null,          // R4: bound mesh peers needed to serve; null = graduationMeshFloor
   graduationRecheckMs = 5000,
   // BOUNDED MESH DEGREE (4.95.0). Null/absent ⇒ the mesh keeps a channel to
@@ -328,6 +331,7 @@ export function webTransport({
     socket.addEventListener('open', () => {
       socketOpen = true;
       graduated = false;
+      releasedBridgeId = null;
       stopGraduationWatch();
       log('bridge-socket-open', { bridgeUrl });
       setBridgeState('connecting');
@@ -377,6 +381,10 @@ export function webTransport({
       const code = ev && typeof ev.code === 'number' ? ev.code : null;
       log('bridge-socket-close', { code });
       bridge.handleConnClosed();
+      // Close a Retired Socket (4.136.0): the identity this socket was bound
+      // to, read before it is cleared, so the 4200 branch below can ask
+      // whether the WebRTC channel to THIS bridge is bound.
+      const bridgeIdAtClose = bridgeNodeIdBig;
       // Allow the persistent hello handler to re-bind on the next open.
       bridgeNodeIdBig   = null;
       bridgeServerNonce = null;   // fresh nonce per (re)connection
@@ -385,13 +393,21 @@ export function webTransport({
         stopped = true;
         stopStaleChecker();
         setBridgeState('upgrade-required', (ev && ev.reason) || 'client out of date');
-      } else if (code === GRADUATED_CLOSE_CODE && meshBoundCount() >= graduationMeshFloor) {
+      } else if (code === GRADUATED_CLOSE_CODE && (meshBoundCount() >= graduationMeshFloor || bridgeChannelBound(bridgeIdAtClose))) {
         // Bootstrap-nursery graduation: we're meshed, so keep the WebRTC mesh
         // and DON'T reconnect — freeing the bridge slot for a newcomer. A
         // watchdog re-dials if the mesh thins. (If we weren't actually meshed,
         // this branch is skipped and we reconnect below — self-correcting.)
+        //
+        // Close a Retired Socket (4.136.0, David 2026-11-12): a bridge closes
+        // the socket as soon as the WebRTC channel to it has replaced it. The
+        // channel then IS the relation, whatever the size of the mesh, so a
+        // 4200 with that channel bound is a release too. The watch below
+        // re-dials only when that channel is gone AND the mesh is thin: the
+        // socket exists only while there is no channel to carry the relation.
         stopStaleChecker();
         graduated = true;
+        releasedBridgeId = bridgeChannelBound(bridgeIdAtClose) ? bridgeIdAtClose : null;
         setBridgeState('graduated', (ev && ev.reason) || 'meshed — released by bridge');
         log('bridge-graduated', { meshPeers: meshBoundCount() });
         armGraduationWatch();
@@ -483,6 +499,15 @@ export function webTransport({
   let webrtcRef = null;
   /** Row 12: kernel handlers for the bridge `peer-list` sample (composite.onPeerList). */
   const peerListHandlers = new Set();
+  // 4.140.0: the most recent list handed to the handlers, and when. THE ORDER
+  // connect() RUNS IN makes this necessary: `await transport.start()` and then
+  // `await peer.start()`. The bridge sends its ONE peer-list on admission,
+  // during transport.start; the peer registers its handler in peer.start. So
+  // the kernel never saw the list, and the bootstrap-sample dial (4.135.0)
+  // never ran. Measured on testnet 2026-11-13: an observer registered before
+  // start saw a list with 1 graduated id, the peer counted 0 offers, and the
+  // same list replayed to the peer bound that node within 6 s.
+  let lastPeerList = null;   // { list: string[], at: number }
   // G4: the profile is built (and refused) HERE, before the mesh or any cap
   // consumer exists; a ledger turned off cannot carry pools.
   const poolProfile = meshPools ? makePoolProfile(meshPools) : null;
@@ -660,6 +685,8 @@ export function webTransport({
           // transport.bridgeInfo + onWelcome) — connId, the bridge's
           // package version, and its kernel version for the UI's
           // version row.
+          socketRtt = null;
+          try { bridge.resetRtt(); } catch { /* measurement only */ }   // a new socket is a new channel instance: it starts cold (4.148.0)
           bridgeInfo = {
             connId:        frame.connId ?? null,
             version:       frame.version ?? null,
@@ -715,6 +742,7 @@ export function webTransport({
           const graduated = sanitizeGraduatedSample(frame.graduated);
           if (graduated.length) log('peer-list-graduated', { offered: Array.isArray(frame.graduated) ? frame.graduated.length : 0, kept: graduated.length });
           const forHandlers = graduated.length ? peers.concat(graduated) : peers;
+          lastPeerList = { list: forHandlers.slice(), at: Date.now() };
           for (const h of peerListHandlers) { try { h(forHandlers.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ } }   // row 12: the directory sample
           if (typeof mesh.onPeerList === 'function') {
             return mesh.onPeerList(peers);
@@ -849,12 +877,16 @@ export function webTransport({
   let upgradeReason    = null;   // set when state === 'upgrade-required'
   let lastPongAt       = 0;
   let lastRtt          = null;
+  let socketRtt        = null;   // the newest round trip measured on THIS socket; null on a new one (4.148.0)
   const rttBuffer      = [];
   let staleTimer       = null;
   let reconnectTimer   = null;
   let reconnectAttempt = 0;
   let stopped          = false;  // composite.stop() sets this — suppresses reconnect
   let graduated        = false;  // released by the bridge while meshed — no reconnect
+  // Close a Retired Socket (4.136.0): the bridge whose channel was bound when
+  // it released this socket, or null for a plain graduation. Read by the watch.
+  let releasedBridgeId = null;
   // 4.108.0: a graduated node re-dialling ONLY for a fresh TURN credential. The
   // client-hello says so (`intent: 'turn-refresh'`), the peer-list — if a bridge
   // without the intent still sends one — is ignored, and the node returns to
@@ -908,6 +940,8 @@ export function webTransport({
       lastRtt = Math.max(0, Date.now() - t);
       rttBuffer.push(lastRtt);
       if (rttBuffer.length > RTT_WINDOW) rttBuffer.shift();
+      socketRtt = lastRtt;
+      try { bridge.recordRtt(lastRtt); } catch { /* measurement only */ }
     }
     if (bridgeState === 'stale') setBridgeState('open');
   }
@@ -932,15 +966,23 @@ export function webTransport({
   function meshBoundCount() {
     try { return webrtc.boundPeers().length; } catch { return 0; }
   }
+  /** Is the authenticated WebRTC channel to `id` (a bridge) bound right now? */
+  function bridgeChannelBound(id) {
+    if (typeof id !== 'bigint') return false;
+    try { return webrtc.boundPeers().some((p) => p === id); } catch { return false; }
+  }
   /** After graduation, watch the mesh; re-dial the bridge if it thins below the
-   *  floor so a node never strands itself off the network. */
+   *  floor so a node never strands itself off the network. A node released
+   *  with its channel to the bridge bound is not re-dialled while that channel
+   *  lives: the channel carries the relation. */
   function armGraduationWatch() {
     if (graduationTimer != null) return;
     graduationTimer = setInterval(() => {
       if (stopped) { stopGraduationWatch(); return; }
-      if (meshBoundCount() < graduationMeshFloor) {
+      if (meshBoundCount() < graduationMeshFloor && !bridgeChannelBound(releasedBridgeId)) {
         stopGraduationWatch();
         graduated = false;
+        releasedBridgeId = null;
         log('bridge-graduation-redial', { meshPeers: meshBoundCount(), floor: graduationMeshFloor });
         if (reconnect && autoHandshake) { setBridgeState('connecting'); openSocket(); }
       }
@@ -1340,7 +1382,18 @@ export function webTransport({
         // the graduation floor trusts locally. The bridge uses it to graduate
         // the best-meshed peer first (vitality-based graduation, #374), rather
         // than guessing from uptime. Additive field; no wire-version change.
-        socket.send(JSON.stringify({ type: 'ping', t: Date.now(), meshBound: meshBoundCount() }));
+        // Two-sided release (4.137.0; Orion acbffcc6 point 1): also say whether
+        // OUR channel to this bridge is bound. The bridge closes a retired socket
+        // on its own belief that the channel is up; a client that lost the
+        // channel knows first, and a false here withholds that close. Additive
+        // field; a bridge that does not read it behaves as before.
+        // Round-trip measurement (4.148.0): also carry OUR measured round trip
+        // to this bridge, once there is one ON THIS SOCKET (a reconnect does
+        // not carry the old socket's figure). The bridge only echoes this ping;
+        // it cannot time the socket itself, so this is the one way it learns
+        // the figure (bridge 2.191.0 keeps it per socket). Additive field; a
+        // bridge that does not read it behaves as before.
+        socket.send(JSON.stringify({ type: 'ping', t: Date.now(), meshBound: meshBoundCount(), bridgeBound: bridgeChannelBound(bridgeNodeIdBig), ...(typeof socketRtt === 'number' ? { rtt: socketRtt } : {}) }));
         bridge._emitPingTraffic('sent');
       } catch (err) {
         log('bridge-ping-send-failed', { err: err.message });
@@ -1699,6 +1752,18 @@ export function webTransport({
   composite.onPeerList = (handler) => {
     if (typeof handler !== 'function') throw new TypeError('onPeerList: handler must be a function');
     peerListHandlers.add(handler);
+    // A handler that registers AFTER a list arrived is given that list once,
+    // if it is younger than peerListReplayMs. This delivers a fact the
+    // handler was not yet there to hear; it asks the bridge for nothing and
+    // repeats nothing. A handler removed before the microtask runs is not
+    // called, and a handler present when the list arrived is not called twice.
+    const held = lastPeerList;
+    if (held && peerListReplayMs > 0 && Date.now() - held.at < peerListReplayMs) {
+      queueMicrotask(() => {
+        if (!peerListHandlers.has(handler) || lastPeerList !== held) return;   // removed, or a newer list has been delivered live
+        try { handler(held.list.slice()); } catch { /* a kernel handler that throws does not stop the bootstrap */ }
+      });
+    }
     return () => { peerListHandlers.delete(handler); };
   };
 

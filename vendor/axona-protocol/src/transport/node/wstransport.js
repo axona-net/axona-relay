@@ -27,6 +27,7 @@ import { Transport }                from '../../contracts/Transport.js';
 import { isHexId }                  from '../../utils/hexid.js';
 import { TransportError, ErrorCodes } from '../../errors.js';
 import { depositDispatchCapability } from '../../registry/index.js';
+import { RttEstimator } from '../rtt.js';
 import {
   buildAuthHello, verifyAuthHello, makeNonce, cbvFromNonces, AUTH_PROTO,
 } from '../handshake-auth.js';
@@ -437,6 +438,26 @@ export class WebSocketTransport extends Transport {
   /** RTT in ms. Bridges sample RTT in their own ping loop; this is a
    *  sentinel until the orchestrator threads through measured RTT. */
   getLatency(_nodeId) { return 50; }
+
+  /**
+   * 4.148.0 — a measured round trip per bound peer. This transport runs no
+   * ping loop of its own: its HOST does (the bridge's server pings each
+   * socket) and feeds the samples in with recordRtt. A peer the host never
+   * fed answers null. forgetRtt drops a peer's estimate when its socket goes.
+   * Read-only: getLatency above still answers 50 and nothing in the kernel
+   * acts on this.
+   */
+  recordRtt(nodeId, ms, now = Date.now()) {
+    const m = (this._rttByNodeId ??= new Map());
+    let e = m.get(nodeId);
+    if (!e) { if (m.size >= 4096) return false; e = new RttEstimator(); m.set(nodeId, e); }
+    return e.sample(ms, { now, source: 'own' });
+  }
+  forgetRtt(nodeId) { return this._rttByNodeId ? this._rttByNodeId.delete(nodeId) : false; }
+  getRtt(nodeId) {
+    const e = this._rttByNodeId?.get(nodeId);
+    return e ? e.snapshot() : null;
+  }
 
   // ─── Inbound dispatch ─────────────────────────────────────────────
 

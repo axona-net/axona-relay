@@ -168,6 +168,15 @@ function _canReceiveDispatch(recv) {
 // bounds the connection load a flood of triadic/hop_cache/lateral_spread
 // notifications can induce.
 const MAX_VERIFY_PROBES = 8;
+// Bootstrap Sample Dial (4.135.0): bounds. A bridge's sample is 16 by default.
+// Region check (regionRoles): how long a walk's verdict on a region is reused.
+// One value for both answers since 4.143.0: a "populated" kept for 30 s hid a
+// region's death from the app for that long.
+const REGION_SEEN_TTL_MS      = 5_000;
+const BOOTSTRAP_SAMPLE_MAX    = 16;      // ids kept from one offered list
+const BOOTSTRAP_SAMPLE_TRIES  = 2;       // dials per id, per offer
+const BOOTSTRAP_SAMPLE_TTL_MS = 60_000;  // an offer older than this is dropped undialed
+const BOOTSTRAP_HEX66 = /^[0-9a-f]{66}$/;
 // Max peers disclosed by a single local_probe reply (D-4): enough for an
 // honest annealing/dead-replace pick, too few to cheaply map the mesh.
 const LOCAL_PROBE_MAX   = 8;
@@ -245,7 +254,7 @@ export class AxonaPeer extends DHT {
    *        signed publishes (the default).  Apps that only call
    *        `peer.pub(topic, message, { sign: false })` can omit it.
    */
-  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, mergeCapable = null, directMessageTypes = undefined, enforceDirectMessageTypes = false }) {
+  constructor({ engine = null, domain = null, node, axonaManager = null, nodeIdentity = null, transport = null, persist = null, maxPublishBytes = null, synaptomeMaintain = null, admissionGate = null, presence = null, attemptGuard = null, rootReplicas = null, frameRegistry = false, mergeCapable = null, directMessageTypes = undefined, enforceDirectMessageTypes = false, bootstrapSample = true }) {
     super();
     if (!node) throw new Error('AxonaPeer: node is required');
     // Singleton-root replication fan-out (kernel v4.9.2). null → kernel default (2).
@@ -319,14 +328,27 @@ export class AxonaPeer extends DHT {
           // P2 (Mesh Partition Self-Heal v0.2): T_pex, S_pex, C_pex; P3: the PATH cooldown. Read only with the flags on.
           pexMs: synaptomeMaintain.pexMs ?? 60000, pexSample: synaptomeMaintain.pexSample ?? 16, pexCooldownMs: synaptomeMaintain.pexCooldownMs ?? 30000,
           noPathMs: synaptomeMaintain.noPathMs ?? 30000, noPathMaxMs: synaptomeMaintain.noPathMaxMs ?? 600000,
-          pexIncapableMs: synaptomeMaintain.pexIncapableMs ?? 600000 }
+          pexIncapableMs: synaptomeMaintain.pexIncapableMs ?? 600000,
+          /* No-Channel Sweep (council eb305550, Vega 56751848): N consecutive maintain ticks a table member may be reported neither connected nor in flight before the missing death is raised. 0 = OFF (default). */
+          noChannelTicks: Number.isInteger(synaptomeMaintain.noChannelTicks) && synaptomeMaintain.noChannelTicks > 0 ? synaptomeMaintain.noChannelTicks : 0 }
       : (synaptomeMaintain === true)
-        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000, noPathMaxMs: 600000, pexIncapableMs: 600000 }
+        ? { kNear: 5, intervalMs: 15000, maxPerTick: 3, kCache: 64, pPending: 8, directoryMs: 600000, pexMs: 60000, pexSample: 16, pexCooldownMs: 30000, noPathMs: 30000, noPathMaxMs: 600000, pexIncapableMs: 600000, noChannelTicks: 0 }
         : null;
     this._maintainTimer = null;
     this._maintainInflight = false;
     /** Row 12: NOMINATED identities (the candidate cache), bigint → { src, at }. */
     this._fillCache = new Map();
+    // Bootstrap Sample Dial (4.135.0): a node WITHOUT the fill still dials the
+    // ids a bridge offers in a peer-list's `graduated` field. Not the fill: no
+    // cache, no target, no retry schedule. One bounded pass per offered list,
+    // each id dialed at most BOOTSTRAP_SAMPLE_TRIES times, through the same
+    // verified path gossip takes (_considerCandidate). Inert until a bridge
+    // sends the field. `bootstrapSample: false` turns it off.
+    this._bootSampleOn = bootstrapSample !== false;
+    /** bigint → { at, tries } — the ids of the newest offer not yet dialed. */
+    this._bootSample = new Map();
+    this._bootSampleDraining = false;
+    this._bootSampleStats = { offers: 0, offered: 0, kept: 0, dialed: 0, bound: 0, failed: 0, expired: 0, skipped: 0 };
     this._fillStats = { ticks: 0, nominated: 0, nominateRefusedFull: 0, nominateIneligible: 0, dialed: 0, dialDeferred: 0, directoryRequests: 0, directoryUnavailable: 0 };
     this._fillLast = null;             // the last tick's report
     this._fillState = null;            // the last REPORTED liveness state (logged on change only)
@@ -740,6 +762,7 @@ export class AxonaPeer extends DHT {
     // onPeerBound handler receives BigInt (contract).
     if (transport && typeof transport.onPeerBound === 'function') {
       this._onPeerBoundUnsub = transport.onPeerBound((peerBig, _meshId, inc) => {
+        if (this._bootSample.size) queueMicrotask(() => { this._bootstrapSampleDrain(); });   // a bound peer is a path to relay through
         // Row 8: BIND ends the attempt's guard token (expiry-on-bind). A bind
         // of an identity this guard never dialed is ignored by the guard; a
         // bind on another incarnation than the one the attempt started is
@@ -784,7 +807,8 @@ export class AxonaPeer extends DHT {
     // dialing of that list is unchanged). Inert unless the fill is armed.
     if (transport && typeof transport.onPeerList === 'function') {
       this._onPeerListUnsub = transport.onPeerList((peers) => {
-        if (!Array.isArray(peers) || !this._fillArmed()) return;
+        if (!Array.isArray(peers)) return;
+        if (!this._fillArmed()) { this._bootstrapSampleOffer(peers); return; }
         // R12-3: the ANSWER is recorded here, by the handler that receives it
         // — an empty list is an answer too. The request step records only
         // that it sent; silence after a sent request stays 'sent'.
@@ -873,26 +897,7 @@ export class AxonaPeer extends DHT {
           const dead = (typeof peerBig === 'bigint') ? peerBig
             : (typeof peerBig === 'string' && isHexId(peerBig)) ? fromHex(peerBig) : null;
           if (dead === null) return;
-          const node = this._node;
-          if (!node) return;
-          node.synaptome?.delete(dead);
-          node.incomingSynapses?.delete(dead);
-          node.connections?.delete(dead);
-          // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. Row 10
-          // (v0.7 "Marks"): this is the FAIL input of the mark automaton; a
-          // first death writes the mark, a later one advances its schedule.
-          // A table some other owner installed as a bare Set keeps its shape;
-          // the reason then lives only in the log line below.
-          const marks = (node._deadPeers ??= new DeadPeers());
-          if (typeof marks.fail === 'function') marks.fail(dead, reason ?? 'unknown');
-          else marks.add(dead);
-          this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
-          // reason (4.76.3): the transport-level close cause, threaded through
-          // mesh _retire → onPeerLost. Transports that do not supply one (sim,
-          // pre-4.76.3) log 'unknown'. Makes eviction churn attributable.
-          this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
-          this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
-
+          this._peerDeath(dead, reason);   // the ONE death body (4.132.0): the transport's event and the no-channel sweep both end here
         } catch (err) {
           if (typeof console !== 'undefined') console.warn('AxonaPeer.onPeerDied: eviction failed', err);
         }
@@ -1027,11 +1032,28 @@ export class AxonaPeer extends DHT {
     registerFrame(transport, 'lookahead_probe', async (_fromId, payload) => {
       const target   = payload.target;
       const fromDist = payload.fromDist;
+      // LOOKAHEAD ANSWER LIVE (4.147.0; David 2026-11-15 "Build the lookahead-
+      // answer liveness check first"). The asker filters the peers it probes
+      // (dead, connected, on the path); until now the ANSWERER filtered
+      // nothing and named any table entry closer than fromDist. A table that
+      // still holds a dead member then names it, the asker forwards toward
+      // it, and the walk leaves the true closest node (testnet 2026-11-14/15:
+      // the topics that missed their closest host were exactly those XOR-
+      // closer to one dead host id). ON: a node names only a peer it could
+      // send to itself (_lookaheadNameable). OFF: the 4.146.0 answer.
+      const liveOnly = !!domain.LOOKAHEAD_ANSWER_LIVE;
+      const AS = liveOnly ? (this._lookaheadAnswerStats ??= { answers: 0, skipped: 0, terminalAfterSkip: 0 }) : null;
+      if (AS) AS.answers++;
       const fwd = [];
+      let skipped = 0;
       for (const syn of node.synaptome.values()) {
-        if ((syn.peerId ^ target) < fromDist) fwd.push(syn);
+        if (!((syn.peerId ^ target) < fromDist)) continue;
+        if (liveOnly && !this._lookaheadNameable(syn.peerId)) { skipped++; continue; }
+        fwd.push(syn);
       }
+      if (AS) AS.skipped += skipped;
       if (fwd.length === 0) {
+        if (AS && skipped) AS.terminalAfterSkip++;
         return { peerId: node.id, latency: 0, terminal: true };
       }
       const best = node.bestByAP(fwd, target, 0);
@@ -1322,6 +1344,13 @@ export class AxonaPeer extends DHT {
           && !(deadSet && deadSet.has(rp))
           && (connOk ? connOk(rp) : node.synaptome.has(rp));
         if (rpOk) { nextHopId = rp; rpathRest = msg.rpath.slice(1, SIGNAL_RPATH_MAX); RS.honoured++; } else { RS.unavailable++; }
+      }
+      // BOUND TARGET (4.145.0): this hop holds an open, healthy channel to the
+      // frame's target and the target is not on the path: deliver there.
+      if (nextHopId === null && this._domain?.BOUND_TARGET_DELIVER && this._boundTargetOk(targetBig, exclude)) {
+        nextHopId = targetBig;
+        const BT = (this._boundTargetStats ??= { lookup: 0, route: 0, origin: 0 });
+        BT.route++;
       }
       if (nextHopId === null && viaId !== null) {
         const viaOk = viaId !== meId && !exclude.has(viaId)
@@ -1882,6 +1911,10 @@ export class AxonaPeer extends DHT {
       // in the table; refused → stays BOUND and charged, and with the gate
       // armed its grace timer starts (case 2). GATED with the tick itself.
       this._reconcileBound();   // admissions are read from this._reconcileLast; the return below counts DIALS only
+      // 4.132.0: the reverse of the reconcile. Bound-not-in-table was offered above;
+      // in-table-with-no-channel is counted here and, after N ticks, dies. Needs no
+      // dial, so it too runs above the search backoff. OFF by default.
+      this._sweepNoChannel();
       // Slice 3: deficit backoff (opt-in, rides the attempt guard). A pass that
       // attempted nothing backs the next SEARCH off exponentially — an empty
       // deficit is usually an unpopulated band, and searching cannot fill it.
@@ -1950,6 +1983,72 @@ export class AxonaPeer extends DHT {
   // the dial (row 10, inside _considerCandidate).
 
   /** The fill runs only with the guard and the gate present (the arming rule). */
+  /**
+   * Bootstrap Sample Dial: take a bridge peer-list as received by the row-12
+   * handler on a node whose fill is NOT armed. Connection handles are not
+   * ids and are ignored; only lowercase 66-hex strings are read. The newest
+   * offer REPLACES what is left of the previous one. At most
+   * BOOTSTRAP_SAMPLE_MAX ids are kept.
+   * @param {unknown[]} peers
+   */
+  _bootstrapSampleOffer(peers) {
+    if (!this._bootSampleOn) return;
+    const node = this._node;
+    if (!node?.synaptome) return;
+    const st = this._bootSampleStats;
+    const now = Date.now();
+    const next = new Map();
+    let offered = 0;
+    for (const p of peers) {
+      if (typeof p !== 'string' || !BOOTSTRAP_HEX66.test(p)) continue;
+      offered++;
+      if (next.size >= BOOTSTRAP_SAMPLE_MAX) continue;
+      let big = null;
+      try { big = fromHex(p); } catch { big = null; }
+      if (typeof big !== 'bigint' || big === node.id || node.synaptome.has(big) || this._isBoundPeer(big)) continue;
+      if (!next.has(big)) next.set(big, { at: now, tries: 0 });
+    }
+    if (offered === 0) return;                       // a list with no ids leaves an earlier offer alone
+    st.offers++; st.offered += offered; st.kept += next.size;
+    this._bootSample = next;
+    this._emitLog?.('info', 'bootstrap-sample', { offered, kept: next.size });
+    this._bootstrapSampleDrain();
+  }
+
+  /**
+   * Dial what is left of the offer. Runs when an offer arrives and when a
+   * peer binds. With no bound peer there is nothing to relay a dial through
+   * and the pass waits. Each id is dialed at most BOOTSTRAP_SAMPLE_TRIES
+   * times and the whole offer expires BOOTSTRAP_SAMPLE_TTL_MS after it came.
+   */
+  async _bootstrapSampleDrain() {
+    if (this._bootSampleDraining || !this._bootSample.size) return;
+    this._bootSampleDraining = true;
+    const st = this._bootSampleStats;
+    try {
+      const node = this._node;
+      const t = node?.transport;
+      const sample = this._bootSample;
+      for (const [id, rec] of [...sample.entries()]) {
+        if (this._bootSample !== sample) break;                                            // a newer offer replaced this one
+        if (Date.now() - rec.at > BOOTSTRAP_SAMPLE_TTL_MS) { sample.delete(id); st.expired++; continue; }
+        if (!node?.synaptome || node.synaptome.has(id) || this._isBoundPeer(id)) { sample.delete(id); st.skipped++; continue; }
+        if (!this._isEligibleCandidate(id)) { sample.delete(id); st.skipped++; continue; }
+        let anyBound = false;
+        try { anyBound = typeof t?.boundPeers === 'function' && t.boundPeers().length > 0; } catch { anyBound = false; }
+        if (!anyBound) break;                                                              // no path yet; the next bind runs this again
+        rec.tries++;
+        let out = 'failed';
+        try { out = await this._considerCandidate(id, 'bootstrap'); } catch { out = 'failed'; }
+        if (out === 'held' || out === 'added') { sample.delete(id); st.dialed++; }
+        else if (out === 'bound') { sample.delete(id); st.bound++; }
+        else if (out === 'deferred' || out === 'deferred-deficit') { rec.tries--; break; }  // capacity: nothing went out, try at the next bind
+        else if (rec.tries >= BOOTSTRAP_SAMPLE_TRIES) { sample.delete(id); st.failed++; }
+        // 'failed' or 'skip' below the try bound: the id stays for the next bind
+      }
+    } finally { this._bootSampleDraining = false; }
+  }
+
   _fillArmed() {
     return !!(this._maintainCfg && this._attemptGuard && this._gateCfg);
   }
@@ -2605,6 +2704,108 @@ export class AxonaPeer extends DHT {
   }
 
   // Debounced trigger — coalesce a burst of near-neighbour losses into one pass.
+  /**
+   * THE DEATH BODY. Everything the kernel does when a peer is gone, in one
+   * place, with two triggers: the transport's onPeerDied event, and the
+   * no-channel sweep below raising a death the transport never delivered
+   * (4.132.0; until then this body lived inline in the onPeerDied handler).
+   * It asks no duty gate: a dead channel is not a voluntary close (Rule 1).
+   * @param {bigint} dead
+   * @param {string} [reason]
+   * @returns {boolean} false when there is no node to act on
+   */
+  _peerDeath(dead, reason) {
+    const node = this._node;
+    if (!node) return false;
+    node.synaptome?.delete(dead);
+    node.incomingSynapses?.delete(dead);
+    node.connections?.delete(dead);
+    // Row 1 (Hold-and-Fill v0.5): the mark records WHY and WHEN. Row 10
+    // (v0.7 "Marks"): this is the FAIL input of the mark automaton; a
+    // first death writes the mark, a later one advances its schedule.
+    // A table some other owner installed as a bare Set keeps its shape;
+    // the reason then lives only in the log line below.
+    const marks = (node._deadPeers ??= new DeadPeers());
+    if (typeof marks.fail === 'function') marks.fail(dead, reason ?? 'unknown');
+    else marks.add(dead);
+    this._axonaManager?.pubsubPeerDied?.(toHex(dead));   // purge ghost root beacons
+    // reason (4.76.3): the transport-level close cause, threaded through
+    // mesh _retire → onPeerLost. Transports that do not supply one (sim,
+    // pre-4.76.3) log 'unknown'. Makes eviction churn attributable.
+    this._emitLog?.('info', 'peer-died-evicted', { peer: toHex(dead), reason: reason ?? 'unknown' });
+    this._scheduleMaintain();   // a lost peer may have been a near-quota successor → refill
+    return true;
+  }
+
+  /**
+   * NO-CHANNEL SWEEP (4.132.0; council eb305550, shape corrected by Vega
+   * 56751848). The table's invariant is "every synapse is a live channel",
+   * and until this method only a death EVENT enforced it: a death the
+   * composite swallowed, or a channel that ended without one, left the
+   * member in the table for the life of the process, handed to every walk
+   * and route that came near it (testnet bridge ff316c366644, 2026-11-10:
+   * synaptome 17 with 0 connections and 0 open channels).
+   *
+   * What it is NOT. It is not the anneal and not a voluntary shed: it closes
+   * no channel and asks no duty gate, because a member with no channel has
+   * nothing to close. It does not delete a row itself: it RAISES THE MISSING
+   * DEATH through _peerDeath, so the mark, the pub/sub purge and the refill
+   * run exactly as for a death the transport reported.
+   *
+   * A member is swept only after `noChannelTicks` CONSECUTIVE maintain passes
+   * on each of which the transport answered "not connected" AND no attempt to
+   * it was in flight, AND only once (noChannelTicks - 1) x intervalMs has
+   * elapsed since the first of those passes. The pass count alone is NOT a
+   * time: _scheduleMaintain runs an extra pass 250 ms after every peer death,
+   * so under a mass death N passes elapse inside seconds (testnet 2026-11-11:
+   * four members swept 16-25 s after a kill with N = 3 and a 15 s interval).
+   * 4.133.0 adds the elapsed floor so a channel briefly absent during churn
+   * is not swept by pass count. Three reads reset the run and are never counted:
+   *   - connected;
+   *   - a negotiation in flight (the attempt guard's inflightOf);
+   *   - isConnected THREW: that tick is "unknown", not "not connected".
+   * OFF unless synaptomeMaintain.noChannelTicks is a positive integer.
+   * @returns {{checked:number, noChannel:number, inflight:number, unknown:number, swept:number}}
+   */
+  _sweepNoChannel() {
+    const out = { checked: 0, noChannel: 0, inflight: 0, unknown: 0, swept: 0 };
+    this._noChannelLast = out;
+    const n = this._maintainCfg?.noChannelTicks | 0;
+    const node = this._node; const t = node?.transport;
+    if (n <= 0 || !node?.synaptome || typeof t?.isConnected !== 'function') return out;
+    const runs = (this._noChannelRuns ??= new Map());   // key -> { n: consecutive passes, since: ms of the first }
+    const now = typeof this._noChannelClock === 'function' ? this._noChannelClock() : Date.now();
+    const floorMs = (n - 1) * (this._maintainCfg.intervalMs | 0);
+    const self = node.id;
+    const due = [];
+    for (const [key, syn] of node.synaptome) {
+      if (typeof key !== 'bigint' || key === self) continue;   // a legacy hex key is unreadable here: never counted, never swept
+      out.checked++;
+      let connected;
+      try { connected = t.isConnected(key) === true; }
+      catch { out.unknown++; runs.delete(key); continue; }
+      if (connected) { runs.delete(key); continue; }
+      let inflight = false;
+      try { inflight = !!this._attemptGuard?.inflightOf?.(key); } catch { inflight = true; }   // an unreadable guard is "unknown": do not count the tick
+      if (inflight) { out.inflight++; runs.delete(key); continue; }
+      out.noChannel++;
+      const prev = runs.get(key);
+      const run = (prev?.n ?? 0) + 1;
+      const since = prev?.since ?? now;
+      if (run >= n && (now - since) >= floorMs) due.push([key, run, syn?._addedBy ?? null, now - since]);
+      else runs.set(key, { n: run, since });
+    }
+    for (const k of runs.keys()) if (!node.synaptome.has(k)) runs.delete(k);   // a member that left by another path takes its run with it
+    for (const [key, run, addedBy, ms] of due) {
+      runs.delete(key);
+      this._emitLog?.('info', 'no-channel-swept', { peer: toHex(key), ticks: run, ms, addedBy });
+      this._peerDeath(key, 'no-channel');
+      out.swept++;
+    }
+    this._noChannelSwept = (this._noChannelSwept ?? 0) + out.swept;
+    return out;
+  }
+
   _scheduleMaintain() {
     if (!this._maintainCfg || this._maintainPending) return;
     this._maintainPending = true;
@@ -3403,7 +3604,79 @@ export class AxonaPeer extends DHT {
     }
     return out;
   }
+  /**
+   * BOUND TARGET (4.145.0; Orion 0e8f044b, David 2026-11-14 "Build the forwarder
+   * change"). Does this node hold an open, healthy channel to `targetBig`
+   * ITSELF, and is the target not already on the walk? Then the walk's next
+   * hop is the target, whatever the table says.
+   *
+   * WHY. A peer that dialed in is BOUND and is not always a table member: the
+   * table is full, or the pools keep it in the incoming class. With pools
+   * unarmed such a peer is in neither the lookup step's candidates nor the
+   * forwarder's usable set, so a node holding a live channel to the target
+   * forwarded to a closer table member instead, or stalled. On testnet
+   * 2026-11-14 that member was a host dead 21 hours and the answer to a live
+   * host's offer was never sent (fence_stale_member_answer).
+   *
+   * Only a NODE id can be bound: a topic id never is, so pub/sub walks
+   * (SUB, PUB, PULL, REPLICATE) are untouched. Two guards (Orion): a channel
+   * the transport calls stale is not used, since a half-dead channel reads
+   * connected for seconds; and a target already on the path is not revisited.
+   * @param {bigint} targetBig
+   * @param {{has(id: bigint): boolean}|null} [onPath]
+   */
+  _boundTargetOk(targetBig, onPath = null) {
+    const node = this._node;
+    if (!node || typeof targetBig !== 'bigint' || targetBig === node.id) return false;
+    if (onPath && onPath.has(targetBig)) return false;
+    try { if (node._deadPeers && node._deadPeers.has(targetBig)) return false; } catch { return false; }
+    const t = node.transport;
+    if (typeof t?.isConnected !== 'function') return false;
+    let open = false;
+    try { open = t.isConnected(targetBig) === true; } catch { open = false; }
+    if (!open) return false;
+    return !this._isStalePeer(targetBig);
+  }
   /** SUSPECT: the transport says the channel is stale. A transport with no reader says no. */
+  /**
+   * LOOKAHEAD ANSWER LIVE (4.147.0): may this node NAME `big` to an asker as a
+   * forward? Only a peer this node could send to now: not itself, not marked
+   * dead, a channel that reads open, not suspect. The same tests the asker
+   * applies to the peers it probes. A transport with no isConnected cannot
+   * say; the entry is then named as before.
+   */
+  _lookaheadNameable(big) {
+    const node = this._node;
+    if (!node || typeof big !== 'bigint' || big === node.id) return false;
+    try { if (node._deadPeers && node._deadPeers.has(big)) return false; } catch { return false; }
+    const t = node.transport;
+    if (typeof t?.isConnected === 'function') {
+      let open = false;
+      try { open = t.isConnected(big) === true; } catch { open = false; }
+      if (!open) return false;
+    }
+    return !this._isStalePeer(big);
+  }
+  /**
+   * 4.148.0 — the measured round trip of every peer this node could send to,
+   * nearest table order: `[{ id, cls, rtt }]` where `rtt` is the transport's
+   * getRtt answer (null when the transport cannot say). Read-only. Nothing in
+   * the kernel reads this to choose a hop, time a request or remove a peer.
+   */
+  rttSnapshot(max = 64) {
+    const t = this._node?.transport;
+    const out = [];
+    if (!t || typeof t.getRtt !== 'function') return out;
+    let peers = [];
+    try { peers = this._usablePeers(); } catch { peers = []; }
+    for (const p of peers) {
+      if (out.length >= max) break;
+      let rtt = null;
+      try { rtt = t.getRtt(p.id) ?? null; } catch { rtt = null; }
+      out.push({ id: toHex(p.id).slice(0, 12), cls: p.cls ?? null, rtt });
+    }
+    return out;
+  }
   _isStalePeer(big) {
     const t = this._node?.transport;
     if (typeof t?.isStale !== 'function') return false;
@@ -3885,6 +4158,7 @@ export class AxonaPeer extends DHT {
   async pub(topic, message, opts = {}) {
     const desc = await this._resolveTopicOrThrow(topic, 'pub');
     const am   = this._requireAxonaManager('pub');
+    await this._assertRegionPopulated(am, desc.topicIdBig, PublishError, 'pub');   // REGION ROLES (default off)
 
     // Signer (design v0.3 §5/§6): opts.signWith is an AUTHOR identity, or the
     // ANONYMOUS sentinel for a deliberately unsigned publish. There is NO default
@@ -4103,6 +4377,7 @@ export class AxonaPeer extends DHT {
     const desc       = await this._resolveReadTopic(topic, 'sub');
     const am         = this._requireAxonaManager('sub');
     const topicIdBig = desc.topicIdBig;
+    await this._assertRegionPopulated(am, topicIdBig, SubscribeError, 'sub');   // REGION ROLES (default off)
 
     // Apply `since` mode by seeding AxonaManager's per-topic lastSeenTs
     // BEFORE the subscribe call.  AxonaManager passes lastSeenTs in the
@@ -4236,6 +4511,13 @@ export class AxonaPeer extends DHT {
       return { ok: true, scope: 'keyspace' };
     }
     const desc = await this._resolveTopicOrThrow(topic, 'host');
+    // REGION ROLES (David 2026-11-13, answer 1): hosting holds the topic, so it
+    // is a role, and a role stays in the topic's region.
+    if (typeof am._regionIneligible === 'function' && am._regionIneligible(desc.topicIdBig)) {
+      throw new PublishError(ErrorCodes.ROLE_OUT_OF_REGION,
+        `peer.host: this node is in region 0x${extractS2Prefix(this._node.id).toString(16)} and the topic is in region 0x${extractS2Prefix(desc.topicIdBig).toString(16)}; a topic is hosted only by nodes in its own region`,
+        { context: { topicRegion: extractS2Prefix(desc.topicIdBig), selfRegion: extractS2Prefix(this._node.id) } });
+    }
     // ADDRESS RULE — hosting and owning are DISJOINT properties.
     //
     // A node may host a topic only if its own ADDRESS puts it in that topic's
@@ -4270,6 +4552,120 @@ export class AxonaPeer extends DHT {
     am.pubsubHost(desc.topicIdBig);
     this._markPersistDirty('hosting');
     return { ok: true, scope: 'topic', topicId: desc.topicId };
+  }
+
+  /**
+   * REGION ROLES (regionRoles.js; David 2026-11-13, answer 3): "No nodes found
+   * in region is a sufficient error. The app can switch regions if needed."
+   *
+   * A pre-send guard for pub, sub and the two reads, armed only. A node IN
+   * the topic's region is itself a node in that region and never refuses. Any
+   * other node needs a LIVE node in the region: a peer it holds an open
+   * channel to, or a hop that took its routed walk toward the topic. Every
+   * in-region node is closer to the topic than every node outside it, so a
+   * walk that can reach the region visits a node in it.
+   *
+   * WHAT IT IS NOT: proof the region is empty. It is what THIS node's channels
+   * and its routed walk reached. An id in a table, or on a walk's path as the
+   * hop a send failed to, is not a node. No open channel, a walk that fails
+   * or times out, or one nobody took is "cannot say" and does not refuse. A
+   * walk's verdict is reused for 5 s, so a publisher in a loop walks once.
+   */
+  async _assertRegionPopulated(am, topicIdBig, ErrCls, opName) {
+    if (!am || am._regionRoles !== true) return;
+    const selfId = this._node?.id;
+    let topicRegion, selfRegion = null;
+    try { topicRegion = extractS2Prefix(asId(topicIdBig)); } catch { return; }
+    try { selfRegion = (typeof selfId === 'bigint') ? extractS2Prefix(selfId) : null; } catch { selfRegion = null; }
+    if (selfRegion === topicRegion) return;
+    const refuse = () => {
+      throw new ErrCls(ErrorCodes.REGION_UNPOPULATED,
+        `peer.${opName}: no nodes found in region 0x${topicRegion.toString(16)}; a topic is served only by nodes in its own region`,
+        { context: { topicRegion, selfRegion } });
+    };
+    // LIVENESS (4.143.0; Orion 2d4ece07, David 2026-11-14 "Build the liveness
+    // rule"). Through 4.142.0 this check read an ID as a node: an id returned
+    // by findKClosest, or any id on the walk's path. On testnet 2026-11-13 a
+    // host killed hours earlier was still named by a neighbour's table, and
+    // the walk's path ends at the hop its send FAILED to, so a region whose
+    // nodes were all dead read as populated and the app was told nothing.
+    // Evidence now is a node that ANSWERED:
+    //   1. A channel this node holds open, to a peer not marked dead. No RPC.
+    //      None at all: cannot say. One in the topic's region: populated.
+    //   2. Otherwise the ROUTED walk, and only the hops that took it. The
+    //      final path element is dropped when the walk ended `node-down`, or
+    //      ended `send-failed` at exactly that element (fail.next): it was
+    //      chosen, never reached. ANY remaining hop in the region is a live
+    //      node there (the last answered hop alone is not the test: a region
+    //      with one live node hands the walk on, out of the region).
+    //   A walk that fails, times out, ends `walk-deadline`, or leaves no
+    //   answered hop is "cannot say": no error, nothing cached. And a walk
+    //   that did not run to its end (see below) may say "populated" and may
+    //   never say "empty".
+    let peers;
+    try { peers = this._usablePeers(); } catch { return; }                       // cannot ask: do not refuse
+    if (!Array.isArray(peers) || peers.length === 0) return;                     // holds no live channel: cannot say
+    // THE FAST PATH'S EVIDENCE AND ITS AGE (Aster 19657f77). "Open" is the
+    // transport's word: connected, not marked dead, and not SUSPECT (stale by
+    // the heartbeat) whichever pool the peer is in. It is as old as the
+    // transport's own detection of a dead channel: a channel to a node that
+    // died reads connected until the heartbeat or a failed send says
+    // otherwise (measured on testnet 2026-11-14: 10.2 s on a bridge's channel
+    // to a killed node, 19 s on a node's own direct channel). For that long this path can
+    // answer "populated" for a region whose one known node just died. The
+    // walk is not asked to confirm it: a send to that same peer would be the
+    // only better evidence, and pub/sub is about to make it.
+    for (const p of peers) {
+      try {
+        if (typeof p?.id !== 'bigint' || p.id === selfId || extractS2Prefix(p.id) !== topicRegion) continue;
+        if (typeof this._isStalePeer === 'function' && this._isStalePeer(p.id)) continue;   // suspect: not evidence
+        return;
+      } catch { /* unreadable id: not a node in the region */ }
+    }
+    const now = Date.now();
+    const cache = (this._regionSeen ??= new Map());
+    const c = cache.get(topicRegion);
+    if (c && now - c.at < REGION_SEEN_TTL_MS) { if (c.found) return; refuse(); }
+    let walked = null, timer = null;
+    const walkMs = Number.isFinite(this._regionWalkMs) && this._regionWalkMs > 0 ? this._regionWalkMs : 3000;
+    try {
+      walked = await Promise.race([
+        this.lookup(asId(topicIdBig), { noCache: true }),
+        new Promise((res) => { timer = setTimeout(() => res('__timeout__'), walkMs); if (timer && typeof timer.unref === 'function') timer.unref(); }),
+      ]);
+    } catch { walked = null; }
+    finally { if (timer) clearTimeout(timer); }
+    if (walked === '__timeout__' || !walked || !Array.isArray(walked.path) || walked.reason === 'walk-deadline') return;
+    const answered = [];
+    for (const raw of walked.path) {
+      let id; try { id = asId(raw); } catch { continue; }
+      if (typeof id !== 'bigint' || id === selfId) continue;
+      answered.push(id);
+    }
+    if (answered.length) {
+      const last = answered[answered.length - 1];
+      let lastHex = null; try { lastHex = toHex(last).slice(0, 12); } catch { lastHex = null; }
+      if (walked.reason === 'node-down' || (walked.reason === 'send-failed' && typeof walked.fail?.next === 'string' && lastHex !== null && lastHex === walked.fail.next)) answered.pop();
+    }
+    if (answered.length === 0) return;                                           // nobody took the walk: cannot say
+    let found = false;
+    for (const id of answered) {
+      try { if (extractS2Prefix(id) === topicRegion) { found = true; break; } } catch { /* not a node in the region */ }
+    }
+    // AN INCOMPLETE WALK REFUSES NOTHING (4.146.0; David 2026-11-14 "Correct the
+    // liveness rule"). Through 4.145.0 a walk cut short by a failed send or a
+    // down node, with its unreached hop dropped, was read as "no node in the
+    // region answered" and REFUSED. On testnet 2026-11-14 20:16Z a node whose
+    // only peer was the bridge walked bridge → an old node → a dead member,
+    // the send failed, and the app was told region 0x80 was empty while three
+    // hosts were alive in it. A walk that stopped early says nothing about
+    // what lies past the stop. Only a walk that ran to its end may refuse:
+    // one that STALLED (no unvisited peer was closer) or found its target.
+    // Every other ending (send-failed, node-down, the hop cap, a stop, a
+    // thrown step, no reason at all) is "cannot say": no error, nothing kept.
+    if (!found && !(walked.reason === 'stalled' || walked.stalled === true || walked.found === true)) return;
+    cache.set(topicRegion, { found, at: Date.now() });
+    if (!found) refuse();
   }
 
   /**
@@ -4411,6 +4807,9 @@ export class AxonaPeer extends DHT {
     }
     const desc       = await this._resolveReadTopic(topic, 'pull');
     const topicIdBig = desc.topicIdBig;
+    // REGION ROLES (David 2026-11-13: "a read in a region with no nodes raises
+    // the same error"). Default off; the same guard as pub and sub.
+    await this._assertRegionPopulated(am, topicIdBig, PullError, 'pull');
     const outcome = await am.requestPull(topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
     // requestPull is TAGGED as of Q1. peer.pull keeps its documented envelope|null
     // shape so existing callers are unaffected; peer.pullOutcome() exposes the full
@@ -4480,6 +4879,7 @@ export class AxonaPeer extends DHT {
     }
     const am = this._requireAxonaManager('pullOutcome');
     const desc = await this._resolveReadTopic(topic, 'pullOutcome');
+    await this._assertRegionPopulated(am, desc.topicIdBig, PullError, 'pullOutcome');   // REGION ROLES: the same guard as pull (two entry points onto one read must not disagree)
     const wantsLatest = msgId === null || msgId === undefined;
     return am.requestPull(desc.topicIdBig, wantsLatest ? null : msgId, { timeoutMs });
   }
@@ -6647,6 +7047,12 @@ export class AxonaPeer extends DHT {
         if (f !== originNode.id && originNode.transport.isConnected(f)) { nextHopId = f; rpathRest = opts.rpath.slice(1, SIGNAL_RPATH_MAX); }
       } catch { /* unreadable entry: no return route */ }
     }
+    // BOUND TARGET (4.145.0): the origin holds an open, healthy channel to the target.
+    if (nextHopId === null && this._domain?.BOUND_TARGET_DELIVER && this._boundTargetOk(targetId, null)) {
+      nextHopId = targetId;
+      const BT = (this._boundTargetStats ??= { lookup: 0, route: 0, origin: 0 });
+      BT.origin++;
+    }
     if (nextHopId === null) nextHopId = this._greedyNextHopToward(targetId);
     let viaNext   = null;
     let isTerminal = nextHopId === null;
@@ -7136,6 +7542,17 @@ export class AxonaPeer extends DHT {
       candidates.push({ peerId: u.id, latency: 50, weight: 0.1, stratum });
     }
 
+    // BOUND TARGET (4.145.0): an open, healthy channel to the target itself is
+    // a candidate, and the chosen one, table member or not. It enters the
+    // candidate set here so a node with no closer member does not stall.
+    let boundTarget = null;
+    if (domain.BOUND_TARGET_DELIVER && this._boundTargetOk(targetKey, ctx.queried)) {
+      boundTarget = { peerId: targetKey, latency: 1, weight: 1, stratum: clz264(node.id ^ targetKey), _addedBy: 'bound-target' };
+      candidates.push(boundTarget);
+      const BT = (this._boundTargetStats ??= { lookup: 0, route: 0, origin: 0 });
+      BT.lookup++;
+    }
+
     if (deadSynapses.length > 0) {
       node.temperature = Math.max(node.temperature, domain.T_REHEAT);
       for (const syn of deadSynapses) {
@@ -7162,6 +7579,7 @@ export class AxonaPeer extends DHT {
     const direct = node.synaptome.get(targetKey)
                 ?? node.incomingSynapses.get(targetKey);
     if (direct && !dead.has(targetKey)) nextSyn = direct;
+    if (!nextSyn && boundTarget) nextSyn = boundTarget;
 
     if (!nextSyn && node.id === sourceId
         && Math.random() < domain.EPSILON) {

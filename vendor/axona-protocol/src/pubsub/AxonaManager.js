@@ -75,6 +75,7 @@ import { successorGateMethods } from './successorGate.js';
 import { holderProbeMethods } from './holderProbe.js';
 import { handoffBindingMethods } from './handoffBinding.js';
 import { standingLeaseMethods } from './standingLease.js';
+import { regionRolesMethods } from './regionRoles.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
@@ -120,6 +121,7 @@ export class AxonaManager {
     tombstoneAuth = false,         // REF-1.1 S2.0c Phase 3: DEFAULT-OFF shadow wiring of the tombstone authorization core (observe-only; no behavior change)
     killProofs = null,             // 4.131.0: carry + retain the author's signed kill proof with every tombstone (DEFAULT-ON; null = env KILL_PROOFS, default 1)
     frameRegistry = false,         // REF-1.1 S2: DEFAULT-OFF Boundary-1 frame-contract registry (shadow-wraps the 19 routed handlers; observe-only; byte-identical flag-off)
+    regionRoles = null,            // David 2026-11-13: a role goes only to a node in the topic's region (regionRoles.js). DEFAULT OFF; null = env REGION_ROLES
     cutover = null,
     hintRefresh = null,            // Closer-Born v0.6 3d hint refresh (David 2026-11-03): DEFAULT OFF; null = env HINT_REFRESH
     replicaInherit = null,         // Closer-Born v0.6 3c (David 2026-11-03 "go ahead with 3c"): DEFAULT OFF; null = env REPLICA_INHERIT
@@ -132,6 +134,10 @@ export class AxonaManager {
     verifyWalk = null,             // Closer-Born v0.6 farther-reaching verify (David 2026-11-03): DEFAULT OFF; null = env VERIFY_WALK
     attachEcho = null,             // Closer-Born v0.6 3d (David 2026-11-03 "go ahead with 3d"): DEFAULT OFF; null = env ATTACH_ECHO
     returnRoute = null,            // Closer-Born v0.6 return routes (David 2026-11-03 "go ahead with the return routes"): DEFAULT OFF; null = env RETURN_ROUTE                // Closer-Born Relay Inherits the Root v0.4 Part 3e (David 2026-11-03 "go ahead with the cutover state machine"): DEFAULT OFF; null = env CUTOVER
+    routeTypeTally = null,         // DIAGNOSTIC (David 2026-11-16 "build the per-type count"): DEFAULT OFF; env ROUTE_TYPE_TALLY=1. Counts this manager's routed sends and received frames BY TYPE. Changes no decision.
+    announceNewOnly = null,        // 4.150.0 (David 2026-11-16 "build the announce-only-the-new-topic change"): DEFAULT OFF; env ANNOUNCE_NEW_ONLY=1. A root claim announces THAT topic; the full list stays on the BEACON_MS timer.
+    beaconChunk = null,            // 4.151.0 (David 2026-11-16 "chunk the timer's list and fix the beacon handler"): DEFAULT OFF; env BEACON_CHUNK=1. A beacon lists at most BEACON_TOPICS_MAX topics; a longer list goes out as several beacons.
+    beaconVerdict = null,          // 4.151.0: DEFAULT OFF; env BEACON_VERDICT=1. The beacon handler reports 'consumed' at the node the beacon was addressed to, so a delivered beacon stops counting as a failed routed send.
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -364,6 +370,11 @@ export class AxonaManager {
     // to it is open, else greedy), and the own lookup is the fallback. The
     // breadcrumb is a hint: authority rests on signed envelopes and corr.
     this._returnRoute     = !!(returnRoute ?? envNum('RETURN_ROUTE', 0));
+    this._announceNewOnly = !!(announceNewOnly ?? envNum('ANNOUNCE_NEW_ONLY', 0));
+    this._beaconChunk     = !!(beaconChunk ?? envNum('BEACON_CHUNK', 0));
+    this._beaconVerdict   = !!(beaconVerdict ?? envNum('BEACON_VERDICT', 0));
+    // Per-type tally (4.149.0): null when off, so every path below is one null test.
+    this._typeTally       = (routeTypeTally ?? envNum('ROUTE_TYPE_TALLY', 0)) ? { out: new Map(), in: new Map() } : null;
     // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
     // produced no DELIVER, so a subscriber that lost its pin, or whose pin
     // named a node that has since handed off, never heard the echo that pins
@@ -388,6 +399,9 @@ export class AxonaManager {
     // closer than the farthest replica takes the slot; the displaced backup
     // stops receiving REPLICATE and lapses on its standby lease.
     this._replicaInherit  = !!(replicaInherit ?? envNum('REPLICA_INHERIT', 0));
+    // REGION ROLES (regionRoles.js; David 2026-11-13): a role goes only to a node
+    // in the topic's region. Routing is untouched. Reverses I-16 for roles.
+    this._regionRoles     = !!(regionRoles ?? envNum('REGION_ROLES', 0));
     // 6b SUCCESSOR GATE (successorGate.js): an 'app' process holding a root
     // reports degraded: no-successor while no replica is current, and re-seats.
     this._successorGate   = !!(successorGate ?? envNum('SUCCESSOR_GATE', 0));
@@ -499,7 +513,7 @@ export class AxonaManager {
     const send = (o) => Promise.resolve(this.dht.routeMessage(targetBig, type, payload, o)).catch(fail);
     try {
       const rpath = this._returnRoute ? this._returnFor(targetBig) : null;
-      if (!rpath) return send(opts).then((r) => this._tallyRoute(targetBig, r));
+      if (!rpath) return send(opts).then((r) => this._tallyRoute(targetBig, r, type));
       // The return route first; a reply it does not deliver goes by the own
       // lookup. A duplicate is safe: replies are idempotent by msgId or corr.
       const RS = this._returnRouteStats; RS.used++;
@@ -511,9 +525,9 @@ export class AxonaManager {
         const k = lc(idHex(targetBig));
         if (this._retRoutes.get(k)?.rpath === rpath) this._retRoutes.delete(k);
         return send(opts);
-      }).then((r) => this._tallyRoute(targetBig, r));
+      }).then((r) => this._tallyRoute(targetBig, r, type));
     } catch (e) {
-      return Promise.resolve(this._tallyRoute(targetBig, fail(e)));   // synchronous throw out of routeMessage
+      return Promise.resolve(this._tallyRoute(targetBig, fail(e), type));   // synchronous throw out of routeMessage
     }
   }
 
@@ -563,7 +577,27 @@ export class AxonaManager {
   // per tick and only when something failed (see _reportRouteOutcomes).
   // Verdict shape is routing's own, unchanged; this reads it and returns it
   // untouched, so no caller's contract moves.
-  _tallyRoute(targetBig, r) {
+  _tallyRoute(targetBig, r, type) {
+    // 4.149.0 per-type tally, OFF unless ROUTE_TYPE_TALLY: which message types
+    // this node's routed sends are, and how each ended. `none` = the adapter
+    // reported no verdict. Bounded: 64 types, 6 reasons per type.
+    if (this._typeTally) {
+      try {
+        const m = this._typeTally.out, k = String(type).slice(0, 40);
+        let e = m.get(k);
+        if (!e && m.size < 64) { e = { ok: 0, fail: 0, none: 0, why: {} }; m.set(k, e); }
+        if (e) {
+          if (r && typeof r === 'object' && typeof r.consumed === 'boolean') {
+            if (r.consumed) e.ok++;
+            else {
+              e.fail++;
+              const w = r.transportError ? 'transport' : r.exhausted ? 'exhausted' : (typeof r.reason === 'string' && r.reason) ? r.reason.slice(0, 24) : 'other';
+              if (w in e.why || Object.keys(e.why).length < 6) e.why[w] = (e.why[w] || 0) + 1;
+            }
+          } else e.none++;
+        }
+      } catch { /* a diagnostic must never break routing */ }
+    }
     try {
       const s = (this._routeStats ??= { ok: 0, fail: 0, by: new Map() });
       // A non-reporting adapter resolves undefined/a push count — that is NOT a
@@ -583,6 +617,14 @@ export class AxonaManager {
       }
     } catch { /* observability must never break routing */ }
     return r;
+  }
+  // 4.149.0: wrap a frame handler so arrivals are counted by type. With the
+  // tally off this returns the handler itself: the registration is unchanged.
+  _countIn(type, fn) {
+    const t = this._typeTally;
+    if (!t) return fn;
+    const k = String(type).slice(0, 40);
+    return (...a) => { try { if (t.in.has(k) || t.in.size < 64) t.in.set(k, (t.in.get(k) || 0) + 1); } catch { /* diagnostic only */ } return fn(...a); };
   }
   // Pop a dead waypoint and keep routing. When the via chain empties, _send
   // falls through to the TOPIC ID — that is deliberate and load-bearing: it is
@@ -885,6 +927,9 @@ export class AxonaManager {
    */
   admitPushedRole(topicBig) {
     const topic = idHex(topicBig).slice(0, 12);
+    // REGION ROLES: an heir outside the topic's region takes no handoff. Silent,
+    // as every refusal here is: the leaver's unacked path re-homes the topic.
+    if (this._regionIneligible(topicBig)) return this._regionRefuse('handoff', topicBig);
     if (this._neverRoot) {
       this._admitRefusals.bridge++;
       this._log('info', 'role-refused', { topic, why: 'bridge', hard: true, pushed: true });
@@ -934,6 +979,7 @@ export class AxonaManager {
         terminated: this._rolesTerminated || 0,   // roots that ended their generation under Topic Lifetime 4.5
       },
       lifetime: this._lifetimeInspect(),
+      regionRoles: this.inspectRegionRoles(),
       capacity: this.inspectCapacity(),
     };
   }
@@ -999,7 +1045,7 @@ export class AxonaManager {
     const prev = role.merge.candidate;
     // A standing candidate is replaced only by one that wins over IT: two
     // paths naming two winners in one tick converge on the relation's answer.
-    if (prev && !RootClaim.claimWins(topicBig, claim, prev)) return false;
+    if (prev && !RootClaim.claimWins(topicBig, claim, prev, !!this._regionRoles)) return false;
     role.merge.candidate = { ...claim, source, at: this._now() };
     this._log('info', 'merge-candidate', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, cache: role.cache.length, replaced: !!prev });
     this._mergeOffer(topicBig, role);                       // step 1 of the exchange (d3): OFFER toward the recorded winner
@@ -1738,6 +1784,9 @@ export class AxonaManager {
   }
 
   pubsubHost(topicId) {
+    // REGION ROLES: hosting holds the topic, so it is a role (David 2026-11-13,
+    // answer 1). peer.host() throws before this; this is the backstop.
+    if (this._regionIneligible(topicId)) { this._regionRefuse('host', topicId); return false; }
     this._hostedTopics.add(topicId);
     // Participate so the node won't be torn down and can root the topic if closest.
     // Route the announce through _sendSubscribe (lookup-assisted → the true root, and
@@ -2076,6 +2125,7 @@ Object.assign(
   holderProbeMethods,    // Closer-Born v0.6 3a: holder-first empty-root probe with role-less NACKs — behind holderProbe
   handoffBindingMethods, // Closer-Born v0.6 Part 7: the loser signs `handoff`; an armed candidate verifies — behind handoffBinding
   standingLeaseMethods,  // Closer-Born v0.6 6c: a standing topic's root lease — behind standingLease
+  regionRolesMethods,    // David 2026-11-13: a role goes only to a node in the topic's region — behind regionRoles
 );
 
 export default AxonaManager;

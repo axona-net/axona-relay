@@ -224,4 +224,16 @@ export class Transport {
   getLatency(peerId) {
     throw new Error('Transport.getLatency: not implemented');
   }
+
+  /**
+   * 4.148.0 — OPTIONAL. The smoothed, MEASURED round trip of the channel to
+   * `peerId`: `{ cold, srtt, rttvar, last, min, max, samples, own, reported,
+   * rejected, ageMs }` (see transport/rtt.js), or null when the transport has
+   * no channel to the peer or cannot measure one. A channel that has not
+   * produced a sample answers `cold: true` with null figures. Nothing in the
+   * kernel acts on it; getLatency is unchanged and stays the AP-scoring input.
+   */
+  getRtt(_peerId) {
+    return null;
+  }
 }

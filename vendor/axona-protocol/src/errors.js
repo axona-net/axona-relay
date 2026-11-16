@@ -190,6 +190,8 @@ export const ErrorCodes = Object.freeze({
   PUBLISH_SIGN_FAILED:       'PUBLISH_SIGN_FAILED',
   PUBLISH_NO_PUBLISH_IDENTITY:'PUBLISH_NO_PUBLISH_IDENTITY',   // signed publish with no signer named (transport key must not sign)
   TOPIC_REGION_REQUIRED:     'TOPIC_REGION_REQUIRED',          // open topic with no region (no global region exists)
+  REGION_UNPOPULATED:        'REGION_UNPOPULATED',             // region roles armed: this node's lookup found no node in the topic's region (the app may switch regions)
+  ROLE_OUT_OF_REGION:        'ROLE_OUT_OF_REGION',             // region roles armed: host() of a topic outside this node's region
   WRITE_POLICY_VIOLATION:    'WRITE_POLICY_VIOLATION',         // publish to an owner-only topic by a non-owner key
   PUBLISH_REPLICATION_FAILED:'PUBLISH_REPLICATION_FAILED',
   PUBLISH_PAYLOAD_TOO_LARGE: 'PUBLISH_PAYLOAD_TOO_LARGE',

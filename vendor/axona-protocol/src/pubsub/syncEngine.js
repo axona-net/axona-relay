@@ -295,6 +295,7 @@ export const syncEngineMethods = {
       }
       if (!this._rootReplicas) return;                  // backup duty disabled on this node
       if (this._neverRoot) return;                      // RI-2: a bridge never holds a backup
+      if (this._regionIneligible(topicBig)) { this._regionRefuse('backup', topicBig); return; }   // REGION ROLES
       let from = null;
       if (payload.from && isHexId(lc(payload.from))) from = lc(payload.from);
       else if (meta?.fromId != null) { try { from = lc(idHex(idBig(meta.fromId))); } catch { /* */ } }
@@ -359,7 +360,7 @@ export const syncEngineMethods = {
           return;
         } else if (role && role.backupOf !== null && role.standbyGen && role.standbyGen.root !== gen.root
                    && now - (role.lastReplicaAt || 0) < STANDBY_LEASE_MS
-                   && !RootClaim.claimWins(topicBig, { id: gen.root, epoch: gen.epoch }, { id: role.standbyGen.root, epoch: role.standbyGen.epoch })) {
+                   && !RootClaim.claimWins(topicBig, { id: gen.root, epoch: gen.epoch }, { id: role.standbyGen.root, epoch: role.standbyGen.epoch }, !!this._regionRoles)) {
           // 4.130.0 (Orion SYNC-STANDBY-CLAIMWINS, 1f81ed10): while the current
           // appointment's lease is live, a DIFFERENT root re-principals this
           // backup only if it outranks the current principal. Two live roots

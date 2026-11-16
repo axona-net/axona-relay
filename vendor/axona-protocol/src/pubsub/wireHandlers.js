@@ -52,31 +52,31 @@ export const wireHandlersMethods = {
     // so the shared migration-aware ownership grammar recognizes each as a B1 door
     // (E2.1 council 389be28f / eb71240a). transportKind is OMITTED: every Boundary-1
     // row is a single-primitive bare-keyed routed wire.
-    registerFrame(this.dht, T.SUB,          this._onSub.bind(this),          { registry: this._frameDoor });
-    registerFrame(this.dht, T.UNSUB,        this._onUnsub.bind(this),        { registry: this._frameDoor });
-    registerFrame(this.dht, T.PUB,          this._onPub.bind(this),          { registry: this._frameDoor });
-    registerFrame(this.dht, T.DELIVER,      this._onDeliver.bind(this),      { registry: this._frameDoor });
-    registerFrame(this.dht, T.ADOPT,        this._onAdopt.bind(this),        { registry: this._frameDoor });
-    registerFrame(this.dht, T.ADOPTACK,     this._onAdoptAck.bind(this),     { registry: this._frameDoor });
-    registerFrame(this.dht, T.MERGE_OFFER,  this._onMergeOffer.bind(this),   { registry: this._frameDoor });
-    registerFrame(this.dht, T.REPLAYACK,    this._onReplayAck.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.MERGE_CLOSED, this._onMergeClosed.bind(this),  { registry: this._frameDoor });
-    registerFrame(this.dht, T.PULLUP,       this._onPullUp.bind(this),       { registry: this._frameDoor });
-    registerFrame(this.dht, T.HANDOFFACK,   this._onHandoffAck.bind(this),   { registry: this._frameDoor });
-    registerFrame(this.dht, T.REPLAYUP,     this._onReplayUp.bind(this),     { registry: this._frameDoor });
-    registerFrame(this.dht, T.HANDOFF,      this._onHandoff.bind(this),      { registry: this._frameDoor });
-    registerFrame(this.dht, T.REPLICATE,    this._onReplicate.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.KILL,         this._onKill.bind(this),         { registry: this._frameDoor });
-    registerFrame(this.dht, T.INGESTACK,    this._onIngestAck.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.RECEIPTPROBE, this._onReceiptProbe.bind(this), { registry: this._frameDoor });
-    registerFrame(this.dht, T.RECEIPTNACK,  this._onReceiptNack.bind(this),  { registry: this._frameDoor });
-    registerFrame(this.dht, T.TOUCH,        this._onTouch.bind(this),        { registry: this._frameDoor });  // no-op (peer.touch deprecated v4.3.0); kept for wire compat
-    registerFrame(this.dht, T.PULL,         this._onPull.bind(this),         { registry: this._frameDoor });
-    registerFrame(this.dht, T.PULLRESP,     this._onPullResp.bind(this),     { registry: this._frameDoor });
-    registerFrame(this.dht, T.ROOTBEACON,   this._onRootBeacon.bind(this),   { registry: this._frameDoor });
-    registerFrame(this.dht, T.METRICSON,    this._onMetricsOn.bind(this),    { registry: this._frameDoor });
-    registerFrame(this.dht, T.TOPIC_TERMINATED, this._onTopicTerminated.bind(this), { registry: this._frameDoor });   // Topic Lifetime 4.5 (topicLifetime.js)
-    registerFrame(this.dht, T.REHOME,       this._onRehome.bind(this),       { registry: this._frameDoor });   // Topic Lifetime 4.7 (topicLifetime.js)
+    registerFrame(this.dht, T.SUB,          this._countIn(T.SUB, this._onSub.bind(this)),          { registry: this._frameDoor });
+    registerFrame(this.dht, T.UNSUB,        this._countIn(T.UNSUB, this._onUnsub.bind(this)),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.PUB,          this._countIn(T.PUB, this._onPub.bind(this)),          { registry: this._frameDoor });
+    registerFrame(this.dht, T.DELIVER,      this._countIn(T.DELIVER, this._onDeliver.bind(this)),      { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPT,        this._countIn(T.ADOPT, this._onAdopt.bind(this)),        { registry: this._frameDoor });
+    registerFrame(this.dht, T.ADOPTACK,     this._countIn(T.ADOPTACK, this._onAdoptAck.bind(this)),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_OFFER,  this._countIn(T.MERGE_OFFER, this._onMergeOffer.bind(this)),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYACK,    this._countIn(T.REPLAYACK, this._onReplayAck.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.MERGE_CLOSED, this._countIn(T.MERGE_CLOSED, this._onMergeClosed.bind(this)),  { registry: this._frameDoor });
+    registerFrame(this.dht, T.PULLUP,       this._countIn(T.PULLUP, this._onPullUp.bind(this)),       { registry: this._frameDoor });
+    registerFrame(this.dht, T.HANDOFFACK,   this._countIn(T.HANDOFFACK, this._onHandoffAck.bind(this)),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLAYUP,     this._countIn(T.REPLAYUP, this._onReplayUp.bind(this)),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.HANDOFF,      this._countIn(T.HANDOFF, this._onHandoff.bind(this)),      { registry: this._frameDoor });
+    registerFrame(this.dht, T.REPLICATE,    this._countIn(T.REPLICATE, this._onReplicate.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.KILL,         this._countIn(T.KILL, this._onKill.bind(this)),         { registry: this._frameDoor });
+    registerFrame(this.dht, T.INGESTACK,    this._countIn(T.INGESTACK, this._onIngestAck.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.RECEIPTPROBE, this._countIn(T.RECEIPTPROBE, this._onReceiptProbe.bind(this)), { registry: this._frameDoor });
+    registerFrame(this.dht, T.RECEIPTNACK,  this._countIn(T.RECEIPTNACK, this._onReceiptNack.bind(this)),  { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOUCH,        this._countIn(T.TOUCH, this._onTouch.bind(this)),        { registry: this._frameDoor });  // no-op (peer.touch deprecated v4.3.0); kept for wire compat
+    registerFrame(this.dht, T.PULL,         this._countIn(T.PULL, this._onPull.bind(this)),         { registry: this._frameDoor });
+    registerFrame(this.dht, T.PULLRESP,     this._countIn(T.PULLRESP, this._onPullResp.bind(this)),     { registry: this._frameDoor });
+    registerFrame(this.dht, T.ROOTBEACON,   this._countIn(T.ROOTBEACON, this._onRootBeacon.bind(this)),   { registry: this._frameDoor });
+    registerFrame(this.dht, T.METRICSON,    this._countIn(T.METRICSON, this._onMetricsOn.bind(this)),    { registry: this._frameDoor });
+    registerFrame(this.dht, T.TOPIC_TERMINATED, this._countIn(T.TOPIC_TERMINATED, this._onTopicTerminated.bind(this)), { registry: this._frameDoor });   // Topic Lifetime 4.5 (topicLifetime.js)
+    registerFrame(this.dht, T.REHOME,       this._countIn(T.REHOME, this._onRehome.bind(this)),       { registry: this._frameDoor });   // Topic Lifetime 4.7 (topicLifetime.js)
   },
 
   // REF-1.1 S2 inspector: the Boundary-1 registry's shadow state. `built` is
@@ -177,7 +177,9 @@ export const wireHandlersMethods = {
     }
     // Bare topic id → only the terminus handles. The closest reachable node roots
     // the topic whatever its region — region is a placement hint folded into the id,
-    // never an eligibility gate.
+    // never an eligibility gate. (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
+    // The stop for an out-of-region terminal is in the handlers, at the birth
+    // point, after the closer-root defer; routing itself compares no regions.
     if (!meta.isTerminal) return 'forward';
     return 'handle';
   },
@@ -293,6 +295,11 @@ export const wireHandlersMethods = {
       // The meshBare() hold here stays as the SUB-side guard it always was.
       if (idBig(lc(payload.subscriberId)) === this.nodeId && this._rootClaim.meshBare()) return 'consumed';
     }
+    // REGION ROLES: the walk ended here and this node is outside the topic's
+    // region. No root is born; the walk STOPS, not consumed, and the
+    // subscriber's renewal carries it. After the closer-root defer above, which
+    // still names a known in-region root.
+    if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.SUB, topicBig);
     let role = this.axonRoles.get(topicBig);
     if (!role) {
       // Synchronous terminal verification (council 2026-08-30, gated). Before a
@@ -469,7 +476,7 @@ export const wireHandlersMethods = {
   // instead of seating the newcomer over capacity.
   _promoteChild(role) {
     // Any leaf may be promoted to a child relay — region is not an eligibility
-    // predicate (it is only a placement hint folded into the id).
+    // predicate (it is only a placement hint folded into the id). (UNARMED. With regionRoles armed a role goes only to a node in the topic's region: regionRoles.js, David 2026-11-13.)
     // A subscriber already in a PENDING delegation is not a leaf to promote or
     // to hand off again: it is seated here only until its child's ADOPTACK.
     // Without this exclusion the next over-capacity SUB promoted a pending
@@ -485,6 +492,7 @@ export const wireHandlersMethods = {
       // handed off); a node that stepped down within the cooldown is not
       // re-promoted (4.7), though it may still be handed off as a leaf.
       if (seat?.kind === 'standby') continue;
+      if (this._regionRoles && !this._roleRegionOk(role.topicId, s)) continue;   // REGION ROLES: a child relay is a role (David 2026-11-13, answer 1)
       if (this._topicLifetime && leaves.length === 0 && (this._childCooldown.get(s) || 0) > now) continue;
       leaves.push(s);
     }
@@ -572,6 +580,13 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     const parentHex = lc(payload.parent);
     const nonce = typeof payload.nonce === 'string' ? payload.nonce : null;
+    // REGION ROLES: a node outside the topic's region is no child relay. The
+    // parent is told, and keeps serving the batch (pending delegation).
+    if (this._regionIneligible(topicBig)) {
+      this._regionRefuse('child', topicBig);
+      if (nonce && isHexId(parentHex)) this._route(idBig(parentHex), T.ADOPTACK, { topicId: payload.topicId, nonce, accepted: [], refused: 'region' });
+      return 'consumed';
+    }
     const role = this._rootClaim.adoptChild(topicBig, parentHex);
     if (!role) {
       this._log('info', 'adopt-refused', { topic: idHex(topicBig).slice(0, 12), parent: parentHex.slice(0, 12), why: 'custody' });
@@ -628,6 +643,7 @@ export const wireHandlersMethods = {
       // and a failed forward invalidates the pointer instead of our state.
       if (closer) { this._forwardToRoot(topicBig, T.PUB, payload, closer); return 'consumed'; }
     }
+    if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.PUB, topicBig);   // REGION ROLES: stop, not consumed; the publisher's retry carries it
     let role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'pub-terminal');
     // Admission refused (bridge fence): a declined PUB must be FORWARDED, never
     // swallowed. Dropping it here is silent message loss.
@@ -1126,6 +1142,12 @@ export const wireHandlersMethods = {
     // RI-2 (Orion 867c3048): a bridge never holds a backup (_neverRoot). Not
     // consumed, so the sender credits no replica and its verdict is 'failed'.
     if (this._neverRoot) return;
+    // REGION ROLES: no backup outside the topic's region. Same answer: not
+    // consumed, no replica credited. A root keeps its UNION_AT_ROOT path below.
+    if (this._regionRoles) {
+      let tb = null; try { tb = idBig(payload.topicId); } catch { tb = null; }
+      if (tb !== null && !this.axonRoles.get(tb)?.isRoot && this._regionIneligible(tb)) { this._regionRefuse('backup', tb); return; }
+    }
     // Root-side: UNION_AT_ROOT (keep the claim, converge to the union). Else:
     // enter the BACKUP nature. Both are the REPLICATE policy hooks in
     // _syncIngest; the body drains through the time-sliced pump (I-11).
@@ -1666,6 +1688,7 @@ export const wireHandlersMethods = {
       // the app believes it already sent.
       if (closer) { this._forwardToRoot(topicBig, T.KILL, payload, closer); return 'consumed'; }
     }
+    if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.KILL, topicBig);   // REGION ROLES
     const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'kill-terminal');
     if (!role) {
       // A tombstone is the one thing we least want to lose, but forwarding it
@@ -1912,6 +1935,7 @@ export const wireHandlersMethods = {
         if (closer) { this._deferToRoot(topicBig, T.METRICSON, payload, closer); return 'consumed'; }
       }
       if (!this.axonRoles.has(topicBig) && this._rootClaim.holdFor(topicBig)) return 'consumed';   // step-down hold (4.102.0): metrics are cosmetic
+      if (!this.axonRoles.has(topicBig) && this._regionIneligible(topicBig)) return this._regionStop(T.METRICSON, topicBig);   // REGION ROLES
       const role = this.axonRoles.get(topicBig) || this._becomeRoot(topicBig, 'metricson-terminal');
       if (!role) return 'consumed';   // refused: metrics are cosmetic, drop quietly
       this._maybePromoteRoot(role, payload, meta);

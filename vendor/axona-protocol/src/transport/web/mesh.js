@@ -212,6 +212,7 @@ import { bigintReplacer, bigintReviver } from '../wire.js';
 // Bounded mesh degree (4.95.0) — the pure choice of which channel to release.
 import { selectMeshRetire } from './mesh_degree.js';
 import { ChannelLedger } from './channel_ledger.js';
+import { RttEstimator } from '../rtt.js';
 
 // ── ICE configuration ───────────────────────────────────────────────
 //
@@ -701,6 +702,17 @@ export class MeshManager {
     return (typeof last === 'number') ? last : -1;
   }
 
+  /**
+   * 4.148.0 — the smoothed round trip of the channel to `peerId`, or null
+   * when there is no such channel. A channel with no sample yet answers with
+   * `cold: true`. Read-only; nothing in the kernel acts on it.
+   */
+  getRtt(peerId) {
+    const state = this._peers.get(peerId);
+    if (!state || !state.rttEst) return null;
+    return state.rttEst.snapshot();
+  }
+
   /** Snapshot of all known peers, suitable for rendering. */
   getPeers() {
     return [...this._peers.values()].map(p => ({
@@ -1140,6 +1152,7 @@ export class MeshManager {
       // keeps its own pings for its own measurement (SP-1).
       peerLegacy: false,
       rttBuffer: [],
+      rttEst: new RttEstimator(),   // smoothed round trip for THIS channel instance (4.148.0; read by getRtt, used by nothing)
       pendingCandidates: [],
       firstRemoteCandAt: 0,   // signal trace (4.120.0): epoch ms of the first remote candidate on this attempt
       pingTimer: null,
@@ -1740,6 +1753,7 @@ export class MeshManager {
         if (typeof msg.rtt === 'number' && msg.rtt >= 0) {
           state.rttBuffer.push(msg.rtt);
           if (state.rttBuffer.length > RTT_WINDOW) state.rttBuffer.shift();
+          state.rttEst?.sample(msg.rtt, { now, source: 'reported' });
         }
         // Echo the timestamp back.
         if (state.dc?.readyState === 'open') {
@@ -1764,6 +1778,7 @@ export class MeshManager {
         state.lastRxAt = now;
         state.rttBuffer.push(rtt);
         if (state.rttBuffer.length > RTT_WINDOW) state.rttBuffer.shift();
+        state.rttEst?.sample(rtt, { now, source: 'own' });
         if (state.state === 'stale') state.state = 'open';
         this._emitPingTraffic(state.peerId, 'recv');
         this._notify();

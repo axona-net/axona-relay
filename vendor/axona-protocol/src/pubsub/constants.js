@@ -393,6 +393,7 @@ export const BEACON_TTL_MS   = 50_000;          // inbound pointer validity (~2.
 export const BEACON_FANOUT   = 6;               // K closest neighbors per layer (fan-out ≤ K+K²)
 export const BEACON_LAYERS   = 2;               // recursive forward depth
 export const BEACON_SEEN_MS  = 60_000;          // flood-dedup retention
+export const BEACON_TOPICS_MAX = 256;            // topics a receiver reads from ONE beacon; with BEACON_CHUNK a sender lists no more than this in one
 
 // Root self-verification (v4.19.1). Beacon-gated reconciliation is reach-limited:
 // a spurious root minted by a stranded SUB on a FRESH topic (no beacon anywhere

@@ -526,7 +526,15 @@ export class CompositeTransport extends Transport {
     for (const t of this._subs) {
       if (typeof t.boundPeers !== 'function') continue;
       for (const id of t.boundPeers()) {
-        if (typeof id === 'bigint') seen.add(id);
+        if (typeof id !== 'bigint') continue;
+        // 4.134.0 (Orion 98dc6028): a superseded route is not a bound peer.
+        // A bootstrap socket KEEPS its binding after it is superseded (it still
+        // serves signalling), so its sub still lists the identity. _routeFor
+        // skips that sub, so the identity is unroutable through it; listing it
+        // here let _reconcileBound re-admit a member with no route the moment
+        // its admitted mesh route died while the old socket was still open.
+        if (this._isSuperseded(t, id)) continue;
+        seen.add(id);
       }
     }
     return [...seen];
@@ -699,6 +707,13 @@ export class CompositeTransport extends Transport {
   getLatency(nodeId) {
     const t = this._routeFor(nodeId);
     return t ? t.getLatency(nodeId) : -1;
+  }
+
+  /** 4.148.0 — smoothed round trip of the CURRENT route to `nodeId`, or null. Read-only. */
+  getRtt(nodeId) {
+    const t = this._routeFor(nodeId);
+    if (!t || typeof t.getRtt !== 'function') return null;
+    try { return t.getRtt(nodeId); } catch { return null; }
   }
 
   // ── Convenience: ask every sub-transport for its mapping ──────────

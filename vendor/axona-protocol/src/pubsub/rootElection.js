@@ -14,7 +14,7 @@ import {
   PENDING_PUB_TTL_MS, PENDING_PUB_MAX_TRIES, COLD_BURST_TRIES,
   COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES, COLD_BURST_SLOW_INTERVAL_MS,
   COLD_PEER_THRESHOLD, FIRST_PUBLISH_RESEND_MS, REPLAY_CHUNK_BYTES,
-  FUTURE_TOLERANCE_MS, BEACON_MS, BEACON_TTL_MS, BEACON_SEEN_MS,
+  FUTURE_TOLERANCE_MS, BEACON_MS, BEACON_TTL_MS, BEACON_SEEN_MS, BEACON_TOPICS_MAX,
   ROOT_VERIFY_FIRST_MS, ROOT_VERIFY_MS, ROOT_VERIFY_BATCH, METRICS_LEASE_MS,
   METRICS_PUB_MS, METRICS_COALESCE_MS,
 } from './constants.js';
@@ -49,25 +49,39 @@ export const rootElectionMethods = {
     return e;
   },
 
-  _emitRootBeacons() {
+  // `only` (4.150.0, ANNOUNCE_NEW_ONLY): announce just these topics. The timer
+  // passes nothing and sends the whole list, as before. A topic this node does
+  // not root, or is dismantling, is never announced either way.
+  _emitRootBeacons(only = null) {
     if (typeof this.dht.neighbors !== 'function') return;
     const rooted = [];
-    for (const [t, r] of this.axonRoles) if (r.isRoot && !r.dismantling) rooted.push(t);   // a dismantling root advertises nothing (Topic Lifetime 4.5)
+    if (only) { for (const t of only) { const r = this.axonRoles.get(t); if (r && r.isRoot && !r.dismantling) rooted.push(t); } }
+    else for (const [t, r] of this.axonRoles) if (r.isRoot && !r.dismantling) rooted.push(t);   // a dismantling root advertises nothing (Topic Lifetime 4.5)
     if (!rooted.length) return;
     const neigh = (this.dht.neighbors() || []).map(idBig).filter(n => n !== this.nodeId);
     if (!neigh.length) return;
     const basin = neigh.slice().sort((a, b) => this._cmpXor(a, b, this.nodeId)).slice(0, this._beaconFanout);
-    const payload = {
-      root: lc(idHex(this.nodeId)),
-      topics: rooted.map(idHex),
-      // Incarnations, index-aligned with `topics` (v0.3). Receivers without
-      // this field, and senders without it, interoperate: absent → epoch 0.
-      epochs: rooted.map((t) => { const r = this.axonRoles.get(t); return (r && Number.isInteger(r.epoch)) ? r.epoch : 0; }),
-      beaconId: `${idHex(this.nodeId).slice(0, 10)}-${this._now()}-${this._beaconSeq++}`,
-      layer: this._beaconLayers,
-    };
-    this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);   // never re-forward my own
-    for (const nb of basin) this._route(nb, T.ROOTBEACON, payload);
+    // BEACON_CHUNK (4.151.0): a receiver reads the first BEACON_TOPICS_MAX
+    // topics of a beacon and drops the rest (see _onRootBeacon). A node that
+    // roots more than that was only partly heard: on testnet on 2026-11-15 two
+    // roots stood for topics past the cut and never merged. With the switch on
+    // a longer list goes out as several beacons, each within the limit, each
+    // with its own beaconId. A list within the limit is one beacon, as before.
+    const size = this._beaconChunk ? BEACON_TOPICS_MAX : rooted.length;
+    for (let i = 0; i < rooted.length; i += size) {
+      const part = (i === 0 && size >= rooted.length) ? rooted : rooted.slice(i, i + size);
+      const payload = {
+        root: lc(idHex(this.nodeId)),
+        topics: part.map(idHex),
+        // Incarnations, index-aligned with `topics` (v0.3). Receivers without
+        // this field, and senders without it, interoperate: absent → epoch 0.
+        epochs: part.map((t) => { const r = this.axonRoles.get(t); return (r && Number.isInteger(r.epoch)) ? r.epoch : 0; }),
+        beaconId: `${idHex(this.nodeId).slice(0, 10)}-${this._now()}-${this._beaconSeq++}`,
+        layer: this._beaconLayers,
+      };
+      this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);   // never re-forward my own
+      for (const nb of basin) this._route(nb, T.ROOTBEACON, payload);
+    }
   },
 
   // Receive: cache the pointer (verify-don't-trust), then re-forward once within
@@ -76,11 +90,19 @@ export const rootElectionMethods = {
   // publish to a node FARTHER from the topic than honest routing would pick.
   _onRootBeacon(payload, meta) {
     if (!payload || typeof payload.root !== 'string' || !Array.isArray(payload.topics)) return;
-    if (!payload.beaconId || this._beaconSeen.has(payload.beaconId)) return;
+    // BEACON_VERDICT (4.151.0): until now this handler returned nothing, so the
+    // walk that DELIVERED a beacon reported consumed:false and routed-outcomes
+    // counted every delivered beacon as a failed send (991 of 991 on a testnet
+    // bridge, 2026-11-16). With the switch on, the node the beacon was
+    // ADDRESSED to reports it consumed. Only that node: this handler also runs
+    // at the sender and at any hop on the way, and 'consumed' there would end
+    // the walk before the beacon arrived. A malformed beacon is not consumed.
+    const done = (this._beaconVerdict && meta && typeof meta.targetId === 'bigint' && meta.targetId === this.nodeId) ? 'consumed' : undefined;
+    if (!payload.beaconId || this._beaconSeen.has(payload.beaconId)) return done;
     this._beaconSeen.set(payload.beaconId, this._now() + BEACON_SEEN_MS);
     let rootBig; try { if (!isHexId(lc(payload.root))) return; rootBig = idBig(payload.root); } catch { return; }
     const now = this._now();
-    const topics = payload.topics.slice(0, 256);
+    const topics = payload.topics.slice(0, BEACON_TOPICS_MAX);
     for (let i = 0; i < topics.length; i++) {
       const tHex = topics[i];
       let tBig; try { if (!isHexId(lc(tHex))) continue; tBig = idBig(tHex); } catch { continue; }
@@ -138,7 +160,9 @@ export const rootElectionMethods = {
       //                   behave exactly as 4.61.x did.
       const staleClaim = !!this._rootTombstoned?.(tBig, payload.root, epoch);
       const closer = (rootBig ^ tBig) < (this.nodeId ^ tBig);
-      if (supersedesMine || (closer && !staleClaim)) {
+      // REGION ROLES: never yield to a root outside the topic's region. The
+      // record above is kept: its epoch is seat history either way.
+      if ((supersedesMine || (closer && !staleClaim)) && this._roleRegionOk(tBig, rootBig)) {
         // Through the ONE candidate entry (dual-root packet 4(d)): a root with
         // custody on a merge-capable node records the winner instead of yielding.
         this._mergeCandidate(tBig, lc(payload.root), epoch,
@@ -174,6 +198,7 @@ export const rootElectionMethods = {
         this._route(nb, T.ROOTBEACON, fwd);
       }
     }
+    return done;
   },
 
   // Emit a root beacon IMMEDIATELY on becoming root, so a brand-new topic's
@@ -187,7 +212,15 @@ export const rootElectionMethods = {
     if (!this._lastAnnounce) this._lastAnnounce = new Map();
     if (now - (this._lastAnnounce.get(topicBig) || 0) < BEACON_MS / 2) return;
     this._lastAnnounce.set(topicBig, now);
-    this._emitRootBeacons();
+    // Until 4.150.0 every claim re-sent the node's WHOLE rooted list: n claims
+    // cost n full lists, the square of the topics rooted. On testnet on
+    // 2026-11-16 a no-role bridge received 4,098 beacons in about 20 s while
+    // three hosts claimed 1,124 topics, and sat on the CPU for 18 s. With the
+    // switch on, a claim announces the one topic it is about. Nothing reads a
+    // topic's ABSENCE from a beacon, so the receiver needs no change, and the
+    // BEACON_MS timer still sends the whole list.
+    if (this._announceNewOnly) this._emitRootBeacons([topicBig]);
+    else this._emitRootBeacons();
   },
 
   // Nearest node to `tBig` among what I know LOCALLY: my neighbors, myself, and
@@ -450,6 +483,7 @@ export const rootElectionMethods = {
             let b; try { b = idBig(id); } catch { continue; }
             if (b === this.nodeId) continue;
             if (bridge != null && b === bridge) continue;
+            if (this._regionRoles && !this._roleRegionOk(t, b)) continue;   // REGION ROLES: the nominee is in the topic's region
             const d = b ^ t;
             if (cD === null || d < cD) { cD = d; cBig = b; }
           }

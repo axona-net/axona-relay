@@ -32,6 +32,7 @@
 // =====================================================================
 
 import { asId } from '../utils/hexid.js';
+import { sameRegion } from './regionRoles.js';
 
 const idHex = (big) => big.toString(16).padStart(66, '0');
 const idBig = asId;
@@ -202,6 +203,9 @@ export class RootClaim {
     if (b.root === lc(idHex(m.nodeId))) return null;
     let rb; try { rb = idBig(b.root); } catch { return null; }
     if ((rb ^ topicBig) >= (m.nodeId ^ topicBig)) return null;   // never defer to a farther node (I-2)
+    // REGION ROLES: a root outside the topic's region is never deferred to. Its
+    // beacon record stays (epoch evidence, the merge trigger); only the defer goes.
+    if (m._regionRoles && !m._roleRegionOk(topicBig, rb)) return null;
     // E3 tombstone: a convicted incarnation's beacon is the corpse's ghost.
     // Epoch-bounded — a HIGHER epoch from the same node is a legitimate
     // rebirth and passes (the E4 adopt path mints it).
@@ -281,7 +285,19 @@ export class RootClaim {
   // transitive); with an unversioned claim in a triple it is pairwise
   // antisymmetric only, which is why an unversioned node is never a merge
   // participant (the legacy fallback, packet 4(d)).
-  static claimWins(topicBig, a, b) {
+  // REGION ROLES (regionFirst; David 2026-11-13): a claim from a node in the
+  // topic's region wins over one from outside it, BEFORE epoch and distance.
+  // Among claims on the same side of that test the relation below is unchanged,
+  // so among versioned claims it stays a total order, and a triple that
+  // straddles the test has no cycle (Orion ef78e8c7, Aster cd1da075). It changes
+  // the winner in one case: both claims versioned and the out-of-region one
+  // higher, since an epoch-0 comparison already falls to distance and distance
+  // already ranks every in-region id first.
+  static claimWins(topicBig, a, b, regionFirst = false) {
+    if (regionFirst) {
+      const ra = sameRegion(topicBig, a.id), rb = sameRegion(topicBig, b.id);
+      if (ra !== rb) return ra;
+    }
     const ea = Number.isInteger(a?.epoch) ? a.epoch : 0;
     const eb = Number.isInteger(b?.epoch) ? b.epoch : 0;
     if (ea > 0 && eb > 0 && ea !== eb) return ea > eb;
@@ -291,7 +307,7 @@ export class RootClaim {
   wins(topicBig, claim) {
     const role = this.m.axonRoles.get(topicBig);
     const mine = { id: idHex(this.m.nodeId), epoch: role?.isRoot ? (role.epoch | 0) : 0 };
-    return RootClaim.claimWins(topicBig, claim, mine);
+    return RootClaim.claimWins(topicBig, claim, mine, !!this.m._regionRoles);
   }
 
   // CUSTODY (Part 3): a role holds custody while it holds a body or an active
@@ -449,6 +465,11 @@ export class RootClaim {
     // Real refusal lives where the role is PUSHED and the pusher can re-pick:
     // syncEngine HANDOFF (see there). That asymmetry is the design, not an
     // oversight — a terminus that refuses drops data.
+    //
+    // REGION ROLES: no root is born outside the topic's region. The terminal
+    // handlers stop the walk before they reach here (_regionStop); this is the
+    // gate for every other birth (reachable-fallback, handoff-heir).
+    if (m._regionIneligible?.(topicBig)) { m._regionRefuse('root', topicBig); return null; }
     if (!m.admitRole(topicBig, false)) return null;    // HARD only (bridge)
     const role = makeRole(topicBig, true, m._now());
     role.epoch = (m._knownEpoch?.(topicBig) ?? 0) + 1;   // incarnation mint (v0.3) — born-as-root site
@@ -483,6 +504,7 @@ export class RootClaim {
     if (!(viaEmpty && meta.isTerminal && !role.isRoot)) return;
     // R4: a terminal that cannot serve does not take the seat (same test as _becomeRoot).
     if (typeof m.dht?.servingCapable === 'function' && !m.dht.servingCapable()) return;
+    if (m._regionIneligible?.(role.topicId)) return;   // REGION ROLES: no promotion outside the topic's region
     if (this.liveCloserRoot(role.topicId)) return;   // a closer live root is beaconing — don't contest it
     if (this._holdBlocks(role.topicId, 'terminal-promote')) return;   // stepped down: hold the seat (4.102.0)
     this._set(role, true, 'terminal-promote');

@@ -339,13 +339,16 @@ export const writeFlightMethods = {
         if (nb === this.nodeId) continue;
         if (bridge != null && nb === bridge) continue;
         if (excluded.has(lc(idHex(nb)))) continue;        // the tombstoned incarnation, and every root this chain left
+        if (this._regionRoles && !this._roleRegionOk(tBig, nb)) continue;   // REGION ROLES: the retry target is in the topic's region
         const d = nb ^ tBig;
         if (bestD === null || d < bestD) { bestD = d; best = nb; }
       }
     }
     // Self is a candidate too: if this node is closest live, ingest locally.
     const selfD = this.nodeId ^ tBig;
-    if (bestD === null || selfD < bestD) { bestD = selfD; best = this.nodeId; }
+    // REGION ROLES (Aster cd1da075): the guard is on SELF too. A sender outside
+    // the topic's region with no eligible neighbour must not pick itself.
+    if (!this._regionIneligible(tBig) && (bestD === null || selfD < bestD)) { bestD = selfD; best = this.nodeId; }
     if (best == null) {
       for (const e of f.entries.values()) this._undeliverable(e.type, f.topicBig, 'no-live-holder');
       this._log('error', 'write-flight-exhausted', {

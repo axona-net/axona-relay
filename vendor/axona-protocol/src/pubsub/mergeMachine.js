@@ -498,6 +498,7 @@ export const mergeMachineMethods = {
   // offer was answered here.
   _stageOffer(topicBig, role, loser, payload) {
     if (this._neverRoot || (typeof this.saturated === 'function' && this.saturated())) return false;
+    if (this._regionIneligible(topicBig)) return false;   // REGION ROLES (Orion ef78e8c7): no staging outside the topic's region
     // Part 7 capability gate (David 2026-11-03 "go ahead with Part 7"): stage
     // only from a loser that advertises the staged handover. An old loser
     // forwards writes to a winner that cannot stamp (no staged-gate

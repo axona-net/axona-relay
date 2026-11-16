@@ -35,6 +35,7 @@
 import { Transport }            from '../../contracts/Transport.js';
 import { TransportError, ErrorCodes } from '../../errors.js';
 import { depositDispatchCapability } from '../../registry/index.js';
+import { RttEstimator } from '../rtt.js';
 
 const REQUEST_TIMEOUT_MS = 5000;
 const MAX_REQ_ID = 0x7fffffff;
@@ -316,6 +317,16 @@ export class BridgeTransport extends Transport {
   /** Approximate RTT.  Future: thread through the application-ping
    *  rttBuffer from client.js's existing bridge ping loop. */
   getLatency(_nodeId) { return 50; }
+
+  /**
+   * 4.148.0 — the bridge socket's measured round trip. The client's bridge
+   * ping loop (web/index.js recordPong) feeds it; a new socket starts cold
+   * (resetRtt). Read-only: getLatency above still answers 50 and nothing in
+   * the kernel acts on this.
+   */
+  recordRtt(ms, now = Date.now()) { return (this._rtt ??= new RttEstimator()).sample(ms, { now, source: 'own' }); }
+  resetRtt() { (this._rtt ??= new RttEstimator()).reset(); }
+  getRtt(_nodeId) { return (this._rtt ??= new RttEstimator()).snapshot(); }
 
   // ── Inbound dispatch ──────────────────────────────────────────────
 

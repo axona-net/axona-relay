@@ -94,6 +94,20 @@ const DEFAULTS = Object.freeze({
   // whatever this flag says (an older node ignores the field). Env
   // SIGNAL_RETURN_ROUTE=1 arms it where process.env exists.
   SIGNAL_RETURN_ROUTE: false,
+  // Lookahead Answer Live (4.147.0; David 2026-11-15 "Build the lookahead-
+  // answer liveness check first"): the lookahead_probe ANSWER names only a
+  // table entry this node could send to now (not dead-marked, channel reads
+  // open, not suspect). OFF: the answer names any entry closer than the
+  // asker, connected or not, as 4.146.0. Env LOOKAHEAD_ANSWER_LIVE=1 arms it.
+  LOOKAHEAD_ANSWER_LIVE: false,
+  // Bound Target (4.145.0; Orion 0e8f044b, David 2026-11-14 "Build the
+  // forwarder change"): a hop that holds an open, healthy channel to the
+  // target of a lookup or a routed frame sends there, whether or not the
+  // target is a member of its table (AxonaPeer._boundTargetOk). OFF: a bound
+  // peer that is not a member is invisible to the lookup step and, with pools
+  // unarmed, to the forwarder. Env BOUND_TARGET_DELIVER=1 arms it where
+  // process.env exists.
+  BOUND_TARGET_DELIVER: false,
   // Closer-Born Relay Inherits the Root v0.6 (David 2026-11-03 "go ahead with
   // the return routes"): a pub/sub request that may earn a reply (SUB,
   // MERGE_OFFER, PULLUP) keeps SIGNAL_RPATH_MAX path ids instead of
@@ -173,7 +187,7 @@ export class AxonaDomain {
     }
     // P2/P3 arming, the same rule: the env speaks only when the option is not
     // given AND the variable is set; =0 is a control arm, unset is the default.
-    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE', 'RETURN_ROUTE']) {
+    for (const flag of ['NO_PATH_DEFER', 'PEER_EXCHANGE', 'SIGNAL_RETURN_ROUTE', 'RETURN_ROUTE', 'BOUND_TARGET_DELIVER', 'LOOKAHEAD_ANSWER_LIVE']) {
       if (opts[flag] == null) {
         const e = envNum(flag, null);
         if (e !== null) this[flag] = e === 1;
