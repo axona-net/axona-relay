@@ -431,3 +431,7 @@ scripts/sync-protocol.sh
 - Multiple relays + a small chaos harness to measure pub/sub durability vs
   churn.
 - Bridgeless bootstrap: seed from a known peer list instead of a bridge URL.
+
+## License
+
+Copyright 2026 Axona.net. Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Provided "as is", without warranty of any kind.
