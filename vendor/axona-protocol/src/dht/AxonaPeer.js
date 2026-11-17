@@ -5539,6 +5539,10 @@ export class AxonaPeer extends DHT {
         }
         return [...out];
       },
+      // 4.154.0: is there an open, healthy channel to this peer right now? The
+      // transport's own evidence (not marked dead, channel open, not stale), the
+      // same test BOUND_TARGET_DELIVER uses. Local, no message sent.
+      isLive: (idBig) => { try { return peer._boundTargetOk(idBig) === true; } catch { return false; } },
       // The bridge node id (signaling infra, never a topic root). Lets AxonaManager
       // exclude it from the reachable-closest test in its root-claim fallback, the
       // same way findKClosest/routeMessage already skip it.

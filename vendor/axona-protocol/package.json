@@ -1,6 +1,6 @@
 {
   "name": "@axona/protocol",
-  "version": "4.151.0",
+  "version": "4.154.0",
   "description": "Pure-JS protocol kernel for the Axona peer-to-peer mesh. Contracts (DHT, Transport, BootstrapService), the per-node AxonaPeer implementation (NH-1 routing + axonal pub/sub), and supporting helpers. No simulator dependencies; runs in browsers and Node.",
   "type": "module",
   "main": "./src/index.js",
@@ -49,7 +49,7 @@
     "url": "git+https://github.com/axona-net/axona-protocol.git"
   },
   "homepage": "https://axona.net",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": [
     "dht",
     "p2p",

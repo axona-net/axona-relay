@@ -27,7 +27,7 @@ Two design commitments shape everything here:
 ## Install
 
 ```bash
-npm install github:axona-net/axona-protocol#v4.131.0
+npm install github:axona-net/axona-protocol#v4.151.0
 ```
 
 Pure JS, ESM only, no native dependencies in the browser. Node ≥ 20 or any
@@ -117,4 +117,4 @@ constants) — documentation drift fails CI here, not in the field.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+Copyright 2026 Axona.net. Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE) and [NOTICE](NOTICE). Provided "as is", without warranty of any kind.

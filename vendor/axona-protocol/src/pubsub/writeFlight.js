@@ -25,7 +25,7 @@
 //
 // Flights are swept from refreshTick (the kernel's one scheduler) — no
 // per-flight timers, nothing to leak; every exit path deletes the flight.
-import { T, BEACON_TTL_MS } from './constants.js';
+import { T, BEACON_TTL_MS, BEACON_MS } from './constants.js';
 import { idHex, idBig } from './ids.js';
 import { rootPubMatchesNodeHash } from './ackProof.js';
 import { checkFreshness } from './envelope.js';
@@ -223,9 +223,14 @@ export const writeFlightMethods = {
         const first = f.entries.values().next().value;
         if (!first) { this._writeFlights.delete(key); continue; }
         let rootBig; try { rootBig = idBig(f.rootHex); } catch { this._writeFlights.delete(key); continue; }
-        this._route(rootBig, T.RECEIPTPROBE, {
-          topicId: idHex(f.topicBig), msgId: first.msgId, op: first.op,
-        });
+        // 4.153.0 (flightAddressGuard): the probe carries the flight's ack
+        // routing, as a forwarded write does, so a root that holds the message
+        // can answer with a SIGNED proof addressed to this owner. An unsigned
+        // ack binds to the node that hands it over, which past one hop is a
+        // relay and never the root.
+        this._route(rootBig, T.RECEIPTPROBE, this._flightAddressGuard
+          ? { topicId: idHex(f.topicBig), msgId: first.msgId, op: first.op, ackTo: f.ackTo, flightNonce: f.flightNonce, attemptId: first.attemptId }
+          : { topicId: idHex(f.topicBig), msgId: first.msgId, op: first.op });
         this._log('info', 'receipt-probe', {
           topic: idHex(f.topicBig).slice(0, 12), root: f.rootHex.slice(0, 12), round: f.rounds,
         });
@@ -239,13 +244,23 @@ export const writeFlightMethods = {
   // ROOT side: prove the correlated receipt or state the inability. An
   // already-tombstoned target is held state too — the kill settled it.
   _onReceiptProbe(payload, meta) {
+    if (this._notAddressedToMe(meta)) return;            // 4.152.0: not consumed here; the walk carries it to the root
     if (!payload || typeof payload.topicId !== 'string' || typeof payload.msgId !== 'string') return 'consumed';
     let tBig; try { tBig = idBig(payload.topicId); } catch { return 'consumed'; }
     const role = this.axonRoles.get(tBig);
     const op = payload.op === 'kill' ? 'kill' : 'pub';
     const holds = !!role && (role.cacheIds.has(payload.msgId) || role.tombstones?.has(payload.msgId));
-    let fromBig; try { fromBig = idBig(meta?.fromId); } catch { return 'consumed'; }
-    if (holds) {
+    // 4.153.0 (flightAddressGuard): answer the node that ASKED. meta.fromId is
+    // the node that handed this hop the frame — the asker at one hop, a relay
+    // past it; the walk carries the asker as originId. Off, or with no
+    // originId, the reply goes to fromId as before.
+    const replyTo = (this._flightAddressGuard && typeof meta?.originId === 'string') ? meta.originId : meta?.fromId;
+    let fromBig; try { fromBig = idBig(replyTo); } catch { return 'consumed'; }
+    if (holds && this._flightAddressGuard) {
+      // Signed to payload.ackTo when the probe carried the tuple; the unsigned
+      // one-hop ack to replyTo when it did not (an older asker).
+      this._sendIngestAck(replyTo, role, payload.msgId, op, payload);
+    } else if (holds) {
       this._route(fromBig, T.INGESTACK, {
         topicId: payload.topicId, msgId: payload.msgId, epoch: role.epoch ?? 0, op,
       });
@@ -261,7 +276,8 @@ export const writeFlightMethods = {
   // simply never have arrived. The retry re-arms the ack deadline; a root
   // that stays receipt-less after being handed the write directly is evicted
   // on the next sweep (rounds cap).
-  _onReceiptNack(payload) {
+  _onReceiptNack(payload, meta) {
+    if (this._notAddressedToMe(meta)) return;            // 4.152.0: the nack is for the flight owner
     if (!this._writeFlights || !payload || typeof payload.topicId !== 'string') return 'consumed';
     let tBig; try { tBig = idBig(payload.topicId); } catch { return 'consumed'; }
     for (const [, f] of this._writeFlights) {
@@ -285,7 +301,13 @@ export const writeFlightMethods = {
     if (!this._rootTombstones) this._rootTombstones = new Map();
     const prev = this._rootTombstones.get(f.topicBig);
     if (!prev || f.epoch >= prev.epoch) {
-      this._rootTombstones.set(f.topicBig, { root: f.rootHex, epoch: f.epoch, exp: this._now() + ROOT_TOMBSTONE_TTL_MS });
+      // 4.154.0 (steppedHold): 2 minutes, 10 on a repeat for the same root on
+      // the same topic; never shorter than a beacon record can live, so a
+      // corpse's stale pointer still cannot outlive its conviction.
+      const ttl = this._steppedHold
+        ? Math.max(this._holdStrike(`${f.topicBig.toString(16)}|${f.rootHex}`), BEACON_TTL_MS + BEACON_MS)
+        : ROOT_TOMBSTONE_TTL_MS;
+      this._rootTombstones.set(f.topicBig, { root: f.rootHex, epoch: f.epoch, exp: this._now() + ttl });
     }
     const rec = this._rootBeacons.get(f.topicBig);
     if (rec && lc(rec.root) === f.rootHex && (!Number.isInteger(rec.epoch) || rec.epoch <= f.epoch)) {

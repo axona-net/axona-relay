@@ -925,6 +925,7 @@ export const wireHandlersMethods = {
   // Bounded store; entries are consumed by the flight or age out by insertion
   // order. Everything is validated — a malformed ack records nothing.
   async _onIngestAck(payload, meta) {
+    if (this._notAddressedToMe(meta)) return;            // 4.152.0: the ack is for the flight owner (signed) or the forwarder (unsigned)
     // D1 (Write-Flight Ack Routing): a SIGNED ACK PROOF (carries `sig` + a
     // 64-hex `rootPub`) is the multi-hop-safe completion — verify the signature
     // and bind it to the open flight by attemptId + ackTo + flightNonce + the

@@ -245,9 +245,13 @@ export const repairPlaneMethods = {
         if (now - p.at > PENDING_PUB_TTL_MS || (p.tries || 0) >= PENDING_PUB_MAX_TRIES) { map.delete(msgId); continue; }
         p.tries = (p.tries || 0) + 1;
         const tb = p.topicBig;
-        const hint = this._rootHint_(tb);
-        if (isKill) this._send(T.KILL, { topicId: idHex(tb), via: hint ? [hint] : [], kill: p.kill });
-        else        this._send(T.PUB,  { topicId: idHex(tb), via: hint ? [hint] : [], json: p.json });
+        // 4.154.0 (pubHintLive): the previous send was pinned and a full tick
+        // has passed with no sight of the message. No-op off, or unsubscribed.
+        this._pubHintFailed(tb, p.via);
+        const via = this._pubVia(tb);
+        p.via = via[0] ?? null;
+        if (isKill) this._send(T.KILL, { topicId: idHex(tb), via, kill: p.kill });
+        else        this._send(T.PUB,  { topicId: idHex(tb), via, json: p.json });
       }
     }
 
@@ -1246,8 +1250,9 @@ export const repairPlaneMethods = {
         this._burstTimers.delete(h);
         const p = this._pendingPub?.get(msgId);
         if (!p) return;                                 // confirmed or aged out → quench
-        const hint = this._rootHint_(topicBig);
-        this._send(T.PUB, { topicId: idHex(topicBig), via: hint ? [hint] : [], json: p.json });
+        const via = this._pubVia(topicBig);
+        p.via = via[0] ?? null;
+        this._send(T.PUB, { topicId: idHex(topicBig), via, json: p.json });
         i++; step();
       }, gaps[i]);
       if (typeof h.unref === 'function') h.unref();

@@ -51,7 +51,7 @@ import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { RoleScopedDurability } from './durability.js';
 import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
          CACHE_BYTES, MAX_DIRECT, MAX_VIA, VIA_HOP_BUDGET, BEACON_MS,
-         BEACON_FANOUT, BEACON_LAYERS, PENDING_PUB_TTL_MS, COLD_BURST_TRIES,
+         BEACON_FANOUT, BEACON_LAYERS, PENDING_PUB_TTL_MS, COLD_BURST_TRIES, HOLD_FIRST_MS, HOLD_REPEAT_MS,
          COLD_BURST_INTERVAL_MS, COLD_BURST_SLOW_TRIES,
          COLD_BURST_SLOW_INTERVAL_MS, COLD_PEER_THRESHOLD,
          FIRST_PUBLISH_RESEND_MS, METRICS_LEASE_MS, METRICS_PUB_MS,
@@ -138,6 +138,9 @@ export class AxonaManager {
     announceNewOnly = null,        // 4.150.0 (David 2026-11-16 "build the announce-only-the-new-topic change"): DEFAULT OFF; env ANNOUNCE_NEW_ONLY=1. A root claim announces THAT topic; the full list stays on the BEACON_MS timer.
     beaconChunk = null,            // 4.151.0 (David 2026-11-16 "chunk the timer's list and fix the beacon handler"): DEFAULT OFF; env BEACON_CHUNK=1. A beacon lists at most BEACON_TOPICS_MAX topics; a longer list goes out as several beacons.
     beaconVerdict = null,          // 4.151.0: DEFAULT OFF; env BEACON_VERDICT=1. The beacon handler reports 'consumed' at the node the beacon was addressed to, so a delivered beacon stops counting as a failed routed send.
+    flightAddressGuard = null,     // 4.152.0: DEFAULT OFF; env FLIGHT_ADDRESS_GUARD=1. INGESTACK, RECEIPTPROBE and RECEIPTNACK are handled only at the node they are addressed to; a routed frame's handler also runs at its sender's own hop 0, where these three returned 'consumed' and the frame never left. 4.153.0, same switch: a receipt probe carries the flight's ack routing and is answered to the node that asked (the walk's origin), signed when the root holds the message.
+    pubHintLive = null,            // 4.154.0: DEFAULT OFF; env PUB_HINT_LIVE=1. A publish is pinned to its root hint only when the hint is a fresh beacon's root or a peer with an open, healthy channel, and never to a node on hold. A pinned publish this node is subscribed to and does not see come back puts the hint on hold (2 min, 10 on repeat) and drops the cached guess; the retry goes to the bare topic id.
+    steppedHold = null,            // 4.154.0: DEFAULT OFF; env STEPPED_HOLD=1. A root evicted for no receipt is tombstoned 2 minutes, 10 on a repeat, where it was 10 always.
     mergeCapable = null,           // dual-root reconciliation (axona-docs 14a6bd8): DEFAULT-ON since 4.118.0; null = env MERGE_CAPABLE, else MERGE_CAPABLE_DEFAULT
     topicLifetime = null,          // Topic Lifetime (axona-docs 11288d7): DEFAULT-ON since 4.118.0; null = env TOPIC_LIFETIME, else TOPIC_LIFETIME_DEFAULT
     ..._legacy   // accepted-and-ignored clean-break tunables (pickRelayPeer, rootSetSize, …)
@@ -373,6 +376,10 @@ export class AxonaManager {
     this._announceNewOnly = !!(announceNewOnly ?? envNum('ANNOUNCE_NEW_ONLY', 0));
     this._beaconChunk     = !!(beaconChunk ?? envNum('BEACON_CHUNK', 0));
     this._beaconVerdict   = !!(beaconVerdict ?? envNum('BEACON_VERDICT', 0));
+    this._flightAddressGuard = !!(flightAddressGuard ?? envNum('FLIGHT_ADDRESS_GUARD', 0));
+    this._pubHintLive     = !!(pubHintLive ?? envNum('PUB_HINT_LIVE', 0));
+    this._steppedHold     = !!(steppedHold ?? envNum('STEPPED_HOLD', 0));
+    this._holds           = new Map();   // 4.154.0: node hex or 'topic|root' -> { until, strikes, at }
     // Per-type tally (4.149.0): null when off, so every path below is one null test.
     this._typeTally       = (routeTypeTally ?? envNum('ROUTE_TYPE_TALLY', 0)) ? { out: new Map(), in: new Map() } : null;
     // 3d SUBSCRIBERS FOLLOW THE ROOT (Closer-Born v0.6). A caught-up renewal
@@ -507,6 +514,75 @@ export class AxonaManager {
   // containment is here, once: a transport error becomes a FAILURE VERDICT of the
   // same shape routing already uses, which dispatchVerdict() classifies as 'failed'.
   // A caller that ignores the result is safe; a caller that reads it gets the truth.
+  // 4.152.0 (flightAddressGuard). True when a routed frame is NOT addressed to
+  // this node. routeMessage runs a frame's handler at the sender's own hop 0
+  // and at every intermediate hop; a handler that answers there consumes a
+  // frame meant for someone else. Off, or with no targetId on the meta (a
+  // direct call), it is never true and the handlers behave as before.
+  _notAddressedToMe(meta) {
+    return this._flightAddressGuard && !!meta && typeof meta.targetId === 'bigint' && meta.targetId !== this.nodeId;
+  }
+  // ── 4.154.0: stepped holds ─────────────────────────────────────────────
+  // One record per key. A first failure holds HOLD_FIRST_MS. A failure that
+  // lands while the previous one is still remembered holds HOLD_REPEAT_MS. A
+  // failure is remembered for HOLD_REPEAT_MS after it was recorded. Returns the
+  // hold length applied.
+  _holdStrike(key) {
+    const now = this._now();
+    const prev = this._holds.get(key);
+    const repeat = !!prev && (now - prev.at) <= HOLD_REPEAT_MS;
+    const strikes = repeat ? prev.strikes + 1 : 1;
+    const ms = strikes >= 2 ? HOLD_REPEAT_MS : HOLD_FIRST_MS;
+    this._holds.set(key, { until: now + ms, strikes, at: now });
+    if (this._holds.size > 512) {                       // bounded: oldest record out
+      let oldK = null, oldAt = Infinity;
+      for (const [k, r] of this._holds) if (r.at < oldAt) { oldAt = r.at; oldK = k; }
+      if (oldK !== null) this._holds.delete(oldK);
+    }
+    return ms;
+  }
+  _held(key) {
+    const r = this._holds.get(key);
+    if (!r) return false;
+    const now = this._now();
+    if (now - r.at > HOLD_REPEAT_MS) { this._holds.delete(key); return false; }   // forgotten
+    return now < r.until;
+  }
+  // ── 4.154.0 (pubHintLive): where a publish or kill is addressed ────────
+  // Off: the root hint, as before. On: the hint only if it is not on hold and
+  // is either the root a FRESH beacon names or a peer with an open, healthy
+  // channel. Anything else goes to the bare topic id, which is how a publisher
+  // with no hint already reaches the root. An adapter with no liveness reader
+  // cannot say, so its hint is kept.
+  _pubVia(topicBig) {
+    const hint = this._rootHint_(topicBig);
+    if (!hint || !this._pubHintLive) return hint ? [hint] : [];
+    const h = lc(String(hint));
+    if (this._held(h)) { this._pubHintStat('held'); return []; }
+    const b = this._rootBeacons.get(topicBig);
+    if (b && this._now() < b.exp && lc(String(b.root)) === h) return [hint];
+    if (typeof this.dht.isLive !== 'function') return [hint];
+    let live = false; try { live = this.dht.isLive(idBig(hint)) === true; } catch { live = false; }
+    if (live) return [hint];
+    this._pubHintStat('not-live');
+    return [];
+  }
+  _pubHintStat(k) { const s = (this._pubHintStats ??= { held: 0, 'not-live': 0, strikes: 0 }); s[k] = (s[k] || 0) + 1; }
+  // A pinned publish or kill this node should have seen come back, and did
+  // not: the hint goes on hold and the cached guess is dropped, so the next
+  // send starts from a fresh lookup and cannot pick the same node. Only when
+  // this node is SUBSCRIBED to the topic: a publisher that is not subscribed
+  // never sees its own message, and silence there is no evidence.
+  _pubHintFailed(topicBig, via) {
+    if (!this._pubHintLive || !via || !this.mySubscriptions.has(topicBig)) return false;
+    const h = lc(String(via));
+    if (this._held(h)) return false;                    // already set aside; one strike per failure
+    const ms = this._holdStrike(h);
+    this._rootHint.delete(topicBig);
+    this._pubHintStat('strikes');
+    this._log('info', 'pub-hint-held', { topic: idHex(topicBig).slice(0, 12), hint: h.slice(0, 12), holdS: Math.round(ms / 1000), strikes: this._holds.get(h)?.strikes ?? 1 });
+    return true;
+  }
   _route(targetBig, type, payload) {
     const fail = (e) => ({ consumed: false, error: String((e && e.message) || e), transportError: true });
     const opts = { fromId: idHex(this.nodeId), viaHopBudget: VIA_HOP_BUDGET };
@@ -1680,8 +1756,9 @@ export class AxonaManager {
     // Keyed by msgId (not topic) so two quick publishes to the SAME topic don't
     // overwrite each other's pending retry — each message is independently retried.
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
-    if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0 });
-    this._send(T.PUB, { topicId: idHex(topicId), via: hint ? [hint] : [], json });
+    const via = this._pubVia(topicId);
+    if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0, via: via[0] ?? null });
+    this._send(T.PUB, { topicId: idHex(topicId), via, json });
     this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
     // (not yet integrated) front-loads burst waves while its table warms; a WARM
@@ -1811,10 +1888,10 @@ export class AxonaManager {
   // received" flake). Retain it briefly so the background lookup re-sends it toward
   // the true root once resolved. Idempotent — the root dedups the tombstone by msgId.
   pubsubKill(topicId, kill) {
-    const hint = this._rootHint_(topicId);
+    const via = this._pubVia(topicId);                  // 4.154.0: the hint, or bare when pubHintLive says not to pin
     if (!this._pendingKill) this._pendingKill = new Map();
-    if (kill?.msgId) this._pendingKill.set(kill.msgId, { topicBig: topicId, kill, at: this._now(), tries: 0 });
-    this._send(T.KILL, { topicId: idHex(topicId), via: hint ? [hint] : [], kill });
+    if (kill?.msgId) this._pendingKill.set(kill.msgId, { topicBig: topicId, kill, at: this._now(), tries: 0, via: via[0] ?? null });
+    this._send(T.KILL, { topicId: idHex(topicId), via, kill });
   }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)
   pubsubTouch(topicId, touch) { const hint = this._rootHint_(topicId); this._send(T.TOUCH, { topicId: idHex(topicId), via: hint ? [hint] : [], touch }); }

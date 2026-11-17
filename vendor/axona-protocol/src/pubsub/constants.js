@@ -363,6 +363,13 @@ export const FUTURE_TOLERANCE_MS = 5 * 60 * 1000;   // §5 bad-clock rule: drop 
 // ── Publish/kill reliability (observation-confirmed retry, I-9) ─────────
 export const PENDING_PUB_TTL_MS = 30_000;       // retain a recent publish/kill this long so refreshTick can RE-SEND it toward the true root until the publisher observes its own msgId (implicit ack) — covers a strand on the greedy walk AND packet loss; idempotent (root dedups by msgId)
 export const PENDING_PUB_MAX_TRIES = 6;         // cap re-sends so a never-confirmed publish (e.g. a non-subscribed publisher under loss) can't re-send unboundedly; loss^7 is negligible even at 30%
+// 4.154.0 (David 2026-11-16): how long a node that did not answer is set aside.
+// "Ten minutes is a very long time to ignore a node. I suggest two minutes, but
+// if it occurs again with the same connection, make it 10." A second failure of
+// the SAME node is one that lands while the first is still remembered, and a
+// failure is remembered for the long hold after it was recorded.
+export const HOLD_FIRST_MS  = 120_000;
+export const HOLD_REPEAT_MS = 600_000;
 // Cold-publish burst (v4.11.0): a publish from a freshly-joined, not-yet-integrated
 // node is the worst case for the one-shot greedy PUB — its routing table lacks the
 // keyspace breadth to route to the true root, so the message strands and (unlike a
