@@ -46,7 +46,10 @@
       "LOOKAHEAD_ANSWER_LIVE": "1",
       "ANNOUNCE_NEW_ONLY": "1",
       "BEACON_CHUNK": "1",
-      "BEACON_VERDICT": "1"
+      "BEACON_VERDICT": "1",
+      "FLIGHT_ADDRESS_GUARD": "1",
+      "PUB_HINT_LIVE": "1",
+      "STEPPED_HOLD": "1"
     }
   },
   "services": {
