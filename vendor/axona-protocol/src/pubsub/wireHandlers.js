@@ -255,7 +255,7 @@ export const wireHandlersMethods = {
     fwd.set(nonce, { at: now, topic: topicBig, type, holdAt: h.at, root: h.to, beaconAt: (b && lc(b.root) === h.to) ? b.at : null });
     const out = { ...payload, holdFwd: nonce };
     if (type === T.SUB) this._send(T.SUB, { ...out, via: [to] });
-    else this._forwardToRoot(topicBig, type, out, to);
+    else this._forwardToRoot(topicBig, type, out, to, { fromHold: true });   // 4.157.0 RF-2: local evidence, not the wire field
     return true;
   },
 
@@ -265,6 +265,7 @@ export const wireHandlersMethods = {
     // Return route (Closer-Born v0.6). Below the forward test (RR-2, Orion
     // ab295b9b): a relay that only passes the SUB on keeps no breadcrumb.
     this._noteReturn(meta, [meta?.originId, payload?.subscriberId]);
+    if (this._rootFwdReturned(idBig(payload.topicId), T.SUB, payload)) return 'consumed';   // 4.157.0: own closer-root forward came back
     if (d === 'reroute') { this._reroute(T.SUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -621,6 +622,7 @@ export const wireHandlersMethods = {
   async _onPub(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (this._rootFwdReturned(idBig(payload.topicId), T.PUB, payload)) return 'consumed';   // 4.157.0: own closer-root forward came back
     if (d === 'reroute') { this._reroute(T.PUB, payload); return 'consumed'; }
 
     const topicBig = idBig(payload.topicId);
@@ -1673,6 +1675,7 @@ export const wireHandlersMethods = {
   async _onKill(payload, meta) {
     const d = this._topicDecision(payload, meta);
     if (d === 'forward') return;
+    if (this._rootFwdReturned(idBig(payload.topicId), T.KILL, payload)) return 'consumed';   // 4.157.0: own closer-root forward came back
     if (d === 'reroute') { this._reroute(T.KILL, payload); return 'consumed'; }
     const topicBig = idBig(payload.topicId);
     if (this._holdIntercept(topicBig, T.KILL, payload)) return 'consumed';   // step-down hold (4.102.0)
@@ -1927,6 +1930,7 @@ export const wireHandlersMethods = {
     const topicBig = idBig(payload.topicId);
     const now = this._now();
     const d = this._topicDecision(payload, meta);
+    if (d !== 'forward' && this._rootFwdReturned(topicBig, T.METRICSON, payload)) return 'consumed';   // 4.157.0: own closer-root forward came back
     if (d === 'reroute') { this._reroute(T.METRICSON, payload); return 'consumed'; }
     if (d === 'handle') {
       // Root-beacon last-mile correction (METRICSON): a metrics lease must arm

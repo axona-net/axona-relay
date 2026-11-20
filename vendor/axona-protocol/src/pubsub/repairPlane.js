@@ -25,7 +25,7 @@ import {
   INGEST_SLICE_MS, MESH_REWARM_MIN, MESH_REWARM_TICKS, MESH_REWARM_COOLDOWN_MS, MESH_REWARM_BACKOFF_MAX_MS,
   ROUTE_REPORT_TOP,
 } from './constants.js';
-import { idHex, idBig, lc, isHexId } from './ids.js';
+import { idHex, idBig, lc, isHexId, pendingKey } from './ids.js';
 import { makeRole } from './rootClaim.js';
 import { dispatchVerdict } from './dispatch.js';
 
@@ -241,8 +241,8 @@ export const repairPlaneMethods = {
     for (const map of [this._pendingPub, this._pendingKill]) {
       if (!map) continue;
       const isKill = map === this._pendingKill;
-      for (const [msgId, p] of map) {                  // keyed by msgId; p.topicBig is the topic
-        if (now - p.at > PENDING_PUB_TTL_MS || (p.tries || 0) >= PENDING_PUB_MAX_TRIES) { map.delete(msgId); continue; }
+      for (const [key, p] of map) {                    // keyed by pendingKey(topic, msgId); p.topicBig is the topic
+        if (now - p.at > PENDING_PUB_TTL_MS || (p.tries || 0) >= PENDING_PUB_MAX_TRIES) { map.delete(key); continue; }
         p.tries = (p.tries || 0) + 1;
         const tb = p.topicBig;
         // 4.154.0 (pubHintLive): the previous send was pinned and a full tick
@@ -1248,7 +1248,7 @@ export const repairPlaneMethods = {
       if (i >= gaps.length) return;
       const h = setTimeout(() => {
         this._burstTimers.delete(h);
-        const p = this._pendingPub?.get(msgId);
+        const p = this._pendingPub?.get(pendingKey(topicBig, msgId));
         if (!p) return;                                 // confirmed or aged out → quench
         const via = this._pubVia(topicBig);
         p.via = via[0] ?? null;
@@ -1276,10 +1276,23 @@ export const repairPlaneMethods = {
   // msgId has demonstrably reached a holder — stop re-sending it. Publishers that
   // never observe their own msg (non-subscribed, non-root) fall back to the bounded
   // maxTries/TTL in refreshTick.
-  _confirmPending(_topicBig, msgId) {
-    if (!msgId) return;                                // pending maps are keyed by msgId (globally unique)
-    this._pendingPub?.delete(msgId);
-    this._pendingKill?.delete(msgId);
+  // 4.156.0: confirm is PER TOPIC. A msgId is not unique across topics (it
+  // carries no topic), so seeing the message on one topic says nothing about
+  // the same body published to another. Every caller names the topic it saw.
+  // A caller without a topic (none today) falls back to the old msgId-wide
+  // confirm rather than leaving entries to run out their tries.
+  _confirmPending(topicBig, msgId) {
+    if (!msgId) return;
+    if (topicBig !== null && topicBig !== undefined) {
+      const key = pendingKey(topicBig, msgId);
+      this._pendingPub?.delete(key);
+      this._pendingKill?.delete(key);
+      return;
+    }
+    for (const map of [this._pendingPub, this._pendingKill]) {
+      if (!map) continue;
+      for (const [key, p] of map) if (p.msgId === msgId) map.delete(key);
+    }
   },
 
   // A peer died (channel closed / evicted) or announced its departure: every

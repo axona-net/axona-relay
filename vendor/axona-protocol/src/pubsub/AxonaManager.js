@@ -46,7 +46,7 @@
 // =====================================================================
 
 import { RootClaim, roleNature, makeMergeState } from './rootClaim.js';
-import { idHex, idBig, lc, isHexId } from './ids.js';
+import { idHex, idBig, lc, isHexId, pendingKey } from './ids.js';
 import { dispatchVerdict, dispatchAttributedTo } from './dispatch.js';
 import { RoleScopedDurability } from './durability.js';
 import { T, RENEW_MS, RENEW_FAST_MS, DROP_MS, ROOT_REPLICAS, CACHE_MAX,
@@ -79,6 +79,15 @@ import { regionRolesMethods } from './regionRoles.js';
 import buildBoundary1Registry from './boundary1Registry.js';
 // Return routes (Closer-Born v0.6): breadcrumb lifetime, map bound, path ids kept.
 const RETURN_ROUTE_TTL_MS = 60_000, RETURN_ROUTE_CAP = 256, RETURN_RPATH_MAX = 16;
+// Root-forward return bound (4.157.0, see _rootFwdTag): how long a forward's
+// return nonce is honoured (a STRICT acceptance deadline, checked on match as
+// well as pruned on allocation), and how many may be outstanding.
+export const ROOT_FWD_MS = 2_000;
+const ROOT_FWD_MAX = 4_096;
+const rootFwdNonce = () => {
+  const b = new Uint8Array(8); globalThis.crypto.getRandomValues(b);
+  return Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+};
 import { shadowEnabled } from '../registry/index.js';
 import { envNum, envStr } from '../utils/env.js';
 
@@ -1085,7 +1094,75 @@ export class AxonaManager {
   // means the named root may be a guess, and a guess must not move state.
   _deferToRoot(topicBig, type, payload, rootHex) {
     this._mergeCandidate(topicBig, rootHex, null, 'defer-terminal');
-    this._send(type, { ...payload, via: [rootHex] });
+    this._send(type, { ...payload, via: [rootHex], rootFwd: this._rootFwdTag(topicBig, type, rootHex) });
+  }
+
+  // ── ROOT-FORWARD RETURN BOUND (4.157.0, Orion 2165944e) ─────────────────
+  // A via-send to a closer root that this node cannot advance toward ends back
+  // HERE: the waypoint reads dead, _reroute sends the copy bare, the bare copy
+  // ends here, the closer-root gate names the same root, and the copy goes out
+  // via it again. No timer between steps; the record that opens the gate is
+  // never invalidated because a delivery back to self is 'consumed'
+  // (fence_root_forward_return: 501 re-deliveries on SUB, PUB, KILL and
+  // METRICSON before this, with SUB_TERMINAL_VERIFY off).
+  //   · Every via-send from _deferToRoot / _forwardToRoot carries a random
+  //     `rootFwd` nonce recorded with its topic, verb, root, and the beacon and
+  //     hint generation it relied on. Return IDENTITY, not similarity: only a
+  //     copy carrying OUR nonce for the SAME topic and verb is a return. A
+  //     foreign nonce is ignored (and replaced on any forward from here).
+  //   · A return is a failure for that root: the beacon record and root hint are
+  //     dropped ONLY if they are still the generation the send relied on, the
+  //     copy is logged undeliverable, and it is NOT sent again. The sender's
+  //     retry or renewal carries the message.
+  //   · Bounded memory: entries live ROOT_FWD_MS (a return to self is local
+  //     routing — milliseconds), at most ROOT_FWD_MAX; when full the OLDEST is
+  //     evicted rather than refusing the send, because this tag rides every
+  //     healthy multi-hop forward too and must never throttle one.
+  //   · ROOT_FWD_MS is a strict ACCEPTANCE deadline, not only a pruning age
+  //     (Aster 190df442): allocation prunes, but a quiet node allocates
+  //     nothing, so _rootFwdReturned also checks the age. A copy arriving at or
+  //     after the deadline is NOT a return: its entry is discarded and the copy
+  //     is handled as any other arrival. No beacon, hint or message is dropped
+  //     on a late match. If it is still a loop, the next forward carries a
+  //     fresh nonce and that return is caught inside the deadline.
+  // Same shape as Aster's holdFwd bound in _holdIntercept.
+  _rootFwdTag(topicBig, type, rootHex) {
+    const fwd = (this._rootFwd ??= new Map());
+    const now = this._now();
+    for (const [k, e] of fwd) { if (now - e.at >= ROOT_FWD_MS) fwd.delete(k); else break; }   // insertion order = age order
+    while (fwd.size >= ROOT_FWD_MAX) fwd.delete(fwd.keys().next().value);
+    const b = this._rootBeacons.get(topicBig);
+    const h = this._rootHint?.get(topicBig);
+    const root = lc(rootHex);
+    const nonce = rootFwdNonce();
+    fwd.set(nonce, {
+      at: now, topic: topicBig, type, root,
+      beaconAt: (b && lc(b.root) === root) ? b.at : null,
+      hintAt: (h && h.via && lc(h.via) === root) ? h.at : null,
+    });
+    return nonce;
+  }
+
+  // True iff `payload` is this node's own root-forward coming back. Consumes the
+  // nonce, drops the same-generation beacon record and hint, logs undeliverable.
+  _rootFwdReturned(topicBig, type, payload) {
+    if (typeof payload?.rootFwd !== 'string' || !this._rootFwd) return false;
+    const back = this._rootFwd.get(payload.rootFwd);
+    if (!back || back.topic !== topicBig || back.type !== type) return false;
+    this._rootFwd.delete(payload.rootFwd);
+    if (this._now() - back.at >= ROOT_FWD_MS) return false;   // past the deadline: not a return (see _rootFwdTag)
+    let beaconDropped = false, hintDropped = false;
+    const b = this._rootBeacons.get(topicBig);
+    if (b && back.beaconAt !== null && lc(b.root) === back.root && b.at === back.beaconAt) {
+      this._rootBeacons.delete(topicBig); beaconDropped = true;
+    }
+    const h = this._rootHint?.get(topicBig);
+    if (h && back.hintAt !== null && h.via && lc(h.via) === back.root && h.at === back.hintAt) {
+      this._rootHint.delete(topicBig); hintDropped = true;
+    }
+    this._log('info', 'root-forward-returned', { topic: idHex(topicBig).slice(0, 12), type, root: back.root.slice(0, 10), beaconDropped, hintDropped });
+    this._undeliverable(type, topicBig, 'root-forward-returned');
+    return true;
   }
 
   // ── DUAL-ROOT RECONCILIATION: the ONE entry every claim-shedding path takes ──
@@ -1151,9 +1228,47 @@ export class AxonaManager {
     // A via=null hint means "resolver's LOCAL findKClosest saw self" — which at a
     // local minimum is exactly the wrong answer (the network escalation may not
     // have landed yet). Never infer 'self' from it; verify actively instead.
+    // 4.157.0: 'closer' is only a node this node can REACH. Deferring to an
+    // unreachable one sends the SUB "via" it; the route ends back here, the
+    // waypoint reads dead, _reroute sends it bare, it ends here again and this
+    // check names the same node again — an unbounded cycle with no timer between
+    // steps (sim, 2026-11-18: a cut-off in-region node ran to the 4 GB heap
+    // limit; fence_term_verify_unreachable.mjs). A closer node that is not
+    // reachable is evidence that the mesh around this node is thin, not that
+    // this node may root: FAIL CLOSED, hold, and let the renewal retry.
+    // Reachable = this node can make GREEDY PROGRESS toward the node over a
+    // channel that is open and healthy NOW (dht.isLive, the test the publish
+    // hint uses since 4.154.0): the node itself is live, or a live peer is
+    // strictly closer to it than this node is. The second clause is the
+    // multi-hop case this check exists for (Orion 2165944e): at a greedy local
+    // minimum the closer node is usually 2+ hops away, reached through a relay
+    // that is not closer to the TOPIC but is closer to the NODE. A live channel
+    // to the node alone (b14fecb) stranded that subscriber.
+    // Each candidate peer is tested with isLive, never taken from the list
+    // alone: dht.neighbors() falls back to the synaptome when no peer is bound,
+    // and that list still names nodes with no channel (sim trace: the closer
+    // node was one of 2 listed neighbours and the SUB still came back). A
+    // cut-off node therefore still fails closed. An adapter with no liveness
+    // reader falls back to the neighbour test.
+    const reachable = (hex) => {
+      try {
+        if (typeof this.dht.isLive !== 'function') return typeof this._isReachableId !== 'function' || this._isReachableId(hex);
+        const c = idBig(hex);
+        if (this.dht.isLive(c) === true) return true;
+        const selfToC = this.nodeId ^ c;
+        const ns = (typeof this.dht.neighbors === 'function' ? this.dht.neighbors() : null) || [];
+        for (const n of ns) {
+          let nb; try { nb = idBig(n); } catch { continue; }
+          if (nb === this.nodeId || nb === c) continue;
+          if ((nb ^ c) < selfToC && this.dht.isLive(nb) === true) return true;
+        }
+        return false;
+      } catch { return false; }
+    };
     const hint = this._rootHint?.get(topicBig);
     if (hint && hint.via && (this._now() - hint.at) < this.renewFastMs) {
-      return verdict('closer', lc(hint.via), lc(hint.via));
+      if (reachable(lc(hint.via))) return verdict('closer', lc(hint.via), lc(hint.via));
+      return verdict('inconclusive', null, lc(hint.via));
     }
     const canLookup = (typeof this.dht.findKClosest === 'function') || (typeof this.dht.lookup === 'function');
     if (!canLookup) return verdict('inconclusive');
@@ -1180,7 +1295,11 @@ export class AxonaManager {
       let cBig; try { cBig = idBig(id); } catch { return verdict('inconclusive'); }
       const cHex = lc(idHex(cBig));
       if (cBig === this.nodeId) return verdict('self', null, cHex);
-      if ((cBig ^ topicBig) < selfDist) return verdict('closer', cHex, cHex);
+      if ((cBig ^ topicBig) < selfDist) {
+        if (reachable(cHex)) return verdict('closer', cHex, cHex);
+        if (typeof this.warmRootHint === 'function') this.warmRootHint(topicBig).catch(() => {});
+        return verdict('inconclusive', null, cHex);                                // closer but unreachable → hold
+      }
       return verdict('self', null, cHex);                                         // nobody strictly closer → legitimate self-root
     } catch { return verdict('inconclusive'); }
     finally { this._termVerifyInflight.delete(topicBig); }
@@ -1247,7 +1366,7 @@ export class AxonaManager {
     return best === null ? null : lc(idHex(best));
   }
 
-  _forwardToRoot(topicBig, type, payload, rootHex) {
+  _forwardToRoot(topicBig, type, payload, rootHex, opts = null) {
     const declares = this.dht?.verdictsSupported;
     const rec = this._rootBeacons.get(topicBig);           // capture identity + at BEFORE the send
     // E3 (v0.3): a WRITE completes only on its INGEST-ack. The flight opens at
@@ -1263,9 +1382,16 @@ export class AxonaManager {
     if (type === T.PUB || type === T.KILL) {
       ackRoute = this._flightOpen(topicBig, rootHex, type, payload, payload?.attemptId ?? null);
     }
+    // 4.157.0: every forward carries this node's return nonce (see _rootFwdTag).
+    // A forward started by THIS node's _holdIntercept carries holdFwd, which
+    // bounds its own return, and says so through opts.fromHold. The wire field
+    // payload.holdFwd is not that evidence (Orion 82dad175 RF-2): a copy that
+    // left a held node and landed at a non-held one still carries it, and any
+    // peer can set it, so testing it here reopened the 501-delivery loop.
+    const rootFwd = opts?.fromHold ? undefined : this._rootFwdTag(topicBig, type, rootHex);
     const outPayload = ackRoute
-      ? { ...payload, via: [rootHex], ackTo: ackRoute.ackTo, flightNonce: ackRoute.flightNonce, attemptId: ackRoute.attemptId }
-      : { ...payload, via: [rootHex] };
+      ? { ...payload, via: [rootHex], rootFwd, ackTo: ackRoute.ackTo, flightNonce: ackRoute.flightNonce, attemptId: ackRoute.attemptId }
+      : { ...payload, via: [rootHex], rootFwd };
     const sent = this._send(type, outPayload);
     Promise.resolve(sent).then((r) => {
       const v = dispatchVerdict(r, declares);
@@ -1753,11 +1879,13 @@ export class AxonaManager {
     // resolves — a one-shot publish never re-routes on its own, so a cold-hint
     // strand = a lost message. Idempotent: the root dedups by msgId.
     if (!this._pendingPub) this._pendingPub = new Map();
-    // Keyed by msgId (not topic) so two quick publishes to the SAME topic don't
-    // overwrite each other's pending retry — each message is independently retried.
+    // Keyed by (topic, msgId): two quick publishes to the SAME topic don't
+    // overwrite each other's pending retry, and (4.156.0) one body published to
+    // SEVERAL topics — same msgId on each, since msgId carries no topic — keeps
+    // one entry per topic. Each message on each topic is independently retried.
     let pmsgId = null; try { pmsgId = JSON.parse(json)?.msgId ?? null; } catch { /* opaque body */ }
     const via = this._pubVia(topicId);
-    if (pmsgId) this._pendingPub.set(pmsgId, { topicBig: topicId, json, at: this._now(), tries: 0, via: via[0] ?? null });
+    if (pmsgId) this._pendingPub.set(pendingKey(topicId, pmsgId), { topicBig: topicId, msgId: pmsgId, json, at: this._now(), tries: 0, via: via[0] ?? null });
     this._send(T.PUB, { topicId: idHex(topicId), via, json });
     this._latStage(pmsgId, 'pub:send');
     // Early re-sends — ONE plan, ONE pump (v4.25.0, Phase 6): a cold publisher
@@ -1890,7 +2018,7 @@ export class AxonaManager {
   pubsubKill(topicId, kill) {
     const via = this._pubVia(topicId);                  // 4.154.0: the hint, or bare when pubHintLive says not to pin
     if (!this._pendingKill) this._pendingKill = new Map();
-    if (kill?.msgId) this._pendingKill.set(kill.msgId, { topicBig: topicId, kill, at: this._now(), tries: 0, via: via[0] ?? null });
+    if (kill?.msgId) this._pendingKill.set(pendingKey(topicId, kill.msgId), { topicBig: topicId, msgId: kill.msgId, kill, at: this._now(), tries: 0, via: via[0] ?? null });
     this._send(T.KILL, { topicId: idHex(topicId), via, kill });
   }
   // pubsubUnpub() — REMOVED v4.3.0 (decision 2026-06-25: keep kill, drop unpub)

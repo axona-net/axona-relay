@@ -105,9 +105,13 @@ export const writeFlightMethods = {
   // The stored payload never keeps a `holdFwd`: that nonce is hop-local to
   // the held node that minted it, and a promotion or nack-retry re-sending
   // it would be dropped on sight at any held node as a foreign return.
+  // Nor a `rootFwd` (4.157.0, Orion 82dad175 RF-1): the same hop-locality. A
+  // flight opened on a forward that arrived from node A would store A's
+  // nonce; a promotion back to A inside ROOT_FWD_MS would read at A as A's
+  // own forward returning and be dropped as 'root-forward-returned'.
   _flightOpen(topicBig, rootHex, type, payload, attemptId = null, expectedEpoch = null, chain = null) {
-    if (payload && typeof payload === 'object' && 'holdFwd' in payload) {
-      const { holdFwd: _hop, ...rest } = payload; payload = rest;
+    if (payload && typeof payload === 'object' && ('holdFwd' in payload || 'rootFwd' in payload)) {
+      const { holdFwd: _hop, rootFwd: _rfwd, ...rest } = payload; payload = rest;
     }
     const msgId = writeMsgId(type, payload);
     if (!msgId) return null;                              // malformed write — verification refuses it downstream
