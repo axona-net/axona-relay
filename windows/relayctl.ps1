@@ -215,7 +215,7 @@ function Status {
   return ($running -eq $Count -and $inv.Bare.Count -eq 0)
 }
 
-# ---- dump request (READ-ONLY, relay 0.198.0) ---------------------------------
+# ---- dump request (READ-ONLY, relay 0.205.0) ---------------------------------
 # NOT DumpSlot above: that writes a MINIDUMP of a stalled process. This asks
 # running relays for two LOG LINES, `health-dump` and `peer-dump`.
 #
@@ -227,8 +227,8 @@ function Status {
 # dump, prefixed with the slot:
 #     svc-07 health-dump {...}
 #     svc-07 peer-dump {...}
-#     svc-07 no-dump            (stopped, or a relay older than 0.198.0)
-# A relay on 0.198.0 answers with both lines. A line already in the log from an
+#     svc-07 no-dump            (stopped, or a relay older than 0.205.0)
+# A relay on 0.205.0 answers with both lines. A line already in the log from an
 # earlier request is never printed: a stale view must not be read as current.
 # It starts, stops and reconfigures nothing, takes no lock, writes no transcript.
 function ReadFrom([string]$path, [long]$offset) {

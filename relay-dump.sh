@@ -4,7 +4,7 @@
 #
 # READ-ONLY. It restarts nothing and changes no configuration. It sends each
 # relay SIGUSR1, the relay's own diagnostic signal (handled since 0.161.0; since
-# 0.198.0 the relay answers with two log lines, `health-dump` and `peer-dump`),
+# 0.205.0 the relay answers with two log lines, `health-dump` and `peer-dump`),
 # then prints what each relay wrote to its own log AFTER the signal:
 #
 #   relay-20261109-1538-3 health-dump {...}
