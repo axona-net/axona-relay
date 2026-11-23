@@ -341,13 +341,16 @@ async function main() {
     }
   };
   process.on('SIGUSR1', emitDumps);
-  // Windows has no SIGUSR1, and a service has no console. There the request is
-  // a file (src/dumprequest.js): rewrite `dump-requests/request` in the checkout
-  // and every relay sharing it dumps once. RELAY_DUMP_DIR arms the same watcher
-  // on any platform; unset, only win32 polls.
+  // THE REQUEST FILE (src/dumprequest.js): rewrite `dump-requests/request` in the
+  // checkout and every relay sharing it dumps once. Windows has no SIGUSR1, so
+  // that was the only way to ask there. Since 0.205.0 it is armed on EVERY
+  // platform (Aster f3b80b9a): a file is addressed to nobody, so the asker
+  // needs no process id, and relay-dump.sh and relayctl.ps1 dump ask the same
+  // way. RELAY_DUMP_DIR names another directory. SIGUSR1 above still works for
+  // an operator who names the process (systemctl kill on a droplet unit).
   {
     const dumpDir = process.env.RELAY_DUMP_DIR
-      || (process.platform === 'win32' ? joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'dump-requests') : null);
+      || joinPath(dirname(fileURLToPath(import.meta.url)), '..', 'dump-requests');
     if (dumpDir) {
       const w = watchDumpRequest(dumpDir, emitDumps);
       if (w) onLog('info', 'dump-request-armed', { path: w.path });
