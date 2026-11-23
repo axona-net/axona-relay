@@ -11,6 +11,9 @@
 #   relay-20261109-1538-3 peer-dump {...}
 #   relay-20261109-1538-4 no-dump            (a relay that wrote neither line)
 #   SUMMARY dumps health=8/8 peer=8/8 waited=3s
+#   pid-4711 skipped (not a relay of this checkout, not signalled)
+# and the summary then ends ` skipped=1`. The totals count this checkout's
+# relays only.
 #
 # Same line shapes as `windows/relayctl.ps1 dump`, so one reader serves both.
 #
@@ -40,21 +43,46 @@ log_of() {
   else lsof -p "$1" -a -d 1 -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; fi
 }
 
-PIDS=(); LOGS=(); OFFS=()
+# IS THIS PID A RELAY OF THIS CHECKOUT (Aster cd4d626b, 2026-11-23). The census
+# is host-wide: it accepts any node process whose command line carries
+# src/index.js, and another checkout's server matches that. SIGUSR1 to a node
+# process with no handler for it starts that process's inspector. So a pid is
+# signalled only when its working directory IS this checkout: a relay is started
+# as `node src/index.js` from here. A pid whose directory cannot be read, or is
+# anywhere else, is named and left alone.
+HERE=$(pwd -P)
+cwd_of() {
+  if [ -e "/proc/$1/cwd" ]; then readlink "/proc/$1/cwd" 2>/dev/null
+  else lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1; fi
+}
+is_ours() { local c; c=$(cwd_of "$1"); [ -n "$c" ] && [ "$c" = "$HERE" ]; }
+
+PIDS=(); LOGS=(); OFFS=(); FOREIGN=()
 for pid in $(bash relay-census.sh --pids); do
+  case "$pid" in ''|*[!0-9]*) continue ;; esac
+  if ! is_ours "$pid"; then FOREIGN+=("$pid"); continue; fi
   log=$(log_of "$pid")
   off=0
   if [ -n "$log" ] && [ -f "$log" ] && [ -r "$log" ]; then off=$(wc -c < "$log" | tr -d ' '); else log=""; fi
   PIDS+=("$pid"); LOGS+=("$log"); OFFS+=("$off")
 done
 N=${#PIDS[@]}
-if [ "$N" -eq 0 ]; then echo "SUMMARY dumps health=0/0 peer=0/0 waited=0s"; exit 0; fi
+SKIP=${#FOREIGN[@]}
+i=0
+while [ "$i" -lt "$SKIP" ]; do echo "pid-${FOREIGN[$i]} skipped (not a relay of this checkout, not signalled)"; i=$((i + 1)); done
+tail_of() { if [ "$SKIP" -gt 0 ]; then echo " skipped=$SKIP"; fi; }
+if [ "$N" -eq 0 ]; then echo "SUMMARY dumps health=0/0 peer=0/0 waited=0s$(tail_of)"; exit 0; fi
 
 # Signal only a relay whose log this script can read back. A dump nobody reads
 # is a log line written for nothing.
 i=0
 while [ "$i" -lt "$N" ]; do
-  [ -n "${LOGS[$i]}" ] && kill -USR1 "${PIDS[$i]}" 2>/dev/null
+  # Identity is read AGAIN at the moment of the signal: a pid can exit and be
+  # reused between the census and here. One that no longer reads as ours loses
+  # its log, so it is reported below as not signalled.
+  if [ -n "${LOGS[$i]}" ]; then
+    if is_ours "${PIDS[$i]}"; then kill -USR1 "${PIDS[$i]}" 2>/dev/null; else LOGS[$i]=""; fi
+  fi
   i=$((i + 1))
 done
 sleep "$WAIT"
@@ -72,5 +100,5 @@ while [ "$i" -lt "$N" ]; do
   [ -z "$h" ] && [ -z "$p" ] && echo "$label no-dump"
   i=$((i + 1))
 done
-echo "SUMMARY dumps health=$health/$N peer=$peers/$N waited=${WAIT}s"
+echo "SUMMARY dumps health=$health/$N peer=$peers/$N waited=${WAIT}s$(tail_of)"
 exit 0

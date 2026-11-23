@@ -11,6 +11,10 @@
 //   health   answers with health-dump only (a relay older than 0.198.0)
 //   stale    holds an OLD pair of dump lines in its log and answers nothing
 //   piped    stdout is a pipe, so its log cannot be resolved
+//   foreign  a node process the census names that runs from ANOTHER directory,
+//            with a readable log file (Aster cd4d626b): it must not be signalled
+// Every stand-in but `foreign` runs with the script's directory as its working
+// directory, which is how relay-dump.sh knows a relay of its own checkout.
 // Run: node test/fence_relay_dump.mjs
 // =====================================================================
 import { spawn, spawnSync } from 'node:child_process';
@@ -22,7 +26,7 @@ import { fileURLToPath } from 'node:url';
 let passed = 0, failed = 0;
 const check = (label, ok, extra = '') => { console.log(`  ${ok ? '✓' : '✗'} ${label}${ok ? '' : ' ' + extra}`); ok ? passed++ : failed++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const EXPECT = 13;
+const EXPECT = 17;
 process.on('exit', (code) => { if (code === 0 && passed + failed < EXPECT) { console.log(`  ✗ exited after ${passed + failed} of ${EXPECT} checks`); process.exitCode = 1; } });
 
 console.log('fence_relay_dump: relay-dump.sh prints only what each relay logged after the signal');
@@ -39,7 +43,7 @@ const ts = () => new Date().toISOString();
 if (mode === 'stale') { console.log('[' + ts() + '] health-dump {"peers":9,"old":true}'); console.log('[' + ts() + '] peer-dump {"nodeId":"old","peers":[]}'); }
 process.on('SIGUSR1', () => {
   n++;
-  if (mode === 'piped') writeFileSync(process.argv[3], 'signalled');
+  if (mode === 'piped' || mode === 'foreign') writeFileSync(process.argv[3], 'signalled');
   if (mode === 'both' || mode === 'health') console.log('[' + ts() + '] health-dump {"peers":2,"n":' + n + '}');
   if (mode === 'both') console.log('[' + ts() + '] peer-dump {"nodeId":"aa","n":' + n + ',"peers":[{"id":"bb","link":"webrtc"}]}');
 });
@@ -50,7 +54,7 @@ const kids = [];
 const start = (mode, label) => {
   const log = join(dir, `${label}.log`);
   const fd = openSync(log, 'a');
-  const k = spawn(process.execPath, [join(dir, 'standin.mjs'), mode], { stdio: ['ignore', fd, fd] });
+  const k = spawn(process.execPath, [join(dir, 'standin.mjs'), mode], { cwd: dir, stdio: ['ignore', fd, fd] });
   closeSync(fd); kids.push(k);
   return { pid: k.pid, log, label };
 };
@@ -58,16 +62,22 @@ const both = start('both', 'relay-t-1');
 const health = start('health', 'relay-t-2');
 const stale = start('stale', 'relay-t-3');
 const marker = join(dir, 'piped-signalled');
-const pipedKid = spawn(process.execPath, [join(dir, 'standin.mjs'), 'piped', marker], { stdio: ['ignore', 'pipe', 'ignore'] });
+const pipedKid = spawn(process.execPath, [join(dir, 'standin.mjs'), 'piped', marker], { cwd: dir, stdio: ['ignore', 'pipe', 'ignore'] });
 let pipedReady = false; pipedKid.stdout.on('data', () => { pipedReady = true; }); kids.push(pipedKid);
-const cleanup = () => { for (const k of kids) { try { k.kill('SIGKILL'); } catch { /* */ } } try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ } };
+const elsewhere = mkdtempSync(join(tmpdir(), 'relay-dump-foreign-'));
+const foreignMarker = join(elsewhere, 'foreign-signalled');
+const foreignLog = join(elsewhere, 'other-server.log');
+const ffd = openSync(foreignLog, 'a');
+const foreignKid = spawn(process.execPath, [join(dir, 'standin.mjs'), 'foreign', foreignMarker], { cwd: elsewhere, stdio: ['ignore', ffd, ffd] });
+closeSync(ffd); kids.push(foreignKid);
+const cleanup = () => { try { rmSync(elsewhere, { recursive: true, force: true }); } catch { /* */ } for (const k of kids) { try { k.kill('SIGKILL'); } catch { /* */ } } try { rmSync(dir, { recursive: true, force: true }); } catch { /* */ } };
 process.on('exit', cleanup);
 
 for (let t = 0; t < 100; t++) {
-  if (pipedReady && [both, health, stale].every((r) => readFileSync(r.log, 'utf8').includes('] ready'))) break;
+  if (pipedReady && [both.log, health.log, stale.log, foreignLog].every((l) => readFileSync(l, 'utf8').includes('] ready'))) break;
   await sleep(50);
 }
-writeFileSync(join(dir, 'pids'), [both.pid, health.pid, stale.pid, pipedKid.pid].join('\n') + '\n');
+writeFileSync(join(dir, 'pids'), [both.pid, health.pid, stale.pid, pipedKid.pid, foreignKid.pid].join('\n') + '\n');
 const run = (env = {}) => spawnSync('bash', [join(dir, 'relay-dump.sh')], { encoding: 'utf8', env: { ...process.env, DUMP_WAIT_SEC: '1', ...env } });
 const filesBefore = readdirSync(dir).sort().join(',');
 
@@ -83,8 +93,10 @@ check('D3 and one peer-dump line, whole JSON', bp.length === 1 && bpJ?.nodeId ==
 check('D4 a relay that answers health-dump only: that line and no peer-dump', find('relay-t-2 health-dump ').length === 1 && find('relay-t-2 peer-dump').length === 0 && find('relay-t-2 no-dump').length === 0, JSON.stringify(find('relay-t-2')));
 check('D5 an OLD dump pair in the log is not printed as current: no-dump', find('relay-t-3').length === 1 && find('relay-t-3')[0] === 'relay-t-3 no-dump' && !r1.stdout.includes('"old"'), JSON.stringify(find('relay-t-3')));
 check('D6 a relay whose log cannot be resolved is named and NOT signalled', find(`pid-${pipedKid.pid} no-dump (log unresolved`).length === 1 && !existsSync(marker), JSON.stringify(find('pid-')));
-check('D7 the summary counts what was printed', lines[lines.length - 1] === 'SUMMARY dumps health=2/4 peer=1/4 waited=1s', lines[lines.length - 1]);
+check('D7 the summary counts what was printed', lines[lines.length - 1] === 'SUMMARY dumps health=2/4 peer=1/4 waited=1s skipped=1', lines[lines.length - 1]);
 check('D8 the script wrote no file', readdirSync(dir).sort().join(',') === filesBefore, readdirSync(dir).join(','));
+
+check('D14 a census pid running from another directory is named, NOT signalled, and not counted', find(`pid-${foreignKid.pid} skipped (not a relay of this checkout`).length === 1 && !existsSync(foreignMarker) && !r1.stdout.includes('other-server'), JSON.stringify(find('pid-')));
 
 const r2 = run();
 const again = r2.stdout.split('\n').filter((l) => l.startsWith('relay-t-1 peer-dump '));
@@ -97,12 +109,21 @@ pipedKid.kill('SIGUSR1');
 for (let t = 0; t < 40 && !existsSync(marker); t++) await sleep(50);
 check('D10 control: the piped stand-in marks a signal when one is sent', existsSync(marker));
 
+writeFileSync(join(dir, 'pids'), `${foreignKid.pid}\nnot-a-pid\n`);
+const onlyForeign = run();
+check('D15 a census of foreign pids only: 0/0, skipped=1, nothing signalled', onlyForeign.status === 0 && onlyForeign.stdout.trim().split('\n').pop() === 'SUMMARY dumps health=0/0 peer=0/0 waited=0s skipped=1' && !existsSync(foreignMarker), onlyForeign.stdout);
+foreignKid.kill('SIGUSR1');
+for (let t = 0; t < 40 && !existsSync(foreignMarker); t++) await sleep(50);
+check('D16 control: the foreign stand-in marks a signal when one is sent', existsSync(foreignMarker));
+writeFileSync(join(dir, 'pids'), [both.pid, health.pid, stale.pid, pipedKid.pid, foreignKid.pid].join('\n') + '\n');
+
 const bad = run({ DUMP_WAIT_SEC: 'abc' });
 check('D11 a wait that is not whole seconds is refused (exit 2), nothing signalled', bad.status === 2 && !bad.stdout.includes('dump'), `status ${bad.status}`);
 writeFileSync(join(dir, 'pids'), '');
 const none = run();
 check('D12 no relays: the summary says 0/0 and exit 0', none.status === 0 && none.stdout.trim() === 'SUMMARY dumps health=0/0 peer=0/0 waited=0s', none.stdout);
 const src = readFileSync(join(root, 'relay-dump.sh'), 'utf8');
+check('D17 the signal is sent only behind the identity test, read again at the signal', /if is_ours "\$\{PIDS\[\$i\]\}"; then kill -USR1/.test(src) && (src.match(/kill -USR1/g) || []).length === 1);
 check('D13 the pid list is relay-census.sh --pids and no pgrep of its own', /bash relay-census\.sh --pids/.test(src) && !/^[^#]*\bpgrep\b/m.test(src));
 
 console.log(`\nfence_relay_dump: ${passed} passed, ${failed} failed`);

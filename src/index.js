@@ -330,7 +330,10 @@ async function main() {
       let ledger = null, mesh = null;
       try { ledger = transport?.channelLedgerStats?.() ?? null; } catch { ledger = null; }
       try { mesh = transport?.mesh?.degreeStats?.() ?? null; } catch { mesh = null; }
-      onLog('info', 'health-dump', buildHealthDump(h, { ledger, mesh }));
+      // Each line has its OWN guard (Aster cd4d626b): a throw while building or
+      // writing health-dump is reported and peer-dump is still attempted.
+      try { onLog('info', 'health-dump', buildHealthDump(h, { ledger, mesh })); }
+      catch (e) { try { onLog('warn', 'health-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ } }
       try { onLog('info', 'peer-dump', buildPeerDump(h, transport, { relay: RELAY_VERSION, kernel: KERNEL_VERSION })); }
       catch (e) { try { onLog('warn', 'peer-dump-failed', { err: String(e && e.message || e) }); } catch { /* */ } }
     } catch (e) {
