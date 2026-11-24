@@ -183,9 +183,8 @@ export const mergeMachineMethods = {
   /** 6BG-2: release the pins a deferred step 5 took, unless completion now owns them. */
   _mergeUnpinDeferred(role, m) {
     if (!m?.deferPinned || role.merge?.completing) return;
-    for (const id of m.manifest.bodies) role.merge.pins.delete(id);
-    for (const id of m.manifest.dels) role.merge.pins.delete(id);
     m.deferPinned = false;
+    this._mergePinsRebuild(role);                              // this round's pins go; another round's stay
   },
   /** A corr this node ended (abort, refusal, completion) stays closed: a late PULLUP under it is stale, never a fresh open. Bounded. */
   _mergeCloseCorr(role, corr) {
@@ -232,6 +231,27 @@ export const mergeMachineMethods = {
             role.merge.releaseToken = randomNonce() + randomNonce();
             this._rootClaim.demote(role.topicId, m.winner, 'merge-legacy-fallback', { releaseToken: role.merge.releaseToken });
           }
+        } else if (m.state === 'completed' && Number.isFinite(m.completedAt) && now - m.completedAt >= MERGE_RETENTION_MS) {
+          // 4.159.0 (MC-1, Orion 49bffa7b): a COMPLETED round whose
+          // MERGE_CLOSED never came. W's own record ends at tS + R, after
+          // which W cannot send it. Past R on this side the ROUND is closed
+          // here: the record goes and `completing` stops riding every SUB.
+          // Until 4.159.0 nothing but MERGE_CLOSED ended this state.
+          // THE EXPORT IS NOT RELEASED (Aster 9ba1d128; Dual-Root v0.1 "What
+          // holds custody when completion is lost"). No closure was confirmed,
+          // so this child may be the only holder. Its export moves from pins
+          // to `custody`: still kept from cap eviction, no longer kept from
+          // expiry. Each entry leaves at this node's own TTL and by nothing
+          // else. Round cleanup is bounded by R; custody is bounded by TTL.
+          this._mergeCloseCorr(role, corr);
+          if (role.merge?.completing?.corr === corr) role.merge.completing = null;
+          if (role.merge) {
+            if (!role.merge.custody) role.merge.custody = new Set();
+            for (const id of m.manifest?.bodies || []) if (role.cacheIds.has(id)) role.merge.custody.add(id);
+            for (const id of m.manifest?.dels || []) if (role.tombstones.has(id)) role.merge.custody.add(id);
+          }
+          this._mergeReleasePins(role, m, 'completion-unclosed');   // this round's pins only; an open pull keeps its own
+          this._log('warn', 'merge-completion-unclosed', { topic: idHex(role.topicId).slice(0, 12), corr: corr.slice(0, 8), winner: m.winner.slice(0, 10), heldMs: now - m.completedAt, custody: role.merge?.custody?.size ?? 0 });
         }
       }
       for (const [corr, p] of role.sync.openPulls || []) {
@@ -265,6 +285,7 @@ export const mergeMachineMethods = {
       if (mg.completing || mg.gate) return true;
       if (mg.acceptedWinner && mg.acceptedWinner.exp > now) return true;
       if (mg.pins && mg.pins.size) return true;
+      if (mg.custody && mg.custody.size) return true;       // 4.159.0: an unclosed completion's export, until each entry's own expiry
     }
     if (role.sync?.openMerges?.size || role.sync?.openPulls?.size) return true;
     for (const t of role.tombstones.values()) if ((t?.exp ?? 0) > now) return true;
@@ -735,7 +756,8 @@ export const mergeMachineMethods = {
       }
       p.header = { ...h };
       if (!role.merge) role.merge = makeMergeState();
-      for (const c of role.cache) role.merge.pins.add(c.msgId);        // pin the baseline
+      p.baseline = role.cache.map((c) => c.msgId);                      // 4.159.0: this round's own pins, so ending another round cannot drop them
+      for (const id of p.baseline) role.merge.pins.add(id);            // pin the baseline
       role.merge.reserve = { entries: MERGE_WRITE_RESERVE_ENTRIES, bytes: MERGE_WRITE_RESERVE_BYTES };
       p.cursor = 'h';
       this._log('info', 'merge-admitted', { topic: idHex(topicBig).slice(0, 12), corr: corr.slice(0, 8), bodies: h.bodies, dels: h.dels, bytes: h.bytes, baselineN });
@@ -769,9 +791,39 @@ export const mergeMachineMethods = {
   },
   _mergeReleasePins(role, p, why) {
     if (!role.merge) return;
-    role.merge.pins.clear();
-    role.merge.reserve = null;
-    this._log('info', 'merge-pins-released', { topic: idHex(role.topicId).slice(0, 12), why });
+    this._mergePinsRebuild(role, p);
+    this._log('info', 'merge-pins-released', { topic: idHex(role.topicId).slice(0, 12), why, kept: role.merge.pins.size });
+  },
+  /**
+   * PINS BELONG TO ROUNDS (4.159.0, Aster 054520b2). One role can be W for one
+   * round and L for another: nothing forbids a root with an inbound pull open
+   * from offering to a closer root. `pins` is one set for the role, and until
+   * 4.159.0 every release cleared it, so ending one round dropped the other's
+   * protection. The set is now recomputed from the rounds still open:
+   *   W side  each open pull's baseline and manifest;
+   *   L side  each round whose export is pinned (deferred step 5, or completed
+   *           and waiting for MERGE_CLOSED).
+   * `ending` is the record being closed by the caller, still in its map.
+   * The W write reserve stands while any pull has taken its header.
+   */
+  _mergePinsRebuild(role, ending = null) {
+    const mg = role.merge; if (!mg) return;
+    const keep = new Set(); let reserve = false;
+    for (const p of role.sync?.openPulls?.values?.() ?? []) {
+      if (p === ending) continue;
+      if (p.header) reserve = true;
+      for (const id of p.baseline || []) keep.add(id);
+      for (const id of p.manifest?.bodies || []) keep.add(id);
+      for (const id of p.manifest?.dels || []) keep.add(id);
+    }
+    for (const m of role.sync?.openMerges?.values?.() ?? []) {
+      if (m === ending || !(m.deferPinned || m.state === 'completed')) continue;
+      for (const id of m.manifest?.bodies || []) keep.add(id);
+      for (const id of m.manifest?.dels || []) keep.add(id);
+    }
+    mg.pins.clear();
+    for (const id of keep) mg.pins.add(id);
+    if (!reserve) mg.reserve = null;
   },
 
   // ── step 5 (L): the terminal ack; the lease; the flip with the token ───
@@ -868,6 +920,11 @@ export const mergeMachineMethods = {
     }
     if (gateCorr === corr) this._mergeGateClear(role, 'completed');
     m.state = 'completed';
+    m.completedAt = stepAt;                                   // 4.159.0 (MC-1): the sweep bounds how long a completion waits for MERGE_CLOSED
+    // THE CANDIDATE IS SPENT (4.159.0): the claim is W's. Every abort, refusal
+    // and timeout already cleared the record; the completed merge did not, and
+    // the record outlived the hold and the next promotion of this same role.
+    role.merge.candidate = null;
     // THE COMMIT GUARD (assumption 7): the synchronous run from the recheck to
     // the completed flip must not have been suspended past the lease. L cannot
     // prevent it and detects it only here, after the fact: the flip stands (the
@@ -909,8 +966,9 @@ export const mergeMachineMethods = {
     const c = role?.merge?.completing;
     if (!c || c.corr !== payload.corr || (payload.winnerEpoch | 0) !== c.winnerEpoch) { this._log('warn', 'merge-stale', { topic: idHex(topicBig).slice(0, 12), corr: String(payload.corr).slice(0, 8), why: 'closed-mismatch' }); return 'consumed'; }
     role.merge.completing = null;
-    role.merge.pins.clear();
+    role.merge.candidate = null;                             // 4.159.0: closed is closed; no record of W as a pending winner
     this._mergeCloseCorr(role, payload.corr);
+    this._mergePinsRebuild(role);                            // 4.159.0: this round's export unpins; a W-side pull still open keeps its pins
     this._log('info', 'merge-closed', { topic: idHex(topicBig).slice(0, 12), corr: payload.corr.slice(0, 8), winner: c.winner.slice(0, 10) });
     return 'consumed';
   },

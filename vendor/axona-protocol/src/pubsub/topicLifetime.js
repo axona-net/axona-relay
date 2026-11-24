@@ -204,6 +204,7 @@ export const topicLifetimeMethods = {
       if (mg.completing || mg.gate) return true;
       if (mg.acceptedWinner && mg.acceptedWinner.exp > now) return true;
       if (mg.pins && mg.pins.size) return true;
+      if (mg.custody && mg.custody.size) return true;
       if (mg.pendingDelegation && mg.pendingDelegation.size) return true;
     }
     if (role.sync?.openMerges?.size || role.sync?.openPulls?.size) return true;

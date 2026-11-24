@@ -519,9 +519,15 @@ export const rootElectionMethods = {
   // (packet 4(d)) replaces this body for a root WITH custody — the candidate is
   // handed to the merge and demote() is reached only from its step 5 — and
   // leaves it for a root that holds nothing. One method so the swap is one site.
+  // THE ROW'S NAME IS OLDER THAN THE MERGE (4.159.0): it is logged whenever
+  // the verify names a strictly-closer node, and since the dual-root machine
+  // that is a demotion only for a root that holds nothing. `outcome` says what
+  // the call did: demoted, offered, standing (an offer, gate or completion is
+  // already open), loses, outranked, self, demote-refused.
   _rootVerifyCandidate(t, hex) {
+    this._candidateOutcome = null;
     this._mergeCandidate(t, hex, null, 'verify-closer');
-    this._log('info', 'root-verify-demote', { topic: idHex(t).slice(0, 12), to: hex.slice(0, 10) });
+    this._log('info', 'root-verify-demote', { topic: idHex(t).slice(0, 12), to: hex.slice(0, 10), outcome: this._candidateOutcome ?? null });
   },
 
 };

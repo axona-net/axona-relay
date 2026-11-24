@@ -1182,26 +1182,48 @@ export class AxonaManager {
   //     reached only from its step 5, carrying the release token.
   // `winnerEpoch` is the candidate's epoch when the path knows it (the beacon
   // yield does); null means "unversioned", which the relation treats as 0.
+  // WHAT HAPPENED is left in _candidateOutcome for the caller that logs it
+  // (4.159.0): 'demoted' | 'demote-refused' | 'self' | 'loses' | 'offered' |
+  // 'standing' | 'outranked'. The return value is unchanged.
   _mergeCandidate(topicBig, winnerHex, winnerEpoch, source) {
     const role = this.axonRoles.get(topicBig);
     if (!this._mergeCapable || !role || !role.isRoot || !this._rootClaim.hasCustody(role)) {
-      return this._rootClaim.demote(topicBig, winnerHex, source);
+      const r = this._rootClaim.demote(topicBig, winnerHex, source);
+      this._candidateOutcome = r ? 'demoted' : 'demote-refused';
+      return r;
     }
     const w = lc(winnerHex);
-    if (w === lc(idHex(this.nodeId))) return false;
+    if (w === lc(idHex(this.nodeId))) { this._candidateOutcome = 'self'; return false; }
     const claim = { id: w, epoch: Number.isInteger(winnerEpoch) ? winnerEpoch : 0 };
     if (!this._rootClaim.wins(topicBig, claim)) {
       this._log('info', 'merge-candidate-loses', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, myEpoch: role.epoch | 0 });
+      this._candidateOutcome = 'loses';
       return false;
     }
     if (!role.merge) role.merge = makeMergeState();
     const prev = role.merge.candidate;
+    // THE SAME WINNER AGAIN (4.159.0). A later trigger naming the winner
+    // already recorded is not a second candidate to rank against the first:
+    // it is the trigger _mergeOffer documents ("and from any later trigger
+    // naming the same winner"). Until 4.159.0 it was ranked, the same id does
+    // not win over itself, and the call returned here with no log and no
+    // offer. A record left by a COMPLETED merge then blocked every later
+    // merge to that winner (production, 2026-11-19 to 11-21: a relay re-
+    // promoted after its hold expired and named the closer root 2,666 times).
+    // The record is refreshed, keeping the higher epoch, and _mergeOffer
+    // decides: it refuses while an offer to this winner at this incarnation
+    // stands, or a gate or a completion is open.
+    if (prev && lc(prev.id) === w) {
+      role.merge.candidate = { id: w, epoch: Math.max(prev.epoch | 0, claim.epoch), source, at: this._now() };
+      this._candidateOutcome = this._mergeOffer(topicBig, role) ? 'offered' : 'standing';
+      return false;
+    }
     // A standing candidate is replaced only by one that wins over IT: two
     // paths naming two winners in one tick converge on the relation's answer.
-    if (prev && !RootClaim.claimWins(topicBig, claim, prev, !!this._regionRoles)) return false;
+    if (prev && !RootClaim.claimWins(topicBig, claim, prev, !!this._regionRoles)) { this._candidateOutcome = 'outranked'; return false; }
     role.merge.candidate = { ...claim, source, at: this._now() };
     this._log('info', 'merge-candidate', { topic: idHex(topicBig).slice(0, 12), id: w.slice(0, 10), epoch: claim.epoch, source, cache: role.cache.length, replaced: !!prev });
-    this._mergeOffer(topicBig, role);                       // step 1 of the exchange (d3): OFFER toward the recorded winner
+    this._candidateOutcome = this._mergeOffer(topicBig, role) ? 'offered' : 'standing';   // step 1 of the exchange (d3): OFFER toward the recorded winner
     return false;
   }
 

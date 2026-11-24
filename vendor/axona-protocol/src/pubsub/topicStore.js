@@ -66,11 +66,15 @@ export const topicStoreMethods = {
     // PINS (dual-root 4(d)): a pinned entry is never evicted by the caps. The
     // eviction loop takes the OLDEST UNPINNED entry; with nothing unpinned it
     // stops (the admission arithmetic guarantees pins plus reserve fit).
+    // CUSTODY (4.159.0): a child's export after a completion nobody closed is
+    // kept from the caps the same way, and from nothing else: it expires.
     const pins = role.merge?.pins;
+    const custody = role.merge?.custody;
+    const held = (id) => !!((pins && pins.has(id)) || (custody && custody.has(id)));
     let guard = role.cache.length + 1;
     while ((role.cache.length > this._cacheMax || role.cacheBytes > this._cacheBytes) && guard-- > 0) {
       let i = 0;
-      if (pins && pins.size) { while (i < role.cache.length && pins.has(role.cache[i].msgId)) i++; if (i >= role.cache.length) break; }
+      if ((pins && pins.size) || (custody && custody.size)) { while (i < role.cache.length && held(role.cache[i].msgId)) i++; if (i >= role.cache.length) break; }
       const old = role.cache.splice(i, 1)[0];
       if (!old) break;
       role.cacheIds.delete(old.msgId);
@@ -84,7 +88,7 @@ export const topicStoreMethods = {
     if (role.latestOnly === true && role.cache.length > 1) {
       for (let i = role.cache.length - 2; i >= 0; i--) {
         const old = role.cache[i];
-        if (pins && pins.has(old.msgId)) continue;
+        if (held(old.msgId)) continue;
         role.cache.splice(i, 1);
         role.cacheIds.delete(old.msgId);
         role.cacheBytes -= old.bytes;
@@ -119,6 +123,7 @@ export const topicStoreMethods = {
       const old = role.cache.splice(i, 1)[0];
       role.cacheIds.delete(old.msgId);
       role.cacheBytes -= old.bytes;
+      role.merge?.custody?.delete(old.msgId);                           // custody ends at this node's own TTL
       if (this._tombAuthority) this._taObserveEvict(role, old.msgId);   // Phase 3 shadow (no-op flag-off)
     }
     if (this._tombAuthority) this._taReclaim();                          // Phase 3 shadow: reclaim + retry (no-op flag-off)
@@ -132,6 +137,11 @@ export const topicStoreMethods = {
     for (const [msgId, t] of role.tombstones) {
       if ((t?.exp ?? 0) <= now && !(pins && pins.has(msgId))) role.tombstones.delete(msgId);
     }
+    // CUSTODY (4.159.0): an id this node no longer holds as body or tombstone
+    // is not custody of anything. Runs before _expireCache in the tick, so a
+    // body that expires this tick leaves the set there.
+    const custody = role.merge?.custody;
+    if (custody && custody.size) for (const id of custody) if (!role.cacheIds.has(id) && !role.tombstones.has(id)) custody.delete(id);
     if (role.superseded) for (const [msgId, s] of role.superseded) if ((s?.exp ?? 0) <= now) role.superseded.delete(msgId);   // 4.131.0: swept with the tombstones (Orion e47eb97c)
   },
 
