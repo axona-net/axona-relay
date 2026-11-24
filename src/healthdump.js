@@ -100,6 +100,16 @@ export function buildHealthDump(h, extra = null) {
     // meaningful together (a rate without its denominator is not a rate), and
     // logctx.js renders a structured ctx whole.
     lookahead:       h?.lookahead ?? null,
+    // RETURN-ROUTE CENSUS (kernel 4.161.0). The kernel has counted return
+    // routes since Closer-Born v0.6 and nothing printed them. On 2026-11-24 a
+    // browser tab stayed "attached" for nine hours while this relay's log named
+    // it a failed destination; whether its way back had expired, failed once and
+    // been dropped, or never been recorded could not be read. pubsub is
+    // {armed, live, recorded, used, delivered, fellBack}; routing is {honoured,
+    // unavailable, originated, delivered, fellBack}. null on a kernel older
+    // than 4.161.0 — the key is always present, so a reader never branches on
+    // kernel version. Carried whole: used without delivered is not a rate.
+    returnRoute:     h?.returnRoute ?? null,
     // PER-ROLE ROW. subs/nature/replicaAgeMs arrived with kernel 4.100.0, which
     // stopped health() re-narrowing inspectRoles() to four fields. On an older
     // kernel they are absent and print null — the shape does not change, so a
